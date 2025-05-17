@@ -212,48 +212,37 @@ class Pan123Client:
         return self._request("POST", endpoint, json=json_data, data=data)
 
     def list_files(self,
-                   parent_id: str = "0",
-                   page_no: int = 1,
-                   page_size: int = 100,
-                   order_by: str = None,  # e.g., "fileName", "updateTime"
-                   order_direction: str = None,  # e.g., "asc", "desc"
-                   search_key: str = None,
-                   file_type: str = None,  # API specific, e.g., "folder", "image"
-                   trash: bool = False
+                   parent_id: int = 0,
+                   limit: int = 100,
+                   search_data: str = None,
+                   search_mode: int = None,
+                   last_file_id: int = None
                    ) -> dict:
         """
-        列举指定文件夹下的文件和子文件夹 (使用 /api/v2/file/list)。
+        列举指定文件夹下的文件和子文件夹或执行搜索 (使用 /api/v2/file/list)。
 
-        :param parent_id: 父文件夹ID，根目录为 "0"。
-        :param page_no: 页码。
-        :param page_size: 每页数量。
-        :param order_by: 排序字段。
-        :param order_direction: 排序方向 ('asc' 或 'desc')。
-        :param search_key: 搜索关键词。
-        :param file_type: 文件类型过滤。
-        :param trash: 是否列举回收站内容。
+        :param parent_id: 文件夹ID，根目录传 0。即使提供了 search_data，此参数也必须传递。
+        :param limit: 每页文件数量，最大不超过100。
+        :param search_data: 搜索关键字。如果提供，将进行全局查找。
+        :param search_mode: 搜索模式。0: 全文模糊搜索, 1: 精准搜索。仅在 search_data 提供时有效。
+        :param last_file_id: 翻页查询时上一页最后一个文件的ID。
         :return: API响应的JSON数据字典。
         :raises Pan123APIError: 如果API请求失败。
         """
-        endpoint = "/api/v2/file/list"  # 优先使用V2
+        endpoint = "/api/v2/file/list"
         params = {
-            "parentFileId": parent_id,
-            "pageNo": page_no,
-            "pageSize": page_size,
-            "limit": 100,
-            "trash": 1 if trash else 0,  # API可能期望整数0或1
+            "limit": limit,
+            "parentFileId": parent_id  # 始终传递 parentFileId
         }
-        if order_by:
-            params = order_by
-        if order_direction:
-            params = order_direction
-        if search_key:
-            params["searchKey"] = search_key
-        if file_type:
-            params = file_type
 
-        # 移除值为None的参数，避免发送空值参数
-        params = {k: v for k, v in params.items() if v is not None}
+        if search_data:
+            params["searchData"] = search_data
+            if search_mode is not None:
+                params["searchMode"] = search_mode
+            # parentFileId is still passed, but will be ignored by the API as per user's note.
+
+        if last_file_id is not None:
+            params["lastFileId"] = last_file_id
 
         return self._get(endpoint, params=params)
 
@@ -286,79 +275,62 @@ if __name__ == "__main__":
 
     # 示例：列出根目录的文件和文件夹
     try:
-        print("\n尝试列出根目录文件 (第一页，默认数量):")
-        files_data = client.list_files(parent_id="0")
-        if files_data and 'data' in files_data and 'list' in files_data['data']:
-            print(f"  总数: {files_data['data'].get('count', '未知')}")
-            print(f"  当前页: {files_data['data'].get('pageNo', '未知')}")
-            print(f"  每页数量: {files_data['data'].get('pageSize', '未知')}")
+        print("\n尝试列出根目录文件 (默认数量):")
+        # Using new parameters: parent_id and limit. last_file_id for pagination.
+        files_data = client.list_files(parent_id=0, limit=10)
+        if files_data and 'data' in files_data and 'fileList' in files_data['data'] and isinstance(files_data['data']['fileList'], list):
+            print(f"  本页返回文件数量: {len(files_data['data']['fileList'])}")
+            returned_last_file_id = files_data['data'].get('lastFileId')
+            if returned_last_file_id is not None and returned_last_file_id != -1:  # -1 might mean no more pages
+                print(f"  lastFileId (for next page): {returned_last_file_id}")
+            else:
+                print("  (已是最后一页或无法确定下一页的 lastFileId)")
             print("  文件列表:")
-            for item in files_data['data']['list']:
-                item_type = "文件夹" if item.get('isFolder') else "文件"
+            for item in files_data['data']['fileList']:
+                item_type = "文件夹" if item.get('type') == 1 else "文件"
                 print(
-                    f"    - [{item_type}] {item.get('fileName')} (ID: {item.get('fileID')})")
+                    f"    - [{item_type}] {item.get('filename')} (ID: {item.get('fileId')})")
         else:
             print("  未能获取文件列表或响应格式不符合预期。")
             print(f"  原始响应: {files_data}")
 
     except Pan123APIError as e:
         print(f"列出文件失败: {e}")
-        print(f"  状态码: {e.status_code}")
-        print(f"  错误码: {e.error_code}")
+        if e.status_code:
+            print(f"  状态码: {e.status_code}")
+        if e.error_code:
+            print(f"  错误码: {e.error_code}")
 
-    # 示例：列出根目录的图片文件，按修改时间降序排序
+    # 示例：搜索文件
     try:
-        print("\n尝试列出根目录的图片文件 (按修改时间降序):")
-        # 注意：file_type 和 order_by/order_direction 的具体值需要参考123pan API文档
-        # 这里假设 file_type "image" 是有效的，并且排序字段是 "updateTime"
-        # 实际API可能使用不同的参数名或值
-        # files_data_images = client.list_files(
-        #     parent_id="0",
-        #     file_type="image", # 假设API支持此参数
-        #     order_by="updateTime",
-        #     order_direction="desc"
-        # )
-        # print("由于 file_type, order_by, order_direction 参数在 list_files 中实现有误，暂时跳过此示例。")
-        # print("请修正 list_files 方法中对这些参数的处理逻辑。")
-
-        # 修正后的调用方式 (假设 list_files 已修复)
-        # 假设API文档指明 fileType, orderBy, orderDirection
-        # 并且 list_files 方法内部正确地将这些参数名传递给API
-        # params = {
-        #     "parentID": "0",
-        #     "pageNo": 1,
-        #     "pageSize": 10,
-        #     "fileType": "image", # 假设API使用此参数名
-        #     "orderBy": "updateTime",
-        #     "orderDirection": "desc"
-        # }
-        # files_data_images = client._get("/api/v2/file/list", params=params)
-
-        # 当前 list_files 实现中，order_by, order_direction, file_type 的赋值方式是错误的
-        # 它会将 params 字典覆盖为字符串。
-        # 正确的实现应该是 params.update({"orderBy": order_by}) 等。
-        # 以下调用将基于当前 list_files 的错误实现，可能不会按预期工作。
-        # 为了演示，我们仅使用 parent_id
-        print("  (注意: 当前 list_files 实现中 order_by, order_direction, file_type 参数处理有误)")
-        files_data_images = client.list_files(parent_id="0", page_size=5)
-
-        if files_data_images and 'data' in files_data_images and 'list' in files_data_images['data']:
-            print(f"  图片文件列表 (前 {len(files_data_images['data']['list'])} 项):")
-            for item in files_data_images['data']['list']:
-                item_type = "文件夹" if item.get('isFolder') else "文件"
+        print("\n尝试搜索文件 (全局模糊搜索 'download'):")
+        # Using new search parameters
+        search_results = client.list_files(
+            search_data="mp4", search_mode=0, limit=5)
+        if search_results and 'data' in search_results and 'fileList' in search_results['data'] and isinstance(search_results['data']['fileList'], list):
+            print(f"  搜索结果返回数量: {len(search_results['data']['fileList'])}")
+            returned_last_file_id_search = search_results['data'].get(
+                'lastFileId')
+            if returned_last_file_id_search is not None and returned_last_file_id_search != -1:
                 print(
-                    f"    - [{item_type}] {item.get('fileName')} (ID: {item.get('fileID')}, 更新时间: {item.get('updateTime')})")
+                    f"  lastFileId (for next page of search): {returned_last_file_id_search}")
+            else:
+                print("  (已是最后一页搜索结果或无法确定下一页的 lastFileId)")
+            print("  文件列表:")
+            for item in search_results['data']['fileList']:
+                # Assuming 'type' field still indicates folder/file
+                item_type = "文件夹" if item.get('type') == 1 else "文件"
+                print(
+                    f"    - [{item_type}] {item.get('filename')} (ID: {item.get('fileId')}, Size: {item.get('size')})")
         else:
-            print("  未能获取图片文件列表或响应格式不符合预期。")
-            print(f"  原始响应: {files_data_images}")
+            print("  未能获取搜索结果或响应格式不符合预期。")
+            print(f"  原始响应: {search_results}")
 
     except Pan123APIError as e:
-        print(f"列出图片文件失败: {e}")
-        print(f"  状态码: {e.status_code}")
-        print(f"  错误码: {e.error_code}")
+        print(f"搜索文件失败: {e}")
+        if e.status_code:
+            print(f"  状态码: {e.status_code}")
+        if e.error_code:
+            print(f"  错误码: {e.error_code}")
 
     # 更多操作示例可以按需添加...
-    # 例如:
-    # client.create_folder(parent_id="0", name="我的新文件夹")
-    # client.upload_file(parent_id="0", file_path="/path/to/your/file.txt")
-    # client.download_file(file_id="some_file_id", save_path="/path/to/save/downloaded_file.txt")
