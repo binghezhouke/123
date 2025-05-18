@@ -246,6 +246,21 @@ class Pan123Client:
 
         return self._get(endpoint, params=params)
 
+    def get_download_info(self, file_id: int) -> dict:
+        """
+        获取文件的下载信息，包括下载链接 (使用 /api/v1/file/download_info)。
+
+        :param file_id: 文件ID，必须是一个有效的文件ID。
+        :return: API响应的JSON数据字典，包含downloadUrl等信息。
+        :raises Pan123APIError: 如果API请求失败，或者请求的是一个文件夹而非文件。
+        """
+        endpoint = "/api/v1/file/download_info"
+        params = {
+            "fileId": file_id
+        }
+
+        return self._get(endpoint, params=params)
+
 
 if __name__ == "__main__":
     # CLIENT_ID 和 CLIENT_SECRET 将从 config.json 加载
@@ -328,6 +343,39 @@ if __name__ == "__main__":
 
     except Pan123APIError as e:
         print(f"搜索文件失败: {e}")
+        if e.status_code:
+            print(f"  状态码: {e.status_code}")
+        if e.error_code:
+            print(f"  错误码: {e.error_code}")
+
+    # 示例：获取文件下载链接
+    try:
+        # 假设从前面的搜索或列表操作中获取了有效的文件ID
+        # 这里使用一个示例文件ID，实际使用时应替换为真实的文件ID
+        sample_file_id = None
+
+        # 尝试从搜索结果中获取一个文件ID（非文件夹）
+        if (search_results and 'data' in search_results and 'fileList' in search_results['data'] and
+                isinstance(search_results['data']['fileList'], list)):
+            for item in search_results['data']['fileList']:
+                if item.get('type') != 1:  # 不是文件夹
+                    sample_file_id = item.get('fileId')
+                    break
+
+        if sample_file_id:
+            print(f"\n尝试获取文件下载链接 (文件ID: {sample_file_id}):")
+            download_info = client.get_download_info(sample_file_id)
+            if download_info and 'data' in download_info and 'downloadUrl' in download_info['data']:
+                download_url = download_info['data']['downloadUrl']
+                print(f"  下载链接: {download_url}")
+            else:
+                print("  未能获取下载链接或响应格式不符合预期。")
+                print(f"  原始响应: {download_info}")
+        else:
+            print("\n无法获取文件下载链接示例：未找到有效的文件ID。请确保有可用的文件。")
+
+    except Pan123APIError as e:
+        print(f"获取下载链接失败: {e}")
         if e.status_code:
             print(f"  状态码: {e.status_code}")
         if e.error_code:
