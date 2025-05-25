@@ -97,6 +97,20 @@
                                         <td>{{ file.updateAt }}</td>
                                     </tr>
                                 {% endif %}
+                                {% if webdav_url %}
+                                    <tr>
+                                        <td><strong>WebDAV URL</strong></td>
+                                        <td>
+                                            <div class="input-group">
+                                                <input type="text" class="form-control form-control-sm" id="webdavUrlInput" value="{{ webdav_url }}" readonly>
+                                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyWebdavUrl()">
+                                                    <i class="fas fa-copy"></i> 复制
+                                                </button>
+                                            </div>
+                                            <small class="text-muted">此URL包含认证信息，请妥善保管。</small>
+                                        </td>
+                                    </tr>
+                                {% endif %}
                             </tbody>
                         </table>
 
@@ -247,4 +261,49 @@
         </div>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+{{ super() }}
+<script>
+function copyWebdavUrl() {
+    var copyText = document.getElementById("webdavUrlInput");
+    copyText.select();
+    copyText.setSelectionRange(0, 99999); /* For mobile devices */
+    try {
+        navigator.clipboard.writeText(copyText.value).then(function() {
+            alert("WebDAV URL 已复制到剪贴板！");
+        }, function(err) {
+            console.error('无法复制文本: ', err);
+            // Fallback for older browsers
+            document.execCommand("copy");
+            alert("WebDAV URL 已复制到剪贴板 (fallback)！");
+        });
+    } catch (err) {
+        console.error('Fallback复制错误: ', err);
+        try {
+            document.execCommand("copy");
+            alert("WebDAV URL 已复制到剪贴板 (fallback)！");
+        } catch (e) {
+            alert("复制失败，请手动复制。");
+        }
+    }
+}
+
+// 如果存在下载按钮，则添加事件监听器
+document.addEventListener('DOMContentLoaded', function() {
+    const downloadButtons = document.querySelectorAll('.download-btn');
+    downloadButtons.forEach(button => {
+        button.addEventListener('click', function() {
+            const fileId = this.dataset.fileId;
+            const fileName = this.dataset.fileName;
+            // 这里可以添加获取下载链接的逻辑，例如通过fetch调用后端的API接口
+            // 然后触发下载或显示链接
+            alert(`正在为 ${fileName} (ID: ${fileId}) 获取下载链接...`);
+            // 示例： window.location.href = `/api/download/${fileId}`;
+            // 或者使用 fetch 获取链接并处理
+        });
+    });
+});
+</script>
 {% endblock %}

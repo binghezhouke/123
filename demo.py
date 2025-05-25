@@ -389,6 +389,128 @@ def test_file_path(client: Pan123Client):
         traceback.print_exc()
 
 
+def test_file_operations(client: Pan123Client, file_list):
+    """测试文件操作，如路径获取、下载信息等"""
+    print_separator("测试文件操作")
+
+    try:
+        # 先获取一些文件
+        # print("📁 获取测试文件...") # 如果 file_list 已经传入，可能不再需要重新获取
+        # file_list, _ = client.list_files(parent_id=0, limit=10)
+
+        if not file_list or len(file_list) == 0:
+            print("⚠️ 没有可用的文件进行操作测试，尝试获取...")
+            file_list, _ = client.list_files(parent_id=0, limit=5)
+            if not file_list or len(file_list) == 0:
+                print("   无法获取用于测试的文件。")
+                return
+
+        # 测试下载信息获取
+        test_file = file_list[0]
+        print(
+            f"\n📥 测试获取文件下载信息 (文件ID: {test_file.file_id}, 名称: {test_file.filename})")
+        try:
+            download_info = client.get_download_info(test_file.file_id)
+            if download_info and 'data' in download_info:
+                download_data = download_info['data']
+                download_url = download_data.get('downloadUrl')
+
+                if download_url:
+                    print(f"  ✓ 下载链接: {download_url}")
+                else:
+                    print("  ✗ 未能获取下载链接")
+            else:
+                print("  ✗ 无效的下载信息响应")
+        except Exception as e:
+            print(f"  ✗ 获取下载信息时发生错误: {e}")
+
+        # 测试文件路径获取
+        print(f"🔍 测试获取文件路径 (文件ID: {test_file.file_id})")
+        try:
+            file_path = client.get_file_path(test_file.file_id)
+            if file_path:
+                print(f"  ✓ 文件路径: {file_path}")
+            else:
+                print("  ✗ 未能获取文件路径")
+        except Exception as e:
+            print(f"  ✗ 获取文件路径时发生错误: {e}")
+
+    except Exception as e:
+        print(f"✗ 文件操作测试失败: {e}")
+        traceback.print_exc()
+
+
+def test_webdav_features(client: Pan123Client, file_list):
+    """测试WebDAV相关功能"""
+    print_separator("测试WebDAV功能")
+
+    if not client.is_webdav_available():
+        print("⚠️ WebDAV 未启用或配置不完整，跳过测试。")
+        print(
+            "   请检查 config.json 中的 WEBDAV 配置部分，确保 ENABLED 为 true，并已设置 USERNAME 和 PASSWORD。")
+        return
+
+    print("✓ WebDAV 已启用，开始测试...")
+
+    # 获取WebDAV配置信息
+    webdav_config = client.get_webdav_config()
+    print("\n📋 WebDAV 配置信息:")
+    for key, value in webdav_config.items():
+        if key == 'webdav_password' and value:  # 避免直接打印密码
+            print(f"  - {key}: ******")
+        else:
+            print(f"  - {key}: {value}")
+
+    if not file_list or len(file_list) == 0:
+        print("\n⚠️ 没有可用的文件进行WebDAV URL测试，请先运行文件列表测试。")
+        # 尝试列出一些文件用于测试
+        print("   尝试列出根目录的少量文件用于测试...")
+        try:
+            file_list_for_webdav, _ = client.list_files(limit=2)
+            if not file_list_for_webdav or len(file_list_for_webdav) == 0:
+                print("   未能获取到用于测试的文件。")
+                return
+            file_list = file_list_for_webdav  # 更新为新获取的文件列表
+        except Exception as e:
+            print(f"   列出文件失败: {e}")
+            return
+
+    # 测试获取单个文件的WebDAV URL
+    if file_list and len(file_list) > 0:
+        test_file = file_list[0]
+        print(
+            f"\n🔗 测试获取单个文件的WebDAV URL (文件ID: {test_file.file_id}, 名称: {test_file.filename})")
+        try:
+            webdav_url = client.get_webdav_url(test_file.file_id)
+            if webdav_url:
+                print(f"  ✓ WebDAV URL: {webdav_url}")
+            else:
+                print("  ✗ 未能获取WebDAV URL。")
+        except Exception as e:
+            print(f"  ✗ 获取WebDAV URL时发生错误: {e}")
+
+    # 测试批量获取WebDAV URL
+    file_ids_for_batch = [
+        f.file_id for f in file_list[:3] if f.file_id]  # 取前3个有效ID
+    if file_ids_for_batch:
+        print(f"\n🔗 测试批量获取WebDAV URL (文件IDs: {file_ids_for_batch})")
+        try:
+            batch_urls = client.get_batch_webdav_urls(file_ids_for_batch)
+            if batch_urls:
+                print("  ✓ 批量获取结果:")
+                for file_id, url in batch_urls.items():
+                    if url:
+                        print(f"    - 文件ID {file_id}: {url}")
+                    else:
+                        print(f"    - 文件ID {file_id}: 未能获取URL")
+            else:
+                print("  ✗ 批量获取未能返回结果。")
+        except Exception as e:
+            print(f"  ✗ 批量获取WebDAV URL时发生错误: {e}")
+    else:
+        print("\n⚠️ 没有足够的文件ID进行批量WebDAV URL测试。")
+
+
 def main():
     """主函数"""
     print("🚀 Pan123 API 重构版本功能测试")
@@ -427,6 +549,12 @@ def main():
 
             # 9. 测试错误处理
             test_error_handling(client)
+
+            # 10. 测试文件操作
+            test_file_operations(client, file_list)
+
+            # 11. 测试WebDAV功能
+            test_webdav_features(client, file_list)
 
     except KeyboardInterrupt:
         print("\n\n⚠️ 用户中断测试")

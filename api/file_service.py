@@ -3,6 +3,7 @@
 """
 import time
 from typing import List, Dict, Any, Tuple, Optional
+from urllib.parse import quote  # 添加导入
 from .http_client import RequestHandler
 from .cache import FileCacheManager
 from .exceptions import ValidationError
@@ -12,9 +13,10 @@ from .models import File, FileList
 class FileService:
     """文件操作服务"""
 
-    def __init__(self, http_client: RequestHandler, cache_manager: FileCacheManager = None):
+    def __init__(self, http_client: RequestHandler, cache_manager: FileCacheManager = None, config: Dict[str, Any] = None):
         self.http_client = http_client
         self.cache_manager = cache_manager
+        self.config = config or {}
 
     def list_files(self,
                    parent_id: int = 0,
@@ -405,3 +407,39 @@ class FileService:
         else:
             self.cache_manager.clear_all_cache()
             print("已清除所有文件缓存")
+
+    def get_webdav_url(self, file_id: int, use_cache: bool = True) -> Optional[str]:
+        """
+        获取文件的WebDAV URL
+
+        :param file_id: 文件ID
+        :param use_cache: 是否使用缓存，默认为True
+        :return: WebDAV格式的URL，如果文件不存在或配置错误则返回None
+        """
+        # 获取文件路径
+        file_path = self.get_file_path(file_id, use_cache=use_cache)
+        if not file_path:
+            print(f"无法获取文件路径，文件ID: {file_id}")
+            return None
+
+        # 检查配置是否包含WebDAV所需信息
+        webdav_user = self.config.get('webdav_user')
+        webdav_password = self.config.get('webdav_password')
+        webdav_host = self.config.get(
+            'webdav_host', 'webdav-1836076489.pd1.123pan.cn')
+
+        if not webdav_user or not webdav_password:
+            print("缺少WebDAV配置：用户名或密码未设置")
+            return None
+
+        # 构建WebDAV URL，去掉路径开头的斜杠
+        if file_path.startswith('/'):
+            file_path = file_path[1:]
+
+        # 对文件路径进行URL编码
+        encoded_file_path = quote(file_path)
+
+        webdav_url = f"https://{webdav_user}:{webdav_password}@{webdav_host}/webdav/{encoded_file_path}"
+        print(f"已生成WebDAV URL，文件ID: {file_id}")
+
+        return webdav_url

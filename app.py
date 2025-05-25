@@ -163,9 +163,18 @@ def file_detail(file_id):
             except Pan123APIError:
                 pass  # 忽略下载链接获取失败
 
+        # 获取WebDAV URL
+        webdav_url = None
+        if client.is_webdav_available():
+            try:
+                webdav_url = client.get_webdav_url(file_id)
+            except Exception as e:
+                print(f"获取WebDAV URL失败: {e}")  # 记录错误，但不中断页面
+
         return render_template('file_detail.html',
                                file=file_info,
-                               download_url=download_url)
+                               download_url=download_url,
+                               webdav_url=webdav_url)
 
     except Pan123APIError as e:
         flash(f'获取文件详情失败: {e}', 'error')

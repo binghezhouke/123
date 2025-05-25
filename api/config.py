@@ -52,3 +52,31 @@ class ConfigManager:
         """获取客户端凭据"""
         config = self.load_config()
         return config['CLIENT_ID'], config['CLIENT_SECRET']
+
+    def get_webdav_config(self) -> Dict[str, Any]:
+        """
+        获取WebDAV配置
+
+        :return: 包含WebDAV配置的字典
+        """
+        config = self.load_config()
+        webdav_config = config.get('WEBDAV', {})
+
+        # 提取基本配置
+        webdav_user = webdav_config.get('USERNAME')
+        webdav_password = webdav_config.get('PASSWORD')
+        webdav_host = webdav_config.get('BASE_URL', 'webdav-1836076489.pd1.123pan.cn')
+
+        # 如果BASE_URL包含了完整URL，则提取主机部分
+        if webdav_host and webdav_host.startswith('http'):
+            from urllib.parse import urlparse
+            parsed_url = urlparse(webdav_host)
+            webdav_host = parsed_url.netloc
+
+        # 返回格式化的配置
+        return {
+            'webdav_user': webdav_user,
+            'webdav_password': webdav_password,
+            'webdav_host': webdav_host,
+            'webdav_enabled': webdav_config.get('ENABLED', False)
+        }

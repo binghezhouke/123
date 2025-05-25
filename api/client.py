@@ -58,8 +58,12 @@ class Pan123Client:
             self.cache_manager = self._init_cache(
                 redis_host, redis_port, redis_db, redis_password)
 
+        # 获取WebDAV配置
+        self.webdav_config = self.config_manager.get_webdav_config()
+
         # 初始化文件服务
-        self.file_service = FileService(self.http_client, self.cache_manager)
+        self.file_service = FileService(
+            self.http_client, self.cache_manager, self.webdav_config)
 
         # 确保token有效
         self.token_manager.ensure_valid_token()
@@ -115,6 +119,47 @@ class Pan123Client:
     def clear_file_cache(self, file_id: int = None):
         """清除文件缓存"""
         self.file_service.clear_file_cache(file_id)
+
+    # WebDAV 方法
+    def is_webdav_available(self) -> bool:
+        """检查WebDAV是否在配置中启用并可用"""
+        return (
+            self.webdav_config.get('webdav_enabled', False) and
+            self.webdav_config.get('webdav_user') is not None and
+            self.webdav_config.get('webdav_password') is not None
+        )
+
+    def get_webdav_config(self) -> dict:
+        """获取WebDAV的配置信息"""
+        return self.webdav_config
+
+    def get_webdav_url(self, file_id: int, use_cache: bool = True) -> Optional[str]:
+        """
+        获取单个文件的WebDAV URL。
+        URL 格式包含认证信息: https://user:password@host/webdav/path
+        """
+        if not self.is_webdav_available():
+            print("WebDAV未启用或配置不完整。")
+            return None
+        return self.file_service.get_webdav_url(file_id, use_cache)
+
+    def get_batch_webdav_urls(self, file_ids: list[int], use_cache: bool = True) -> dict[int, Optional[str]]:
+        """
+        批量获取文件的WebDAV URL。
+
+        :param file_ids: 文件ID列表
+        :param use_cache: 是否使用缓存
+        :return: 一个字典，键是文件ID，值是对应的WebDAV URL或None
+        """
+        if not self.is_webdav_available():
+            print("WebDAV未启用或配置不完整。")
+            return {file_id: None for file_id in file_ids}
+
+        results = {}
+        for file_id in file_ids:
+            results[file_id] = self.file_service.get_webdav_url(
+                file_id, use_cache)
+        return results
 
     # 实用方法
     def get_cache_stats(self) -> dict:

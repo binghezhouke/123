@@ -1,4 +1,10 @@
 {
     "CLIENT_ID": "YOUR_CLIENT_ID_HERE",
-    "CLIENT_SECRET": "YOUR_CLIENT_SECRET_HERE"
+    "CLIENT_SECRET": "YOUR_CLIENT_SECRET_HERE",
+    WEBDAV": {
+    "ENABLED": true,
+    "USERNAME": "your_webdav_username",
+    "PASSWORD": "your_webdav_password",
+    "BASE_URL": "webdav-1836076489.pd1.123pan.cn"
+  }
 }
