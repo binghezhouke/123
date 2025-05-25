@@ -185,19 +185,14 @@ def file_detail(file_id):
             flash('API客户端未初始化', 'error')
             return redirect(url_for('index'))
 
-        # 获取文件详情
-        files_info = client.get_files_info([file_id])
+        # 使用API客户端的缓存功能获取文件详情
+        file_info = client.get_file_info_single(file_id, use_cache=True)
 
-        if not files_info or 'data' not in files_info or 'fileList' not in files_info['data']:
-            flash('获取文件详情失败', 'error')
-            return redirect(url_for('index'))
-
-        file_list = files_info['data']['fileList']
-        if not file_list:
+        if not file_info:
             flash('文件不存在', 'error')
             return redirect(url_for('index'))
 
-        file_info = file_list[0]
+        # 处理文件数据
         file_info['size_formatted'] = format_file_size(
             file_info.get('size', 0))
         file_info['category_name'] = get_category_name(
@@ -319,7 +314,14 @@ def init_client():
     """初始化API客户端"""
     global client
     try:
-        client = Pan123Client()
+        # 初始化API客户端，启用Redis缓存
+        client = Pan123Client(
+            redis_host='192.168.2.254',
+            redis_port=6379,
+            redis_db=0,
+            redis_password=None,
+            enable_cache=True
+        )
         print("✓ 123云盘API客户端初始化成功")
         return True
     except Exception as e:

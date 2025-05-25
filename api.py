@@ -1,7 +1,9 @@
 import requests
 import time
 import json
-from datetime import datetime, timezone  # 新增导入
+import redis
+import pickle
+from datetime import datetime, timezone, timedelta  # 新增导入
 
 
 class Pan123APIError(Exception):
@@ -13,6 +15,150 @@ class Pan123APIError(Exception):
         self.error_code = error_code
 
 
+class FileCacheManager:
+    """文件信息缓存管理器"""
+
+    def __init__(self, redis_client, default_ttl=3600):
+        """
+        初始化缓存管理器
+        :param redis_client: Redis客户端实例
+        :param default_ttl: 默认缓存过期时间（秒），默认1小时
+        """
+        self.redis_client = redis_client
+        self.default_ttl = default_ttl
+        self.cache_prefix = "file_cache:"
+        self.fetch_time_prefix = "fetch_time:"
+
+    def _get_cache_key(self, file_id):
+        """获取文件缓存键"""
+        return f"{self.cache_prefix}{file_id}"
+
+    def _get_fetch_time_key(self, file_id):
+        """获取文件获取时间缓存键"""
+        return f"{self.fetch_time_prefix}{file_id}"
+
+    def should_use_cache(self, file_id, file_update_time=None):
+        """
+        判断是否应该使用缓存
+        :param file_id: 文件ID
+        :param file_update_time: 文件更新时间字符串
+        :return: (should_use_cache, cached_data)
+        """
+        if not self.redis_client:
+            return False, None
+
+        try:
+            # 获取缓存的文件信息和获取时间
+            cache_key = self._get_cache_key(file_id)
+            fetch_time_key = self._get_fetch_time_key(file_id)
+
+            cached_data = self.redis_client.get(cache_key)
+            fetch_time_str = self.redis_client.get(fetch_time_key)
+
+            if not cached_data or not fetch_time_str:
+                return False, None
+
+            # 反序列化缓存数据
+            cached_file_info = pickle.loads(cached_data)
+            fetch_time = datetime.fromisoformat(fetch_time_str.decode('utf-8'))
+
+            # 如果没有文件更新时间，直接使用缓存（在缓存有效期内）
+            if not file_update_time:
+                return True, cached_file_info
+
+            # 解析文件更新时间
+            try:
+                # 尝试解析不同格式的时间字符串
+                if isinstance(file_update_time, str):
+                    # 处理常见的时间格式
+                    for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S', '%Y-%m-%d']:
+                        try:
+                            file_update_dt = datetime.strptime(
+                                file_update_time, fmt)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        # 如果无法解析时间格式，直接使用缓存
+                        return True, cached_file_info
+                else:
+                    file_update_dt = file_update_time
+
+                # 如果文件更新时间不大于获取时间，使用缓存
+                if file_update_dt <= fetch_time:
+                    return True, cached_file_info
+
+            except (ValueError, TypeError):
+                # 时间解析失败，使用缓存
+                return True, cached_file_info
+
+            return False, None
+
+        except Exception as e:
+            print(f"缓存检查失败: {e}")
+            return False, None
+
+    def set_cache(self, file_id, file_info, ttl=None):
+        """
+        设置文件信息缓存
+        :param file_id: 文件ID
+        :param file_info: 文件信息
+        :param ttl: 缓存过期时间（秒）
+        """
+        if not self.redis_client:
+            return
+
+        try:
+            cache_key = self._get_cache_key(file_id)
+            fetch_time_key = self._get_fetch_time_key(file_id)
+
+            # 序列化文件信息
+            cached_data = pickle.dumps(file_info)
+            fetch_time = datetime.now().isoformat()
+
+            ttl = ttl or self.default_ttl
+
+            # 设置缓存
+            self.redis_client.setex(cache_key, ttl, cached_data)
+            self.redis_client.setex(fetch_time_key, ttl, fetch_time)
+
+        except Exception as e:
+            print(f"设置缓存失败: {e}")
+
+    def delete_cache(self, file_id):
+        """删除指定文件的缓存"""
+        if not self.redis_client:
+            return
+
+        try:
+            cache_key = self._get_cache_key(file_id)
+            fetch_time_key = self._get_fetch_time_key(file_id)
+
+            self.redis_client.delete(cache_key)
+            self.redis_client.delete(fetch_time_key)
+
+        except Exception as e:
+            print(f"删除缓存失败: {e}")
+
+    def clear_all_cache(self):
+        """清空所有文件缓存"""
+        if not self.redis_client:
+            return
+
+        try:
+            # 获取所有相关的键
+            cache_keys = self.redis_client.keys(f"{self.cache_prefix}*")
+            fetch_time_keys = self.redis_client.keys(
+                f"{self.fetch_time_prefix}*")
+
+            all_keys = cache_keys + fetch_time_keys
+            if all_keys:
+                self.redis_client.delete(*all_keys)
+
+        except Exception as e:
+            print(f"清空缓存失败: {e}")
+
+
 class Pan123Client:
     BASE_URL = "https://open-api.123pan.com"
     TOKEN_ENDPOINT = "/api/v1/access_token"
@@ -20,7 +166,7 @@ class Pan123Client:
     TOKEN_CACHE_FILE = ".pan123_api_token_cache.json"  # 新增：令牌缓存文件名
     CONFIG_FILE = "config.json"  # 新增：配置文件名
 
-    def __init__(self, base_url: str = None):  # 修改：移除 client_id 和 client_secret 参数
+    def __init__(self, base_url: str = None, redis_host: str = 'localhost', redis_port: int = 6379, redis_db: int = 0, redis_password: str = None, enable_cache: bool = True):  # 修改：添加Redis参数
         config = self._load_config()
         self.client_id = config.get("CLIENT_ID")
         self.client_secret = config.get("CLIENT_SECRET")
@@ -34,6 +180,27 @@ class Pan123Client:
         self._token_expires_at = 0
         self.session = requests.Session()
         self.session.headers.update({"Platform": self.PLATFORM_HEADER})
+
+        # 初始化Redis缓存
+        self.redis_client = None
+        self.cache_manager = None
+        if enable_cache:
+            try:
+                self.redis_client = redis.Redis(
+                    host=redis_host,
+                    port=redis_port,
+                    db=redis_db,
+                    password=redis_password,
+                    decode_responses=False  # 保持二进制模式以支持pickle
+                )
+                # 测试Redis连接
+                self.redis_client.ping()
+                self.cache_manager = FileCacheManager(self.redis_client)
+                print("✓ Redis缓存初始化成功")
+            except Exception as e:
+                print(f"✗ Redis缓存初始化失败: {e}")
+                self.redis_client = None
+                self.cache_manager = None
 
         # 初始化时即确保token有效 (会先尝试从缓存加载)
         self._ensure_token()
@@ -261,11 +428,12 @@ class Pan123Client:
 
         return self._get(endpoint, params=params)
 
-    def get_files_info(self, file_ids: list) -> dict:
+    def get_files_info(self, file_ids: list, use_cache: bool = True) -> dict:
         """
-        获取多个文件的详情信息 (使用 /api/v1/file/infos)。
+        获取多个文件的详情信息 (使用 /api/v1/file/infos)，支持缓存。
 
         :param file_ids: 文件ID列表，必须是有效的文件ID数组。
+        :param use_cache: 是否使用缓存，默认为True。
         :return: API响应的JSON数据字典，包含fileList等信息。
                  响应格式: {'code': 0, 'message': 'ok', 'data': {'fileList': [...]}}
         :raises Pan123APIError: 如果API请求失败。
@@ -278,12 +446,117 @@ class Pan123Client:
             if not isinstance(file_id, int):
                 raise ValueError(f"文件ID必须是整数，获得: {type(file_id)}")
 
+        # 如果不使用缓存或缓存不可用，直接调用API
+        if not use_cache or not self.cache_manager:
+            return self._fetch_files_info_from_api(file_ids)
+
+        # 使用缓存逻辑
+        cached_files = []
+        missing_file_ids = []
+
+        # 检查每个文件ID的缓存状态
+        for file_id in file_ids:
+            should_use_cache, cached_data = self.cache_manager.should_use_cache(
+                file_id)
+            if should_use_cache and cached_data:
+                cached_files.append(cached_data)
+                print(f"使用缓存获取文件信息: {file_id}")
+            else:
+                missing_file_ids.append(file_id)
+
+        # 如果所有文件都有缓存，直接返回
+        if not missing_file_ids:
+            return {
+                'code': 0,
+                'message': 'ok',
+                'data': {
+                    'fileList': cached_files
+                }
+            }
+
+        # 从API获取缺失的文件信息
+        print(f"从API获取文件信息: {missing_file_ids}")
+        api_result = self._fetch_files_info_from_api(missing_file_ids)
+
+        if api_result and 'data' in api_result and 'fileList' in api_result['data']:
+            api_files = api_result['data']['fileList']
+
+            # 缓存新获取的文件信息
+            for file_info in api_files:
+                file_id = file_info.get('fileId')
+                if file_id:
+                    # 检查是否应该基于更新时间使用缓存
+                    update_time = file_info.get('updateAt')
+                    should_use_cache, _ = self.cache_manager.should_use_cache(
+                        file_id, update_time)
+
+                    if not should_use_cache:
+                        self.cache_manager.set_cache(file_id, file_info)
+                        print(f"文件信息已缓存: {file_id}")
+
+            # 合并缓存和API结果
+            all_files = cached_files + api_files
+            return {
+                'code': 0,
+                'message': 'ok',
+                'data': {
+                    'fileList': all_files
+                }
+            }
+        else:
+            # API调用失败，如果有缓存数据则返回，否则返回API错误
+            if cached_files:
+                return {
+                    'code': 0,
+                    'message': 'ok',
+                    'data': {
+                        'fileList': cached_files
+                    }
+                }
+            else:
+                return api_result
+
+    def _fetch_files_info_from_api(self, file_ids: list) -> dict:
+        """
+        从API获取文件信息的内部方法
+        """
         endpoint = "/api/v1/file/infos"
         json_data = {
             "fileIds": file_ids
         }
-
         return self._post(endpoint, json_data=json_data)
+
+    def get_file_info_single(self, file_id: int, use_cache: bool = True) -> dict:
+        """
+        获取单个文件的详情信息，支持缓存。
+
+        :param file_id: 文件ID
+        :param use_cache: 是否使用缓存，默认为True
+        :return: 文件信息字典，如果文件不存在返回None
+        """
+        result = self.get_files_info([file_id], use_cache=use_cache)
+
+        if (result and 'data' in result and 'fileList' in result['data']
+                and result['data']['fileList']):
+            return result['data']['fileList'][0]
+
+        return None
+
+    def clear_file_cache(self, file_id: int = None):
+        """
+        清除文件缓存
+
+        :param file_id: 指定文件ID，如果为None则清除所有缓存
+        """
+        if not self.cache_manager:
+            return
+
+        if file_id is not None:
+            self.cache_manager.delete_cache(file_id)
+            print(f"已清除文件 {file_id} 的缓存")
+        else:
+            self.cache_manager.clear_all_cache()
+            print("已清除所有文件缓存")
 
 
 if __name__ == "__main__":
