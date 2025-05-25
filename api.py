@@ -261,6 +261,30 @@ class Pan123Client:
 
         return self._get(endpoint, params=params)
 
+    def get_files_info(self, file_ids: list) -> dict:
+        """
+        获取多个文件的详情信息 (使用 /api/v1/file/infos)。
+
+        :param file_ids: 文件ID列表，必须是有效的文件ID数组。
+        :return: API响应的JSON数据字典，包含fileList等信息。
+                 响应格式: {'code': 0, 'message': 'ok', 'data': {'fileList': [...]}}
+        :raises Pan123APIError: 如果API请求失败。
+        """
+        if not file_ids or not isinstance(file_ids, list):
+            raise ValueError("file_ids 必须是一个非空的列表")
+
+        # 验证所有ID都是数字
+        for file_id in file_ids:
+            if not isinstance(file_id, int):
+                raise ValueError(f"文件ID必须是整数，获得: {type(file_id)}")
+
+        endpoint = "/api/v1/file/infos"
+        json_data = {
+            "fileIds": file_ids
+        }
+
+        return self._post(endpoint, json_data=json_data)
+
 
 if __name__ == "__main__":
     # CLIENT_ID 和 CLIENT_SECRET 将从 config.json 加载
@@ -380,5 +404,82 @@ if __name__ == "__main__":
             print(f"  状态码: {e.status_code}")
         if e.error_code:
             print(f"  错误码: {e.error_code}")
+
+    # 示例：获取多个文件详情
+    try:
+        # 收集一些文件ID用于批量获取详情
+        sample_file_ids = []
+
+        # 从搜索结果中收集文件ID
+        if (search_results and 'data' in search_results and 'fileList' in search_results['data'] and
+                isinstance(search_results['data']['fileList'], list)):
+            for item in search_results['data']['fileList']:
+                file_id = item.get('fileId')
+                if file_id:
+                    sample_file_ids.append(file_id)
+                    if len(sample_file_ids) >= 3:  # 最多收集3个文件ID作为示例
+                        break
+
+        # 从文件列表中也收集一些文件ID
+        if (files_data and 'data' in files_data and 'fileList' in files_data['data'] and
+                isinstance(files_data['data']['fileList'], list) and len(sample_file_ids) < 3):
+            for item in files_data['data']['fileList']:
+                file_id = item.get('fileId')
+                if file_id and file_id not in sample_file_ids:
+                    sample_file_ids.append(file_id)
+                    if len(sample_file_ids) >= 3:  # 最多收集3个文件ID作为示例
+                        break
+
+        if sample_file_ids:
+            print(f"\n尝试获取多个文件详情 (文件ID: {sample_file_ids}):")
+            files_info = client.get_files_info(sample_file_ids)
+            if files_info and 'data' in files_info and 'fileList' in files_info['data']:
+                file_list = files_info['data']['fileList']
+                print(f"  成功获取 {len(file_list)} 个文件的详情:")
+                for file_info in file_list:
+                    file_type = "文件夹" if file_info.get('type') == 1 else "文件"
+                    category_map = {0: "未知", 1: "音频", 2: "视频", 3: "图片"}
+                    category = category_map.get(
+                        file_info.get('category', 0), "未知")
+
+                    # 格式化文件大小
+                    size_bytes = file_info.get('size', 0)
+                    if size_bytes >= 1024 * 1024 * 1024:  # GB
+                        size_str = f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+                    elif size_bytes >= 1024 * 1024:  # MB
+                        size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
+                    elif size_bytes >= 1024:  # KB
+                        size_str = f"{size_bytes / 1024:.2f} KB"
+                    else:
+                        size_str = f"{size_bytes} 字节"
+
+                    print(
+                        f"    - [{file_type}] {file_info.get('filename')} (ID: {file_info.get('fileId')})")
+                    print(
+                        f"      大小: {size_str}, 分类: {category}")
+                    print(f"      创建时间: {file_info.get('createAt', 'N/A')}")
+                    print(f"      更新时间: {file_info.get('updateAt', 'N/A')}")
+                    print(f"      MD5: {file_info.get('etag', 'N/A')}")
+                    print(f"      存储节点: {file_info.get('storageNode', 'N/A')}")
+                    print(
+                        f"      父目录ID: {file_info.get('parentFileId', 'N/A')}")
+                    print(f"      审核状态: {file_info.get('status', 'N/A')}")
+                    print(
+                        f"      回收站状态: {'是' if file_info.get('trashed') == 1 else '否'}")
+                    print("      ---")
+            else:
+                print("  未能获取文件详情或响应格式不符合预期。")
+                print(f"  原始响应: {files_info}")
+        else:
+            print("\n无法获取文件详情示例：未找到有效的文件ID。请确保有可用的文件。")
+
+    except Pan123APIError as e:
+        print(f"获取文件详情失败: {e}")
+        if e.status_code:
+            print(f"  状态码: {e.status_code}")
+        if e.error_code:
+            print(f"  错误码: {e.error_code}")
+    except ValueError as e:
+        print(f"参数错误: {e}")
 
     # 更多操作示例可以按需添加...
