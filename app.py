@@ -79,7 +79,7 @@ def index():
         last_file_id = request.args.get('last_file_id', type=int)
 
         # 获取文件列表，返回FileList对象
-        file_list, next_last_file_id = client.list_files_as_objects(
+        file_list, next_last_file_id = client.list_files(
             parent_id=parent_id,
             limit=limit,
             last_file_id=last_file_id
@@ -116,7 +116,7 @@ def search():
             return render_template('search.html', files=[], search_query='')
 
         # 执行搜索，返回FileList对象
-        file_list, next_last_file_id = client.list_files_as_objects(
+        file_list, next_last_file_id = client.list_files(
             search_data=search_query,
             search_mode=search_mode,
             limit=limit,
@@ -219,7 +219,7 @@ def api_files_batch():
             return jsonify({'error': '没有有效的文件ID'}), 400
 
         # 使用FileList对象
-        file_list = client.get_files_info_as_objects(file_ids)
+        file_list = client.get_files_info(file_ids)
 
         if file_list and len(file_list) > 0:
             # 转换为字典列表以保持API兼容性

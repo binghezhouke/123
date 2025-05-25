@@ -85,9 +85,12 @@ class Pan123Client:
     # 文件操作方法（委托给file_service）
     def list_files(self, parent_id: int = 0, limit: int = 100,
                    search_data: str = None, search_mode: int = None,
-                   last_file_id: int = None):
+                   last_file_id: int = None, auto_fetch_all: bool = False,
+                   qps_limit: float = 1.0, max_pages: int = 100):
         """列出文件"""
-        return self.file_service.list_files(parent_id, limit, search_data, search_mode, last_file_id)
+        return self.file_service.list_files(
+            parent_id, limit, search_data, search_mode, last_file_id,
+            auto_fetch_all, qps_limit, max_pages)
 
     def get_files_info(self, file_ids: list, use_cache: bool = True):
         """获取多个文件信息"""
@@ -96,6 +99,14 @@ class Pan123Client:
     def get_file_info_single(self, file_id: int, use_cache: bool = True):
         """获取单个文件信息"""
         return self.file_service.get_file_info_single(file_id, use_cache)
+
+    def get_file_path(self, file_id: int, use_cache: bool = True):
+        """获取文件完整路径"""
+        return self.file_service.get_file_path(file_id, use_cache)
+
+    def get_file_path_with_details(self, file_id: int, use_cache: bool = True):
+        """获取文件完整路径及详细信息"""
+        return self.file_service.get_file_path_with_details(file_id, use_cache)
 
     def get_download_info(self, file_id: int):
         """获取下载信息"""

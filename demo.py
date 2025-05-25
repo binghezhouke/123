@@ -115,6 +115,62 @@ def test_search_files(client: Pan123Client):
         return None
 
 
+def test_pagination(client: Pan123Client):
+    """测试分页功能"""
+    print_separator("测试分页功能")
+
+    try:
+        import time
+
+        print("📄 测试手动分页...")
+        # 测试手动分页
+        page1_files, next_id = client.list_files(parent_id=0, limit=1)
+        print(f"✓ 第1页: 获取到 {len(page1_files)} 个文件")
+
+        if next_id:
+            page2_files, next_id2 = client.list_files(
+                parent_id=0, limit=100, last_file_id=next_id)
+            print(f"✓ 第2页: 获取到 {len(page2_files)} 个文件")
+            print(f"✓ 下一页ID: {next_id2}")
+
+        print("\n🔄 测试自动分页（QPS限制: 1.5 req/s）...")
+        start_time = time.time()
+
+        # 测试自动获取所有分页
+        all_files, _ = client.list_files(
+            parent_id=0,
+            limit=8,  # 每页8个文件，便于测试分页
+            auto_fetch_all=True,
+            qps_limit=1.5  # 每秒1.5个请求
+        )
+
+        end_time = time.time()
+        elapsed = end_time - start_time
+
+        print(f"✓ 自动分页完成:")
+        print(f"  - 总文件数: {len(all_files)}")
+        print(f"  - 总耗时: {elapsed:.2f} 秒")
+        if elapsed > 0:
+            print(f"  - 实际QPS: {len(all_files) / elapsed:.2f}")
+
+        # 显示前几个文件
+        print(f"\n📋 前5个文件:")
+        for i, file_obj in enumerate(all_files.files[:5]):
+            file_type = "📁" if file_obj.is_folder else "📄"
+            print(
+                f"  {i+1}. {file_type} {file_obj.filename} ({file_obj.size_formatted})")
+
+        return all_files
+
+    except Pan123APIError as e:
+        print(f"✗ 分页测试失败: {e}")
+        return None
+    except Exception as e:
+        print(f"✗ 未知错误: {e}")
+        traceback.print_exc()
+        return None
+
+
 def test_file_details(client: Pan123Client, file_list):
     """测试文件详情获取"""
     print_separator("测试文件详情获取")
@@ -270,6 +326,69 @@ def test_error_handling(client: Pan123Client):
         traceback.print_exc()
 
 
+def test_file_path(client: Pan123Client):
+    """测试文件路径获取功能"""
+    print_separator("测试文件路径获取功能")
+
+    try:
+        # 先获取一些文件
+        print("📁 获取测试文件...")
+        file_list, _ = client.list_files(parent_id=0, limit=10)
+
+        if not file_list or len(file_list) == 0:
+            print("⚠️ 没有找到测试文件")
+            return
+
+        # 测试文件路径获取
+        test_files = file_list.files[:3]  # 取前3个文件进行测试
+
+        for i, file_obj in enumerate(test_files):
+            print(f"\n📄 测试文件 {i+1}: {file_obj.filename}")
+            print(f"   文件ID: {file_obj.file_id}")
+            print(f"   父目录ID: {file_obj.parent_file_id}")
+
+            # 获取简单路径
+            print("   🔍 获取文件路径...")
+            file_path = client.get_file_path(file_obj.file_id)
+            if file_path:
+                print(f"   ✓ 完整路径: {file_path}")
+            else:
+                print("   ✗ 获取路径失败")
+
+            # 获取详细路径信息
+            print("   🔍 获取详细路径信息...")
+            path_details = client.get_file_path_with_details(file_obj.file_id)
+            if path_details:
+                print(f"   ✓ 详细路径: {path_details['full_path']}")
+                print(f"   ✓ 路径深度: {path_details['depth']}")
+                print(f"   ✓ 路径组件数: {len(path_details['path_components'])}")
+
+                # 显示路径组件
+                if path_details['path_components']:
+                    print("   📂 路径组件:")
+                    for j, component in enumerate(path_details['path_components']):
+                        indent = "   " + "  " * (j + 1)
+                        comp_type = "📁" if component['is_folder'] else "📄"
+                        print(
+                            f"{indent}{comp_type} {component['name']} (ID: {component['file_id']})")
+            else:
+                print("   ✗ 获取详细路径失败")
+
+        # 测试根目录文件的路径
+        print(f"\n🏠 测试根目录文件路径...")
+        if test_files:
+            root_file = test_files[0]
+            if root_file.parent_file_id == 0:
+                print(f"   文件 '{root_file.filename}' 在根目录")
+                path = client.get_file_path(root_file.file_id)
+                print(f"   根目录文件路径: {path}")
+
+    except Exception as e:
+        print(f"✗ 文件路径测试失败: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 def main():
     """主函数"""
     print("🚀 Pan123 API 重构版本功能测试")
@@ -290,17 +409,23 @@ def main():
             # 3. 测试文件搜索
             search_results = test_search_files(client)
 
-            # 4. 测试文件详情（使用列表结果）
+            # 4. 测试分页功能
+            paginated_files = test_pagination(client)
+
+            # 5. 测试文件详情（使用列表结果）
             test_files = file_list if file_list else search_results
             detailed_files = test_file_details(client, test_files)
 
-            # 5. 测试下载链接
+            # 6. 测试下载链接
             test_download_info(client, test_files)
 
-            # 6. 测试缓存操作
+            # 7. 测试文件路径功能
+            test_file_path(client)
+
+            # 8. 测试缓存操作
             test_cache_operations(client)
 
-            # 7. 测试错误处理
+            # 9. 测试错误处理
             test_error_handling(client)
 
     except KeyboardInterrupt:
