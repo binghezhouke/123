@@ -1,0 +1,203 @@
+{% extends "base.html" %}
+
+{% block title %}文件列表 - 123云盘浏览器{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <!-- 面包屑导航 -->
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item">
+                    <a href="{{ url_for('index') }}"><i class="fas fa-home"></i> 根目录</a>
+                </li>
+                {% if parent_id != 0 %}
+                <li class="breadcrumb-item active" aria-current="page">文件夹 ID: {{ parent_id }}</li>
+                {% endif %}
+            </ol>
+        </nav>
+
+        <!-- 工具栏 -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2><i class="fas fa-folder-open"></i> 文件列表</h2>
+            <div class="btn-group">
+                <button type="button" class="btn btn-outline-secondary" onclick="refreshFiles()">
+                    <i class="fas fa-sync-alt"></i> 刷新
+                </button>
+                <button type="button" class="btn btn-outline-primary" onclick="toggleView()">
+                    <i class="fas fa-th-list"></i> 切换视图
+                </button>
+            </div>
+        </div>
+
+        <!-- 文件列表 -->
+        {% if files %}
+        <div class="file-list">
+            <div class="row" id="fileContainer">
+                {% for file in files %}
+                <div class="col-12 mb-2 file-item" data-file-id="{{ file.fileId }}">
+                    <div class="card h-100 file-card">
+                        <div class="card-body d-flex align-items-center">
+                            <!-- 文件图标 -->
+                            <div class="file-icon me-3">
+                                <i class="{{ file.icon }} fa-2x text-{{ 'warning' if file.is_folder else 'primary' }}"></i>
+                            </div>
+                            
+                            <!-- 文件信息 -->
+                            <div class="file-info flex-grow-1">
+                                <h6 class="card-title mb-1">
+                                    {% if file.is_folder %}
+                                        <a href="{{ url_for('index', parent_id=file.fileId) }}" class="text-decoration-none">
+                                            {{ file.filename }}
+                                        </a>
+                                    {% else %}
+                                        <a href="{{ url_for('file_detail', file_id=file.fileId) }}" class="text-decoration-none">
+                                            {{ file.filename }}
+                                        </a>
+                                    {% endif %}
+                                </h6>
+                                <div class="file-meta text-muted small">
+                                    <span class="me-3">
+                                        <i class="fas fa-weight-hanging"></i> {{ file.size_formatted }}
+                                    </span>
+                                    <span class="me-3">
+                                        <i class="fas fa-tag"></i> {{ file.category_name }}
+                                    </span>
+                                    <span>
+                                        <i class="fas fa-calendar"></i> {{ file.createAt }}
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <!-- 操作按钮 -->
+                            <div class="file-actions">
+                                <div class="btn-group btn-group-sm">
+                                    <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
+                                       class="btn btn-outline-info" title="查看详情">
+                                        <i class="fas fa-info-circle"></i>
+                                    </a>
+                                    {% if not file.is_folder %}
+                                    <button type="button" class="btn btn-outline-success" 
+                                            onclick="getDownloadLink({{ file.fileId }})" title="获取下载链接">
+                                        <i class="fas fa-download"></i>
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <!-- 分页 -->
+        {% if next_last_file_id and next_last_file_id != -1 %}
+        <div class="d-flex justify-content-center mt-4">
+            <a href="{{ url_for('index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}" 
+               class="btn btn-primary">
+                <i class="fas fa-chevron-right"></i> 加载更多
+            </a>
+        </div>
+        {% endif %}
+        
+        {% else %}
+        <div class="text-center py-5">
+            <i class="fas fa-folder-open fa-5x text-muted mb-3"></i>
+            <h3 class="text-muted">文件夹为空</h3>
+            <p class="text-muted">这个文件夹中还没有任何文件或子文件夹。</p>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- 下载链接模态框 -->
+<div class="modal fade" id="downloadModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">下载链接</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">下载链接：</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="downloadUrl" readonly>
+                        <button class="btn btn-outline-secondary" type="button" onclick="copyDownloadLink()">
+                            <i class="fas fa-copy"></i> 复制
+                        </button>
+                    </div>
+                </div>
+                <div class="alert alert-info">
+                    <i class="fas fa-info-circle"></i> 
+                    下载链接有时效性，请及时使用。
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <a href="#" id="downloadButton" class="btn btn-primary" target="_blank">
+                    <i class="fas fa-download"></i> 立即下载
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function refreshFiles() {
+    window.location.reload();
+}
+
+function toggleView() {
+    const container = document.getElementById('fileContainer');
+    container.classList.toggle('row');
+    const items = container.querySelectorAll('.file-item');
+    items.forEach(item => {
+        item.classList.toggle('col-12');
+        item.classList.toggle('col-md-6');
+        item.classList.toggle('col-lg-4');
+    });
+}
+
+function getDownloadLink(fileId) {
+    fetch(`/api/download/${fileId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                document.getElementById('downloadUrl').value = data.download_url;
+                document.getElementById('downloadButton').href = data.download_url;
+                const modal = new bootstrap.Modal(document.getElementById('downloadModal'));
+                modal.show();
+            } else {
+                alert('获取下载链接失败: ' + (data.error || '未知错误'));
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('获取下载链接时发生错误');
+        });
+}
+
+function copyDownloadLink() {
+    const urlInput = document.getElementById('downloadUrl');
+    urlInput.select();
+    document.execCommand('copy');
+    
+    // 显示复制成功提示
+    const btn = event.target.closest('button');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '<i class="fas fa-check"></i> 已复制';
+    btn.classList.remove('btn-outline-secondary');
+    btn.classList.add('btn-success');
+    
+    setTimeout(() => {
+        btn.innerHTML = originalText;
+        btn.classList.remove('btn-success');
+        btn.classList.add('btn-outline-secondary');
+    }, 2000);
+}
+</script>
+{% endblock %}

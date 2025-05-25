@@ -1,0 +1,178 @@
+{% extends "base.html" %}
+
+{% block title %}搜索文件 - 123云盘文件浏览器{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h2><i class="fas fa-search"></i> 文件搜索</h2>
+        <hr>
+        
+        <!-- 高级搜索表单 -->
+        <div class="card mb-4">
+            <div class="card-header">
+                <h5 class="mb-0">搜索选项</h5>
+            </div>
+            <div class="card-body">
+                <form method="GET" action="{{ url_for('search') }}">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-3">
+                                <label for="searchQuery" class="form-label">搜索关键词</label>
+                                <input type="text" class="form-control" id="searchQuery" name="q" 
+                                       value="{{ search_query }}" placeholder="输入文件名或关键词..." required>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="mb-3">
+                                <label for="searchMode" class="form-label">搜索模式</label>
+                                <select class="form-select" id="searchMode" name="mode">
+                                    <option value="0" {% if search_mode == 0 %}selected{% endif %}>精确匹配</option>
+                                    <option value="1" {% if search_mode == 1 %}selected{% endif %}>模糊匹配</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="mb-3">
+                                <label for="searchLimit" class="form-label">结果数量</label>
+                                <select class="form-select" id="searchLimit" name="limit">
+                                    <option value="10" {% if limit == 10 %}selected{% endif %}>10条</option>
+                                    <option value="20" {% if limit == 20 %}selected{% endif %}>20条</option>
+                                    <option value="50" {% if limit == 50 %}selected{% endif %}>50条</option>
+                                    <option value="100" {% if limit == 100 %}selected{% endif %}>100条</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-search"></i> 搜索
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <!-- 搜索结果 -->
+        {% if search_query %}
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h4>
+                    搜索结果 
+                    <span class="badge bg-secondary">{{ files|length }} 个文件</span>
+                </h4>
+                {% if search_query %}
+                    <small class="text-muted">关键词: "{{ search_query }}"</small>
+                {% endif %}
+            </div>
+
+            {% if files %}
+                <!-- 文件列表 -->
+                <div class="row">
+                    {% for file in files %}
+                        <div class="col-md-6 col-lg-4 mb-3">
+                            <div class="card file-card h-100">
+                                <div class="card-body">
+                                    <div class="d-flex align-items-start">
+                                        <div class="file-icon me-3">
+                                            <i class="{{ file.icon }} fa-2x text-primary"></i>
+                                        </div>
+                                        <div class="flex-grow-1">
+                                            <h6 class="card-title mb-1">
+                                                {% if file.is_folder %}
+                                                    <a href="{{ url_for('index', parent_id=file.fileId) }}" 
+                                                       class="text-decoration-none">
+                                                        {{ file.filename }}
+                                                    </a>
+                                                {% else %}
+                                                    <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
+                                                       class="text-decoration-none">
+                                                        {{ file.filename }}
+                                                    </a>
+                                                {% endif %}
+                                            </h6>
+                                            <p class="card-text small text-muted mb-1">
+                                                <i class="fas fa-tag"></i> {{ file.category_name }}
+                                                {% if not file.is_folder %}
+                                                    <br><i class="fas fa-hdd"></i> {{ file.size_formatted }}
+                                                {% endif %}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    
+                                    <!-- 文件操作 -->
+                                    <div class="mt-2">
+                                        <div class="btn-group w-100" role="group">
+                                            {% if file.is_folder %}
+                                                <a href="{{ url_for('index', parent_id=file.fileId) }}" 
+                                                   class="btn btn-outline-primary btn-sm">
+                                                    <i class="fas fa-folder-open"></i> 打开
+                                                </a>
+                                            {% else %}
+                                                <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
+                                                   class="btn btn-outline-primary btn-sm">
+                                                    <i class="fas fa-info-circle"></i> 详情
+                                                </a>
+                                                <button class="btn btn-outline-success btn-sm download-btn" 
+                                                        data-file-id="{{ file.fileId }}" 
+                                                        data-file-name="{{ file.filename }}">
+                                                    <i class="fas fa-download"></i> 下载
+                                                </button>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                </div>
+
+                <!-- 分页控制 -->
+                {% if next_last_file_id %}
+                    <div class="d-flex justify-content-center mt-4">
+                        <a href="{{ url_for('search', q=search_query, mode=search_mode, limit=limit, last_file_id=next_last_file_id) }}" 
+                           class="btn btn-outline-primary">
+                            <i class="fas fa-chevron-right"></i> 加载更多
+                        </a>
+                    </div>
+                {% endif %}
+            {% else %}
+                <div class="alert alert-info text-center">
+                    <i class="fas fa-info-circle fa-2x mb-3"></i>
+                    <h5>没有找到匹配的文件</h5>
+                    <p class="mb-0">尝试使用不同的关键词或搜索模式</p>
+                </div>
+            {% endif %}
+        {% else %}
+            <div class="text-center text-muted">
+                <i class="fas fa-search fa-4x mb-3"></i>
+                <h5>开始搜索您的文件</h5>
+                <p>在上面的搜索框中输入关键词来查找文件</p>
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+<!-- 下载链接模态框 -->
+<div class="modal fade" id="downloadModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">下载文件</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p>正在获取下载链接...</p>
+                <div class="text-center">
+                    <div class="spinner-border" role="status">
+                        <span class="visually-hidden">加载中...</span>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                <a href="#" class="btn btn-primary" id="downloadLink" target="_blank" style="display: none;">
+                    <i class="fas fa-download"></i> 下载
+                </a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

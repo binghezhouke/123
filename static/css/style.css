@@ -1,0 +1,308 @@
+/* 123云盘文件浏览器样式 */
+
+/* 全局样式 */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: #f8f9fa;
+}
+
+/* 导航栏样式 */
+.navbar-brand {
+    font-weight: bold;
+    font-size: 1.5rem;
+}
+
+.navbar-brand i {
+    margin-right: 0.5rem;
+}
+
+/* 文件卡片样式 */
+.file-card {
+    transition: transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out;
+    border: 1px solid #dee2e6;
+    border-radius: 0.5rem;
+}
+
+.file-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.file-icon {
+    min-width: 60px;
+    text-align: center;
+}
+
+.file-icon i {
+    color: #007bff;
+}
+
+/* 文件类型特定颜色 */
+.file-card .fas.fa-folder {
+    color: #ffc107;
+}
+
+.file-card .fas.fa-file-image {
+    color: #28a745;
+}
+
+.file-card .fas.fa-file-video {
+    color: #dc3545;
+}
+
+.file-card .fas.fa-file-audio {
+    color: #6f42c1;
+}
+
+.file-card .fas.fa-file-pdf {
+    color: #dc3545;
+}
+
+.file-card .fas.fa-file-word {
+    color: #007bff;
+}
+
+.file-card .fas.fa-file-excel {
+    color: #28a745;
+}
+
+.file-card .fas.fa-file-powerpoint {
+    color: #fd7e14;
+}
+
+.file-card .fas.fa-file-archive {
+    color: #6c757d;
+}
+
+/* 按钮样式 */
+.btn-group .btn {
+    flex: 1;
+}
+
+.download-btn {
+    position: relative;
+}
+
+.download-btn:disabled {
+    opacity: 0.6;
+}
+
+/* 加载动画 */
+.spinner-border-sm {
+    width: 1rem;
+    height: 1rem;
+}
+
+/* 面包屑导航 */
+.breadcrumb {
+    background-color: transparent;
+    margin-bottom: 1rem;
+}
+
+.breadcrumb-item + .breadcrumb-item::before {
+    content: ">";
+    color: #6c757d;
+}
+
+/* 搜索页面样式 */
+.search-form {
+    background: white;
+    border-radius: 0.5rem;
+    padding: 1.5rem;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    margin-bottom: 2rem;
+}
+
+/* 文件详情页样式 */
+.file-detail-header {
+    border-bottom: 1px solid #dee2e6;
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+}
+
+.file-detail-icon {
+    font-size: 3rem;
+    color: #007bff;
+}
+
+/* 表格样式 */
+.table td:first-child {
+    font-weight: 500;
+    width: 30%;
+    color: #495057;
+}
+
+.table td:last-child {
+    word-break: break-all;
+}
+
+/* 状态标志 */
+.badge {
+    font-size: 0.75em;
+}
+
+.badge i {
+    margin-right: 0.25rem;
+}
+
+/* 模态框样式 */
+.modal-content {
+    border-radius: 0.5rem;
+}
+
+.modal-header {
+    border-bottom: 1px solid #dee2e6;
+    background-color: #f8f9fa;
+}
+
+.modal-footer {
+    border-top: 1px solid #dee2e6;
+    background-color: #f8f9fa;
+}
+
+/* 错误页面样式 */
+.error-page {
+    min-height: 60vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.error-icon {
+    color: #ffc107;
+    font-size: 4rem;
+    margin-bottom: 1rem;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .file-card {
+        margin-bottom: 1rem;
+    }
+    
+    .file-icon {
+        min-width: 50px;
+    }
+    
+    .file-icon i {
+        font-size: 1.5rem;
+    }
+    
+    .btn-group {
+        flex-direction: column;
+    }
+    
+    .btn-group .btn {
+        margin-bottom: 0.25rem;
+        border-radius: 0.25rem !important;
+    }
+    
+    .navbar-brand {
+        font-size: 1.25rem;
+    }
+    
+    .modal-dialog {
+        margin: 1rem;
+    }
+}
+
+@media (max-width: 576px) {
+    .container {
+        padding-left: 1rem;
+        padding-right: 1rem;
+    }
+    
+    .card-body {
+        padding: 1rem;
+    }
+    
+    .file-detail-icon {
+        font-size: 2rem;
+    }
+    
+    .table-responsive {
+        font-size: 0.875rem;
+    }
+}
+
+/* 动画效果 */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.fade-in {
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+/* 工具提示样式 */
+.tooltip {
+    font-size: 0.875rem;
+}
+
+/* 进度条样式 */
+.progress {
+    height: 0.5rem;
+    border-radius: 0.25rem;
+}
+
+/* 自定义滚动条 */
+::-webkit-scrollbar {
+    width: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #a8a8a8;
+}
+
+/* 深色主题支持 */
+@media (prefers-color-scheme: dark) {
+    body {
+        background-color: #212529;
+        color: #fff;
+    }
+    
+    .card {
+        background-color: #343a40;
+        border-color: #495057;
+    }
+    
+    .file-card:hover {
+        box-shadow: 0 4px 12px rgba(255, 255, 255, 0.1);
+    }
+    
+    .modal-content {
+        background-color: #343a40;
+        color: #fff;
+    }
+    
+    .modal-header,
+    .modal-footer {
+        background-color: #495057;
+        border-color: #6c757d;
+    }
+    
+    .table {
+        color: #fff;
+    }
+    
+    .table-striped > tbody > tr:nth-of-type(odd) {
+        background-color: rgba(255, 255, 255, 0.05);
+    }
+}

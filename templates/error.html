@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+
+{% block title %}错误 - 123云盘文件浏览器{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8 col-lg-6">
+        <div class="card">
+            <div class="card-body text-center">
+                <div class="mb-4">
+                    <i class="fas fa-exclamation-triangle fa-4x text-warning"></i>
+                </div>
+                
+                <h3 class="card-title text-danger">出现错误</h3>
+                
+                {% if error %}
+                    <p class="card-text text-muted">{{ error }}</p>
+                {% else %}
+                    <p class="card-text text-muted">抱歉，发生了未知错误</p>
+                {% endif %}
+                
+                <div class="mt-4">
+                    <div class="btn-group" role="group">
+                        <button class="btn btn-outline-secondary" onclick="history.back()">
+                            <i class="fas fa-arrow-left"></i> 返回上页
+                        </button>
+                        <a href="{{ url_for('index') }}" class="btn btn-primary">
+                            <i class="fas fa-home"></i> 返回首页
+                        </a>
+                    </div>
+                </div>
+                
+                <div class="mt-3">
+                    <small class="text-muted">
+                        如果问题持续存在，请检查您的网络连接或联系管理员
+                    </small>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 常见问题解决方案 -->
+        <div class="card mt-4">
+            <div class="card-header">
+                <h6 class="mb-0">
+                    <i class="fas fa-question-circle"></i> 常见问题解决方案
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="list-group list-group-flush">
+                    <div class="list-group-item border-0">
+                        <strong>API客户端未初始化</strong>
+                        <br><small class="text-muted">请检查config.json配置文件是否正确设置</small>
+                    </div>
+                    <div class="list-group-item border-0">
+                        <strong>网络连接问题</strong>
+                        <br><small class="text-muted">请检查您的网络连接是否正常</small>
+                    </div>
+                    <div class="list-group-item border-0">
+                        <strong>文件不存在</strong>
+                        <br><small class="text-muted">文件可能已被移动或删除</small>
+                    </div>
+                    <div class="list-group-item border-0">
+                        <strong>权限不足</strong>
+                        <br><small class="text-muted">您可能没有访问该文件的权限</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
