@@ -8,6 +8,7 @@ from flask import Flask, render_template, request, jsonify, redirect, url_for, f
 import os
 import json
 from api import Pan123Client, Pan123APIError
+from api.models import File, FileList
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-this'  # 请更改为随机密钥
@@ -77,32 +78,12 @@ def index():
         limit = request.args.get('limit', 20, type=int)
         last_file_id = request.args.get('last_file_id', type=int)
 
-        # 获取文件列表
-        files_data = client.list_files(
+        # 获取文件列表，返回FileList对象
+        file_list, next_last_file_id = client.list_files_as_objects(
             parent_id=parent_id,
             limit=limit,
             last_file_id=last_file_id
         )
-
-        if not files_data or 'data' not in files_data:
-            flash('获取文件列表失败', 'error')
-            return render_template('files.html', files=[], parent_id=parent_id)
-
-        file_list = files_data['data'].get('fileList', [])
-        next_last_file_id = files_data['data'].get('lastFileId')
-
-        # 处理文件数据
-        for file_item in file_list:
-            file_item['size_formatted'] = format_file_size(
-                file_item.get('size', 0))
-            file_item['category_name'] = get_category_name(
-                file_item.get('category', 0))
-            file_item['icon'] = get_file_icon(
-                file_item.get('filename', ''),
-                file_item.get('type', 0),
-                file_item.get('category', 0)
-            )
-            file_item['is_folder'] = file_item.get('type') == 1
 
         return render_template('files.html',
                                files=file_list,
@@ -134,33 +115,13 @@ def search():
         if not search_query:
             return render_template('search.html', files=[], search_query='')
 
-        # 执行搜索
-        search_results = client.list_files(
+        # 执行搜索，返回FileList对象
+        file_list, next_last_file_id = client.list_files_as_objects(
             search_data=search_query,
             search_mode=search_mode,
             limit=limit,
             last_file_id=last_file_id
         )
-
-        if not search_results or 'data' not in search_results:
-            flash('搜索失败', 'error')
-            return render_template('search.html', files=[], search_query=search_query)
-
-        file_list = search_results['data'].get('fileList', [])
-        next_last_file_id = search_results['data'].get('lastFileId')
-
-        # 处理搜索结果
-        for file_item in file_list:
-            file_item['size_formatted'] = format_file_size(
-                file_item.get('size', 0))
-            file_item['category_name'] = get_category_name(
-                file_item.get('category', 0))
-            file_item['icon'] = get_file_icon(
-                file_item.get('filename', ''),
-                file_item.get('type', 0),
-                file_item.get('category', 0)
-            )
-            file_item['is_folder'] = file_item.get('type') == 1
 
         return render_template('search.html',
                                files=file_list,
@@ -192,21 +153,9 @@ def file_detail(file_id):
             flash('文件不存在', 'error')
             return redirect(url_for('index'))
 
-        # 处理文件数据
-        file_info['size_formatted'] = format_file_size(
-            file_info.get('size', 0))
-        file_info['category_name'] = get_category_name(
-            file_info.get('category', 0))
-        file_info['icon'] = get_file_icon(
-            file_info.get('filename', ''),
-            file_info.get('type', 0),
-            file_info.get('category', 0)
-        )
-        file_info['is_folder'] = file_info.get('type') == 1
-
         # 如果是文件（非文件夹），尝试获取下载链接
         download_url = None
-        if file_info.get('type') != 1:  # 不是文件夹
+        if not file_info.is_folder:  # 不是文件夹
             try:
                 download_info = client.get_download_info(file_id)
                 if download_info and 'data' in download_info:
@@ -269,27 +218,14 @@ def api_files_batch():
         if not file_ids:
             return jsonify({'error': '没有有效的文件ID'}), 400
 
-        files_info = client.get_files_info(file_ids)
+        # 使用FileList对象
+        file_list = client.get_files_info_as_objects(file_ids)
 
-        if files_info and 'data' in files_info and 'fileList' in files_info['data']:
-            file_list = files_info['data']['fileList']
-
-            # 处理文件数据
-            for file_item in file_list:
-                file_item['size_formatted'] = format_file_size(
-                    file_item.get('size', 0))
-                file_item['category_name'] = get_category_name(
-                    file_item.get('category', 0))
-                file_item['icon'] = get_file_icon(
-                    file_item.get('filename', ''),
-                    file_item.get('type', 0),
-                    file_item.get('category', 0)
-                )
-                file_item['is_folder'] = file_item.get('type') == 1
-
+        if file_list and len(file_list) > 0:
+            # 转换为字典列表以保持API兼容性
             return jsonify({
                 'success': True,
-                'files': file_list
+                'files': file_list.to_dict_list()
             })
         else:
             return jsonify({'error': '获取文件详情失败'}), 404
