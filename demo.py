@@ -91,7 +91,7 @@ def test_search_files(client: Pan123Client):
         file_list, next_file_id = client.list_files(
             search_data=search_keyword,
             search_mode=0,  # 模糊搜索
-            limit=5
+            limit=50
         )
 
         print(f"✓ 搜索到 {len(file_list)} 个文件")
@@ -284,7 +284,7 @@ def test_cache_operations(client: Pan123Client):
 
         if stats.get('enabled'):
             print("🗑️ 测试清除所有缓存...")
-            client.clear_file_cache()
+            # client.clear_file_cache()
             print("✓ 缓存清除完成")
 
             # 再次获取统计
@@ -340,7 +340,7 @@ def test_file_path(client: Pan123Client):
             return
 
         # 测试文件路径获取
-        test_files = file_list.files[:3]  # 取前3个文件进行测试
+        test_files = file_list.files[:]  # 取前3个文件进行测试
 
         for i, file_obj in enumerate(test_files):
             print(f"\n📄 测试文件 {i+1}: {file_obj.filename}")
@@ -486,6 +486,12 @@ def test_webdav_features(client: Pan123Client, file_list):
                 print(f"  ✓ WebDAV URL: {webdav_url}")
             else:
                 print("  ✗ 未能获取WebDAV URL。")
+            webdav_direct_url = client.get_webdav_redirect_url(
+                test_file.file_id)
+            if webdav_direct_url:
+                print(f"  ✓ WebDAV 直接访问URL: {webdav_direct_url}")
+            else:
+                print("  ✗ 未能获取WebDAV直接访问URL。")
         except Exception as e:
             print(f"  ✗ 获取WebDAV URL时发生错误: {e}")
 
@@ -535,8 +541,9 @@ def main():
             paginated_files = test_pagination(client)
 
             # 5. 测试文件详情（使用列表结果）
-            test_files = file_list if file_list else search_results
+            test_files = search_results
             detailed_files = test_file_details(client, test_files)
+            file_list = test_files
 
             # 6. 测试下载链接
             test_download_info(client, test_files)

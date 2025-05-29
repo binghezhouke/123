@@ -2,6 +2,7 @@
 HTTP请求处理器
 """
 import requests
+import time
 from typing import Dict, Any, Optional
 from .exceptions import Pan123APIError, NetworkError
 
@@ -16,6 +17,8 @@ class RequestHandler:
         self.token_manager = token_manager
         self.session = requests.Session()
         self.session.headers.update({"Platform": self.PLATFORM_HEADER})
+        self.max_retries = 5  # 默认最大重试次数
+        self.retry_delay = 0.5  # 重试延迟时间(秒)
 
     def _update_auth_header(self) -> None:
         """更新认证头"""
@@ -32,17 +35,39 @@ class RequestHandler:
         """
         self._update_auth_header()
         url = self.base_url + endpoint
+        retry_count = 0
 
-        try:
-            response = self.session.request(method, url, timeout=30, **kwargs)
-            response.raise_for_status()
+        while True:
+            try:
+                response = self.session.request(
+                    method, url, timeout=30, **kwargs)
+                response.raise_for_status()
 
-            return self._parse_response(response)
+                # 先尝试解析响应
+                try:
+                    data = response.json()
+                    # 检查业务层错误码是否为429(请求过于频繁)
+                    if 'code' in data and data['code'] == 429:
+                        # 达到最大重试次数则抛出异常
+                        if retry_count >= self.max_retries:
+                            return self._parse_response(response)
+                        # 未达到最大重试次数则等待后重试
+                        retry_count += 1
+                        time.sleep(self.retry_delay)
+                        continue
+                except ValueError:
+                    # 如果不是JSON格式，继续正常处理
+                    pass
 
-        except requests.exceptions.HTTPError as e:
-            self._handle_http_error(e)
-        except requests.exceptions.RequestException as e:
-            raise NetworkError(f"网络请求失败: {e}")
+                return self._parse_response(response)
+
+            except requests.exceptions.HTTPError as e:
+                self._handle_http_error(e)
+            except requests.exceptions.RequestException as e:
+                raise NetworkError(f"网络请求失败: {e}")
+
+            # 如果上面没有继续循环，就退出循环
+            break
 
     def _parse_response(self, response: requests.Response) -> Dict[str, Any]:
         """解析响应"""

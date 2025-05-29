@@ -266,12 +266,13 @@ class FileService:
 
         return None
 
-    def get_file_path(self, file_id: int, use_cache: bool = True) -> Optional[str]:
+    def get_file_path(self, file_id: int, use_cache: bool = True, max_retries: int = 3) -> Optional[str]:
         """
         获取文件的完整路径
 
         :param file_id: 文件ID
         :param use_cache: 是否使用缓存，默认为True
+        :param max_retries: 最大重试次数，默认为3次
         :return: 文件的完整路径，如果文件不存在返回None
         """
         try:
@@ -281,9 +282,9 @@ class FileService:
             print(f"开始构建文件路径，文件ID: {file_id}")
 
             while current_file_id is not None and current_file_id != 0:
-                # 获取当前文件信息
-                file_info = self.get_file_info_single(
-                    current_file_id, use_cache=use_cache)
+                # 获取当前文件信息，带重试逻辑
+                file_info = self._get_file_info_with_retry(
+                    current_file_id, use_cache=use_cache, max_retries=max_retries)
 
                 if not file_info:
                     print(f"无法获取文件信息，文件ID: {current_file_id}")
@@ -318,12 +319,49 @@ class FileService:
             print(f"获取文件路径时发生错误: {e}")
             return None
 
-    def get_file_path_with_details(self, file_id: int, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+    def _get_file_info_with_retry(self, file_id: int, use_cache: bool = True, max_retries: int = 3) -> Optional[File]:
+        """
+        带重试功能的文件信息获取方法，专门处理429错误
+
+        :param file_id: 文件ID
+        :param use_cache: 是否使用缓存
+        :param max_retries: 最大重试次数
+        :return: File对象，如果文件不存在返回None
+        """
+        import time
+        from .exceptions import Pan123APIError
+
+        for attempt in range(max_retries + 1):
+            try:
+                return self.get_file_info_single(file_id, use_cache=use_cache)
+            except Pan123APIError as e:
+                # 检查是否是429错误（Too Many Requests）
+                if e.status_code == 429:
+                    if attempt < max_retries:
+                        wait_time = 1  # 等待1秒
+                        print(
+                            f"遇到429错误，等待 {wait_time} 秒后重试 (尝试 {attempt + 1}/{max_retries + 1})...")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        print(f"达到最大重试次数 ({max_retries + 1})，放弃重试")
+                        raise e
+                else:
+                    # 非429错误，直接抛出
+                    raise e
+            except Exception as e:
+                # 其他异常也直接抛出
+                raise e
+
+        return None
+
+    def get_file_path_with_details(self, file_id: int, use_cache: bool = True, max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """
         获取文件的完整路径及详细信息
 
         :param file_id: 文件ID
         :param use_cache: 是否使用缓存，默认为True
+        :param max_retries: 最大重试次数，默认为3次
         :return: 包含路径和详细信息的字典，如果文件不存在返回None
         """
         try:
@@ -333,9 +371,9 @@ class FileService:
             print(f"开始构建详细路径信息，文件ID: {file_id}")
 
             while current_file_id is not None and current_file_id != 0:
-                # 获取当前文件信息
-                file_info = self.get_file_info_single(
-                    current_file_id, use_cache=use_cache)
+                # 获取当前文件信息，带重试逻辑
+                file_info = self._get_file_info_with_retry(
+                    current_file_id, use_cache=use_cache, max_retries=max_retries)
 
                 if not file_info:
                     print(f"无法获取文件信息，文件ID: {current_file_id}")
@@ -455,7 +493,7 @@ class FileService:
         """
         import requests
         from requests.exceptions import RequestException
-        
+
         # 先获取WebDAV URL
         webdav_url = self.get_webdav_url(file_id, use_cache=use_cache)
         if not webdav_url:
@@ -464,46 +502,48 @@ class FileService:
 
         current_url = webdav_url
         redirect_count = 0
-        
+
         try:
             while redirect_count < max_redirects:
                 print(f"发送HEAD请求到URL (跳转次数: {redirect_count}): {current_url}")
-                
+
                 # 发送HEAD请求，不允许自动跳转
-                response = requests.head(current_url, allow_redirects=False, timeout=30)
-                
+                response = requests.get(
+                    current_url, allow_redirects=False, timeout=30)
+
                 print(f"响应状态码: {response.status_code}")
-                
+
                 # 检查是否是跳转响应
                 if response.status_code in [301, 302, 303, 307, 308]:
                     redirect_url = response.headers.get('Location')
                     if not redirect_url:
                         print(f"{response.status_code}响应中没有找到Location头")
                         return None
-                    
+
                     print(f"获取到{response.status_code}跳转URL: {redirect_url}")
                     current_url = redirect_url
+                    return current_url
                     redirect_count += 1
-                    
+
                 elif response.status_code == 200:
                     # 如果返回200，说明到达最终URL
                     print(f"到达最终URL，状态码: {response.status_code}")
                     return current_url
-                    
+
                 elif response.status_code == 404:
                     print(f"文件未找到，状态码: {response.status_code}")
                     return None
-                    
+
                 else:
                     print(f"WebDAV请求返回错误状态码: {response.status_code}")
                     # 对于其他状态码，尝试返回响应内容以便调试
                     if hasattr(response, 'text'):
                         print(f"响应内容: {response.text[:500]}...")
                     return None
-            
+
             print(f"达到最大跳转次数限制({max_redirects})，最终URL: {current_url}")
             return current_url
-                
+
         except RequestException as e:
             print(f"请求WebDAV URL时发生网络错误: {e}")
             return None
@@ -522,13 +562,14 @@ class FileService:
         """
         if prefer_webdav:
             # 优先尝试WebDAV
-            webdav_url = self.get_webdav_redirect_url(file_id, use_cache=use_cache)
+            webdav_url = self.get_webdav_redirect_url(
+                file_id, use_cache=use_cache)
             if webdav_url:
                 print(f"成功获取WebDAV下载URL，文件ID: {file_id}")
                 return webdav_url
-            
+
             print(f"WebDAV获取失败，尝试使用API下载链接，文件ID: {file_id}")
-        
+
         # 尝试使用API获取下载链接
         try:
             download_info = self.get_download_info(file_id)
@@ -539,6 +580,6 @@ class FileService:
                     return download_url
         except Exception as e:
             print(f"获取API下载链接时发生错误: {e}")
-        
+
         print(f"无法获取任何下载URL，文件ID: {file_id}")
         return None

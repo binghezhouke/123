@@ -115,7 +115,7 @@
                                         <td>
                                             <div class="input-group">
                                                 <input type="text" class="form-control form-control-sm" id="redirectUrlInput" placeholder="点击获取重定向链接..." readonly>
-                                                <button class="btn btn-outline-primary btn-sm" type="button" onclick="getRedirectUrl()" id="getRedirectBtn">
+                                                <button class="btn btn-outline-primary btn-sm" type="button" onclick="getRedirectUrl()" id="getRedirectBtn" data-file-id="{{ file.fileId }}">
                                                     <i class="fas fa-external-link-alt"></i> 获取
                                                 </button>
                                                 <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyRedirectUrl()" id="copyRedirectBtn" style="display: none;">
@@ -176,7 +176,7 @@
                                 {% endif %}
                                 
                                 <!-- 智能下载按钮 -->
-                                <button class="btn btn-info" onclick="getFinalDownloadUrl()" id="finalDownloadBtn">
+                                <button class="btn btn-info" onclick="getFinalDownloadUrl()" id="finalDownloadBtn" data-file-id="{{ file.fileId }}">
                                     <i class="fas fa-magic"></i> 智能下载
                                 </button>
                                 
@@ -288,6 +288,121 @@
         </div>
     </div>
 </div>
+
+<!-- 内联脚本确保函数可用 -->
+<script>
+// 重定向下载链接获取函数
+window.getRedirectUrl = function() {
+    const getBtn = document.getElementById("getRedirectBtn");
+    const fileId = parseInt(getBtn.getAttribute('data-file-id'));
+    
+    if (!fileId || isNaN(fileId)) {
+        alert('文件ID获取失败');
+        return;
+    }
+    
+    const copyBtn = document.getElementById("copyRedirectBtn");
+    const urlInput = document.getElementById("redirectUrlInput");
+    
+    // 更新按钮状态
+    getBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+    getBtn.disabled = true;
+    urlInput.value = "正在获取重定向链接...";
+    
+    // 调用API获取重定向URL
+    fetch('/api/webdav/redirect/' + fileId)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                urlInput.value = data.redirect_url;
+                copyBtn.style.display = 'inline-block';
+                getBtn.innerHTML = '<i class="fas fa-check"></i> 已获取';
+                getBtn.classList.remove('btn-outline-primary');
+                getBtn.classList.add('btn-outline-success');
+            } else {
+                urlInput.value = "获取失败: " + (data.error || "未知错误");
+                getBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
+                getBtn.classList.remove('btn-outline-primary');
+                getBtn.classList.add('btn-outline-danger');
+            }
+        })
+        .catch(error => {
+            console.error('获取重定向URL失败:', error);
+            urlInput.value = "获取失败: " + error.message;
+            getBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
+            getBtn.classList.remove('btn-outline-primary');
+            getBtn.classList.add('btn-outline-danger');
+        })
+        .finally(() => {
+            getBtn.disabled = false;
+        });
+};
+
+// 智能下载函数
+window.getFinalDownloadUrl = function() {
+    const finalBtn = document.getElementById("finalDownloadBtn");
+    const fileId = parseInt(finalBtn.getAttribute('data-file-id'));
+    
+    if (!fileId || isNaN(fileId)) {
+        alert('文件ID获取失败');
+        return;
+    }
+    
+    // 更新按钮状态
+    finalBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+    finalBtn.disabled = true;
+    
+    // 调用API获取最终下载URL
+    fetch('/api/download/final/' + fileId + '?prefer_webdav=true')
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // 直接打开下载链接
+                window.open(data.download_url, '_blank');
+                finalBtn.innerHTML = '<i class="fas fa-check"></i> 下载已开始';
+                finalBtn.classList.remove('btn-info');
+                finalBtn.classList.add('btn-success');
+                
+                // 3秒后恢复按钮状态
+                setTimeout(() => {
+                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
+                    finalBtn.classList.remove('btn-success');
+                    finalBtn.classList.add('btn-info');
+                }, 3000);
+            } else {
+                finalBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
+                finalBtn.classList.remove('btn-info');
+                finalBtn.classList.add('btn-danger');
+                alert('获取下载链接失败: ' + (data.error || "未知错误"));
+                
+                // 3秒后恢复按钮状态
+                setTimeout(() => {
+                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
+                    finalBtn.classList.remove('btn-danger');
+                    finalBtn.classList.add('btn-info');
+                }, 3000);
+            }
+        })
+        .catch(error => {
+            console.error('获取最终下载URL失败:', error);
+            finalBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
+            finalBtn.classList.remove('btn-info');
+            finalBtn.classList.add('btn-danger');
+            alert('获取下载链接失败: ' + error.message);
+            
+            // 3秒后恢复按钮状态
+            setTimeout(() => {
+                finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
+                finalBtn.classList.remove('btn-danger');
+                finalBtn.classList.add('btn-info');
+            }, 3000);
+        })
+        .finally(() => {
+            finalBtn.disabled = false;
+        });
+};
+</script>
+
 {% endblock %}
 
 {% block scripts %}
@@ -344,116 +459,15 @@ function copyRedirectUrl() {
     }
 }
 
-function getRedirectUrl() {
-    const fileId = {{ file.fileId }};
-    const getBtn = document.getElementById("getRedirectBtn");
-    const copyBtn = document.getElementById("copyRedirectBtn");
-    const urlInput = document.getElementById("redirectUrlInput");
-    
-    // 更新按钮状态
-    getBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
-    getBtn.disabled = true;
-    urlInput.value = "正在获取重定向链接...";
-    
-    // 调用API获取重定向URL
-    fetch(`/api/webdav/redirect/${fileId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                urlInput.value = data.redirect_url;
-                copyBtn.style.display = 'inline-block';
-                getBtn.innerHTML = '<i class="fas fa-check"></i> 已获取';
-                getBtn.classList.remove('btn-outline-primary');
-                getBtn.classList.add('btn-outline-success');
-            } else {
-                urlInput.value = "获取失败: " + (data.error || "未知错误");
-                getBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
-                getBtn.classList.remove('btn-outline-primary');
-                getBtn.classList.add('btn-outline-danger');
-            }
-        })
-        .catch(error => {
-            console.error('获取重定向URL失败:', error);
-            urlInput.value = "获取失败: " + error.message;
-            getBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
-            getBtn.classList.remove('btn-outline-primary');
-            getBtn.classList.add('btn-outline-danger');
-        })
-        .finally(() => {
-            getBtn.disabled = false;
-        });
-}
-
-function getFinalDownloadUrl() {
-    const fileId = {{ file.fileId }};
-    const finalBtn = document.getElementById("finalDownloadBtn");
-    
-    // 更新按钮状态
-    finalBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
-    finalBtn.disabled = true;
-    
-    // 调用API获取最终下载URL
-    fetch(`/api/download/final/${fileId}?prefer_webdav=true`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // 直接打开下载链接
-                window.open(data.download_url, '_blank');
-                finalBtn.innerHTML = '<i class="fas fa-check"></i> 下载已开始';
-                finalBtn.classList.remove('btn-info');
-                finalBtn.classList.add('btn-success');
-                
-                // 3秒后恢复按钮状态
-                setTimeout(() => {
-                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
-                    finalBtn.classList.remove('btn-success');
-                    finalBtn.classList.add('btn-info');
-                }, 3000);
-            } else {
-                finalBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
-                finalBtn.classList.remove('btn-info');
-                finalBtn.classList.add('btn-danger');
-                alert('获取下载链接失败: ' + (data.error || "未知错误"));
-                
-                // 3秒后恢复按钮状态
-                setTimeout(() => {
-                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
-                    finalBtn.classList.remove('btn-danger');
-                    finalBtn.classList.add('btn-info');
-                }, 3000);
-            }
-        })
-        .catch(error => {
-            console.error('获取最终下载URL失败:', error);
-            finalBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
-            finalBtn.classList.remove('btn-info');
-            finalBtn.classList.add('btn-danger');
-            alert('获取下载链接失败: ' + error.message);
-            
-            // 3秒后恢复按钮状态
-            setTimeout(() => {
-                finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
-                finalBtn.classList.remove('btn-danger');
-                finalBtn.classList.add('btn-info');
-            }, 3000);
-        })
-        .finally(() => {
-            finalBtn.disabled = false;
-        });
-}
-
-// 如果存在下载按钮，则添加事件监听器
+// 下载按钮事件处理
 document.addEventListener('DOMContentLoaded', function() {
     const downloadButtons = document.querySelectorAll('.download-btn');
     downloadButtons.forEach(button => {
         button.addEventListener('click', function() {
             const fileId = this.dataset.fileId;
             const fileName = this.dataset.fileName;
-            // 这里可以添加获取下载链接的逻辑，例如通过fetch调用后端的API接口
-            // 然后触发下载或显示链接
             alert(`正在为 ${fileName} (ID: ${fileId}) 获取下载链接...`);
-            // 示例： window.location.href = `/api/download/${fileId}`;
-            // 或者使用 fetch 获取链接并处理
+            // 这里可以添加实际的下载逻辑
         });
     });
 });

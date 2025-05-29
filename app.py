@@ -262,7 +262,7 @@ def api_webdav_redirect(file_id):
                 'file_id': file_id
             })
         else:
-            return jsonify({'error': '获取WebDAV重定向URL失败'}), 404
+            return jsonify({'error': '获取WebDAV重定向URL失败，可能是文件不存在或WebDAV配置问题'}), 404
 
     except Exception as e:
         return jsonify({'error': f'服务器错误: {e}'}), 500
@@ -293,7 +293,7 @@ def api_final_download(file_id):
                 'file_id': file_id
             })
         else:
-            return jsonify({'error': '获取下载URL失败'}), 404
+            return jsonify({'error': '获取下载URL失败，请检查文件是否存在或重试'}), 404
 
     except Exception as e:
         return jsonify({'error': f'服务器错误: {e}'}), 500
