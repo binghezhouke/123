@@ -110,6 +110,21 @@
                                             <small class="text-muted">此URL包含认证信息，请妥善保管。</small>
                                         </td>
                                     </tr>
+                                    <tr>
+                                        <td><strong>重定向下载链接</strong></td>
+                                        <td>
+                                            <div class="input-group">
+                                                <input type="text" class="form-control form-control-sm" id="redirectUrlInput" placeholder="点击获取重定向链接..." readonly>
+                                                <button class="btn btn-outline-primary btn-sm" type="button" onclick="getRedirectUrl()" id="getRedirectBtn">
+                                                    <i class="fas fa-external-link-alt"></i> 获取
+                                                </button>
+                                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyRedirectUrl()" id="copyRedirectBtn" style="display: none;">
+                                                    <i class="fas fa-copy"></i> 复制
+                                                </button>
+                                            </div>
+                                            <small class="text-muted">获取WebDAV跳转后的直接下载链接。</small>
+                                        </td>
+                                    </tr>
                                 {% endif %}
                             </tbody>
                         </table>
@@ -158,6 +173,18 @@
                                             data-file-name="{{ file.filename }}">
                                         <i class="fas fa-download"></i> 获取下载链接
                                     </button>
+                                {% endif %}
+                                
+                                <!-- 智能下载按钮 -->
+                                <button class="btn btn-info" onclick="getFinalDownloadUrl()" id="finalDownloadBtn">
+                                    <i class="fas fa-magic"></i> 智能下载
+                                </button>
+                                
+                                <!-- WebDAV演示按钮 -->
+                                {% if webdav_url %}
+                                <a href="{{ url_for('demo_webdav', file_id=file.fileId) }}" class="btn btn-outline-info">
+                                    <i class="fas fa-play-circle"></i> WebDAV演示
+                                </a>
                                 {% endif %}
                             {% endif %}
                             
@@ -288,6 +315,131 @@ function copyWebdavUrl() {
             alert("复制失败，请手动复制。");
         }
     }
+}
+
+function copyRedirectUrl() {
+    var copyText = document.getElementById("redirectUrlInput");
+    if (copyText.value && copyText.value !== "点击获取重定向链接..." && !copyText.value.includes("获取失败")) {
+        copyText.select();
+        copyText.setSelectionRange(0, 99999);
+        try {
+            navigator.clipboard.writeText(copyText.value).then(function() {
+                alert("重定向URL 已复制到剪贴板！");
+            }, function(err) {
+                console.error('无法复制文本: ', err);
+                document.execCommand("copy");
+                alert("重定向URL 已复制到剪贴板 (fallback)！");
+            });
+        } catch (err) {
+            console.error('Fallback复制错误: ', err);
+            try {
+                document.execCommand("copy");
+                alert("重定向URL 已复制到剪贴板 (fallback)！");
+            } catch (e) {
+                alert("复制失败，请手动复制。");
+            }
+        }
+    } else {
+        alert("没有有效的重定向URL可复制！");
+    }
+}
+
+function getRedirectUrl() {
+    const fileId = {{ file.fileId }};
+    const getBtn = document.getElementById("getRedirectBtn");
+    const copyBtn = document.getElementById("copyRedirectBtn");
+    const urlInput = document.getElementById("redirectUrlInput");
+    
+    // 更新按钮状态
+    getBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+    getBtn.disabled = true;
+    urlInput.value = "正在获取重定向链接...";
+    
+    // 调用API获取重定向URL
+    fetch(`/api/webdav/redirect/${fileId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                urlInput.value = data.redirect_url;
+                copyBtn.style.display = 'inline-block';
+                getBtn.innerHTML = '<i class="fas fa-check"></i> 已获取';
+                getBtn.classList.remove('btn-outline-primary');
+                getBtn.classList.add('btn-outline-success');
+            } else {
+                urlInput.value = "获取失败: " + (data.error || "未知错误");
+                getBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
+                getBtn.classList.remove('btn-outline-primary');
+                getBtn.classList.add('btn-outline-danger');
+            }
+        })
+        .catch(error => {
+            console.error('获取重定向URL失败:', error);
+            urlInput.value = "获取失败: " + error.message;
+            getBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
+            getBtn.classList.remove('btn-outline-primary');
+            getBtn.classList.add('btn-outline-danger');
+        })
+        .finally(() => {
+            getBtn.disabled = false;
+        });
+}
+
+function getFinalDownloadUrl() {
+    const fileId = {{ file.fileId }};
+    const finalBtn = document.getElementById("finalDownloadBtn");
+    
+    // 更新按钮状态
+    finalBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+    finalBtn.disabled = true;
+    
+    // 调用API获取最终下载URL
+    fetch(`/api/download/final/${fileId}?prefer_webdav=true`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // 直接打开下载链接
+                window.open(data.download_url, '_blank');
+                finalBtn.innerHTML = '<i class="fas fa-check"></i> 下载已开始';
+                finalBtn.classList.remove('btn-info');
+                finalBtn.classList.add('btn-success');
+                
+                // 3秒后恢复按钮状态
+                setTimeout(() => {
+                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
+                    finalBtn.classList.remove('btn-success');
+                    finalBtn.classList.add('btn-info');
+                }, 3000);
+            } else {
+                finalBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
+                finalBtn.classList.remove('btn-info');
+                finalBtn.classList.add('btn-danger');
+                alert('获取下载链接失败: ' + (data.error || "未知错误"));
+                
+                // 3秒后恢复按钮状态
+                setTimeout(() => {
+                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
+                    finalBtn.classList.remove('btn-danger');
+                    finalBtn.classList.add('btn-info');
+                }, 3000);
+            }
+        })
+        .catch(error => {
+            console.error('获取最终下载URL失败:', error);
+            finalBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
+            finalBtn.classList.remove('btn-info');
+            finalBtn.classList.add('btn-danger');
+            alert('获取下载链接失败: ' + error.message);
+            
+            // 3秒后恢复按钮状态
+            setTimeout(() => {
+                finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
+                finalBtn.classList.remove('btn-danger');
+                finalBtn.classList.add('btn-info');
+            }, 3000);
+        })
+        .finally(() => {
+            finalBtn.disabled = false;
+        });
 }
 
 // 如果存在下载按钮，则添加事件监听器

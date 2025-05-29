@@ -161,6 +161,31 @@ class Pan123Client:
                 file_id, use_cache)
         return results
 
+    def get_webdav_redirect_url(self, file_id: int, use_cache: bool = True, max_redirects: int = 5) -> Optional[str]:
+        """
+        获取文件的WebDAV URL并跟随302跳转，返回最终的下载URL
+
+        :param file_id: 文件ID
+        :param use_cache: 是否使用缓存，默认为True
+        :param max_redirects: 最大跳转次数，防止无限循环，默认5次
+        :return: 跳转后的最终下载URL，如果文件不存在或配置错误则返回None
+        """
+        if not self.is_webdav_available():
+            print("WebDAV未启用或配置不完整。")
+            return None
+        return self.file_service.get_webdav_redirect_url(file_id, use_cache, max_redirects)
+
+    def get_final_download_url(self, file_id: int, prefer_webdav: bool = True, use_cache: bool = True) -> Optional[str]:
+        """
+        获取文件的最终可下载URL，优先使用WebDAV或API下载链接
+
+        :param file_id: 文件ID
+        :param prefer_webdav: 是否优先使用WebDAV，默认为True
+        :param use_cache: 是否使用缓存，默认为True
+        :return: 最终的下载URL，如果获取失败则返回None
+        """
+        return self.file_service.get_final_download_url(file_id, prefer_webdav, use_cache)
+
     # 实用方法
     def get_cache_stats(self) -> dict:
         """获取缓存统计信息"""

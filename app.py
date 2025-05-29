@@ -245,6 +245,91 @@ def api_files_batch():
         return jsonify({'error': f'服务器错误: {e}'}), 500
 
 
+@app.route('/api/webdav/redirect/<int:file_id>')
+def api_webdav_redirect(file_id):
+    """API接口：获取WebDAV重定向后的最终下载URL"""
+    try:
+        if not client:
+            return jsonify({'error': 'API客户端未初始化'}), 500
+
+        # 获取WebDAV重定向URL
+        redirect_url = client.get_webdav_redirect_url(file_id)
+
+        if redirect_url:
+            return jsonify({
+                'success': True,
+                'redirect_url': redirect_url,
+                'file_id': file_id
+            })
+        else:
+            return jsonify({'error': '获取WebDAV重定向URL失败'}), 404
+
+    except Exception as e:
+        return jsonify({'error': f'服务器错误: {e}'}), 500
+
+
+@app.route('/api/download/final/<int:file_id>')
+def api_final_download(file_id):
+    """API接口：获取最终下载URL（优先WebDAV，回退API）"""
+    try:
+        if not client:
+            return jsonify({'error': 'API客户端未初始化'}), 500
+
+        prefer_webdav = request.args.get(
+            'prefer_webdav', 'true').lower() == 'true'
+
+        # 获取最终下载URL
+        final_url = client.get_final_download_url(
+            file_id, prefer_webdav=prefer_webdav)
+
+        if final_url:
+            # 判断URL类型
+            url_type = 'webdav' if 'webdav' in final_url or 'pd1' in final_url else 'api'
+
+            return jsonify({
+                'success': True,
+                'download_url': final_url,
+                'url_type': url_type,
+                'file_id': file_id
+            })
+        else:
+            return jsonify({'error': '获取下载URL失败'}), 404
+
+    except Exception as e:
+        return jsonify({'error': f'服务器错误: {e}'}), 500
+
+
+@app.route('/demo/webdav/<int:file_id>')
+def demo_webdav(file_id):
+    """演示WebDAV功能的页面"""
+    try:
+        if not client:
+            flash('API客户端未初始化', 'error')
+            return redirect(url_for('index'))
+
+        # 获取文件信息
+        file_info = client.get_file_info_single(file_id, use_cache=True)
+        if not file_info:
+            flash('文件不存在', 'error')
+            return redirect(url_for('index'))
+
+        # 获取WebDAV URL
+        webdav_url = None
+        if client.is_webdav_available():
+            try:
+                webdav_url = client.get_webdav_url(file_id)
+            except Exception as e:
+                print(f"获取WebDAV URL失败: {e}")
+
+        return render_template('demo_webdav.html',
+                               file=file_info,
+                               webdav_url=webdav_url)
+
+    except Exception as e:
+        flash(f'加载演示页面时发生错误: {e}', 'error')
+        return redirect(url_for('index'))
+
+
 @app.errorhandler(404)
 def not_found(error):
     return render_template('error.html', error="页面不存在"), 404

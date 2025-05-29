@@ -443,3 +443,102 @@ class FileService:
         print(f"已生成WebDAV URL，文件ID: {file_id}")
 
         return webdav_url
+
+    def get_webdav_redirect_url(self, file_id: int, use_cache: bool = True, max_redirects: int = 5) -> Optional[str]:
+        """
+        获取文件的WebDAV URL并跟随302跳转，返回最终的下载URL
+
+        :param file_id: 文件ID
+        :param use_cache: 是否使用缓存，默认为True
+        :param max_redirects: 最大跳转次数，防止无限循环，默认5次
+        :return: 跳转后的最终下载URL，如果文件不存在或配置错误则返回None
+        """
+        import requests
+        from requests.exceptions import RequestException
+        
+        # 先获取WebDAV URL
+        webdav_url = self.get_webdav_url(file_id, use_cache=use_cache)
+        if not webdav_url:
+            print(f"无法获取WebDAV URL，文件ID: {file_id}")
+            return None
+
+        current_url = webdav_url
+        redirect_count = 0
+        
+        try:
+            while redirect_count < max_redirects:
+                print(f"发送HEAD请求到URL (跳转次数: {redirect_count}): {current_url}")
+                
+                # 发送HEAD请求，不允许自动跳转
+                response = requests.head(current_url, allow_redirects=False, timeout=30)
+                
+                print(f"响应状态码: {response.status_code}")
+                
+                # 检查是否是跳转响应
+                if response.status_code in [301, 302, 303, 307, 308]:
+                    redirect_url = response.headers.get('Location')
+                    if not redirect_url:
+                        print(f"{response.status_code}响应中没有找到Location头")
+                        return None
+                    
+                    print(f"获取到{response.status_code}跳转URL: {redirect_url}")
+                    current_url = redirect_url
+                    redirect_count += 1
+                    
+                elif response.status_code == 200:
+                    # 如果返回200，说明到达最终URL
+                    print(f"到达最终URL，状态码: {response.status_code}")
+                    return current_url
+                    
+                elif response.status_code == 404:
+                    print(f"文件未找到，状态码: {response.status_code}")
+                    return None
+                    
+                else:
+                    print(f"WebDAV请求返回错误状态码: {response.status_code}")
+                    # 对于其他状态码，尝试返回响应内容以便调试
+                    if hasattr(response, 'text'):
+                        print(f"响应内容: {response.text[:500]}...")
+                    return None
+            
+            print(f"达到最大跳转次数限制({max_redirects})，最终URL: {current_url}")
+            return current_url
+                
+        except RequestException as e:
+            print(f"请求WebDAV URL时发生网络错误: {e}")
+            return None
+        except Exception as e:
+            print(f"获取WebDAV跳转URL时发生未知错误: {e}")
+            return None
+
+    def get_final_download_url(self, file_id: int, prefer_webdav: bool = True, use_cache: bool = True) -> Optional[str]:
+        """
+        获取文件的最终可下载URL，优先使用WebDAV或API下载链接
+
+        :param file_id: 文件ID
+        :param prefer_webdav: 是否优先使用WebDAV，默认为True
+        :param use_cache: 是否使用缓存，默认为True
+        :return: 最终的下载URL，如果获取失败则返回None
+        """
+        if prefer_webdav:
+            # 优先尝试WebDAV
+            webdav_url = self.get_webdav_redirect_url(file_id, use_cache=use_cache)
+            if webdav_url:
+                print(f"成功获取WebDAV下载URL，文件ID: {file_id}")
+                return webdav_url
+            
+            print(f"WebDAV获取失败，尝试使用API下载链接，文件ID: {file_id}")
+        
+        # 尝试使用API获取下载链接
+        try:
+            download_info = self.get_download_info(file_id)
+            if download_info and 'data' in download_info:
+                download_url = download_info['data'].get('downloadUrl')
+                if download_url:
+                    print(f"成功获取API下载URL，文件ID: {file_id}")
+                    return download_url
+        except Exception as e:
+            print(f"获取API下载链接时发生错误: {e}")
+        
+        print(f"无法获取任何下载URL，文件ID: {file_id}")
+        return None
