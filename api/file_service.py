@@ -1,12 +1,15 @@
 """
 文件操作服务
 """
+import hashlib
+import os
+import re
 import time
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote  # 添加导入
 from .http_client import RequestHandler
 from .cache import FileCacheManager
-from .exceptions import ValidationError
+from .exceptions import ValidationError, Pan123APIError
 from .models import File, FileList
 
 
@@ -164,6 +167,242 @@ class FileService:
         # 将所有文件数据转换为字典列表，然后创建合并的FileList
         all_files_data = [file.to_dict() for file in all_files]
         return FileList(all_files_data), None
+
+    def create_file(self,
+                    parent_id: int,
+                    filename: str,
+                    etag: str,
+                    size: int,
+                    duplicate: int = 1,
+                    contain_dir: bool = False) -> Dict[str, Any]:
+        """
+        创建文件（预上传）
+
+        :param parent_id: 父目录ID
+        :param filename: 文件名
+        :param etag: 文件MD5
+        :param size: 文件大小
+        :param duplicate: 文件名冲突策略 (1: 保留两者, 2: 覆盖)
+        :param contain_dir: 是否包含路径
+        :return: API响应的JSON数据字典
+        """
+        # 验证文件名
+        if len(filename.encode('utf-8')) > 255:
+            raise ValidationError("文件名过长（超过255个字节）")
+        if re.search(r'[\\/:*?"<>|]', filename):
+            raise ValidationError('文件名包含非法字符: \\/:*?"<>|')
+        if not filename.strip():
+            raise ValidationError("文件名不能为空")
+
+        endpoint = "/upload/v2/file/create"
+        json_data = {
+            "parentFileID": parent_id,
+            "filename": filename,
+            "etag": etag,
+            "size": size,
+            "duplicate": duplicate,
+            "containDir": contain_dir
+        }
+
+        result = self.http_client.post(endpoint, json_data=json_data)
+
+        if result and 'data' in result:
+            return result['data']
+
+        return {}
+
+    def upload_file(self,
+                    local_path: str,
+                    parent_id: int,
+                    filename: str = None,
+                    duplicate: int = 1) -> Optional[Dict[str, Any]]:
+        """
+        上传完整文件，处理预上传、分片上传和完成上传的整个流程。
+
+        :param local_path: 本地文件路径
+        :param parent_id: 上传到的父目录ID
+        :param filename: 在云端保存的文件名，如果为None则使用本地文件名
+        :param duplicate: 文件名冲突策略 (1: 保留两者, 2: 覆盖)
+        :return: 成功则返回文件信息字典，否则返回None
+        """
+        # 1. 检查文件是否存在
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"文件不存在: {local_path}")
+
+        # 2. 获取文件名、大小和MD5
+        if filename is None:
+            filename = os.path.basename(local_path)
+
+        size = os.path.getsize(local_path)
+        etag = self._calculate_md5(local_path)
+        print(f"开始上传文件: '{filename}', 大小: {size}, MD5: {etag}")
+
+        # 3. 调用 create_file (预上传)
+        try:
+            pre_upload_info = self.create_file(
+                parent_id=parent_id,
+                filename=filename,
+                etag=etag,
+                size=size,
+                duplicate=duplicate
+            )
+        except ValidationError as e:
+            print(f"预上传失败: {e}")
+            return None
+
+        # 4. 检查是否秒传
+        if pre_upload_info.get("reuse"):
+            print("文件秒传成功")
+            return {
+                "fileID": pre_upload_info.get("fileID"),
+                "filename": filename,
+                "size": size,
+                "reuse": True
+            }
+
+        # 5. 如果不是秒传，准备分片上传
+        preupload_id = pre_upload_info.get("preuploadID")
+        slice_size = pre_upload_info.get("sliceSize")
+        servers = pre_upload_info.get("servers")
+
+        if not all([preupload_id, slice_size, servers]):
+            raise ValidationError(
+                "预上传响应缺少必要信息 (preuploadID, sliceSize, servers)")
+
+        print(f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size}")
+
+        # 6. 上传分片
+        upload_success = self._upload_chunks(
+            local_path, preupload_id, slice_size, servers)
+
+        if not upload_success:
+            print("分片上传失败")
+            return None
+
+        # 7. 完成上传
+        complete_info = self._complete_upload(preupload_id)
+
+        if complete_info:
+            print("文件上传成功")
+            return complete_info
+        else:
+            print("完成上传步骤失败")
+            return None
+
+    def _calculate_md5(self, file_path: str, chunk_size: int = 8192) -> str:
+        """计算文件的MD5值"""
+        md5 = hashlib.md5()
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(chunk_size):
+                md5.update(chunk)
+        return md5.hexdigest()
+
+    def _upload_chunks(self, local_path: str, preupload_id: str, slice_size: int, servers: List[str]) -> bool:
+        """
+        读取文件并上传所有分片。
+        """
+        print("开始上传分片...")
+        with open(local_path, 'rb') as f:
+            part_number = 1
+            server_count = len(servers)
+            if server_count == 0:
+                print("错误：没有可用的上传服务器。")
+                return False
+
+            while True:
+                chunk = f.read(slice_size)
+                if not chunk:
+                    break
+
+                # 轮询使用上传服务器
+                server = servers[(part_number - 1) % server_count]
+                if not server.startswith(('http://', 'https://')):
+                    server = 'http://' + server
+
+                endpoint = f"{server}/upload/v2/file/slice"
+                slice_md5 = hashlib.md5(chunk).hexdigest()
+
+                form_data = {
+                    "preuploadID": preupload_id,
+                    "sliceNo": str(part_number),
+                    "sliceMD5": slice_md5,
+                }
+
+                files_data = {
+                    "slice": chunk
+                }
+
+                print(
+                    f"  上传分片 {part_number} (大小: {len(chunk)} bytes, MD5: {slice_md5}) 到 {endpoint}...")
+
+                try:
+                    # 假设 http_client.post 可以通过 `data` 和 `files` 参数处理 multipart/form-data
+                    result = self.http_client.post(
+                        endpoint, data=form_data, files=files_data)
+
+                    if not result:
+                        print(f"  上传分片 {part_number} 失败 (无返回结果)。")
+                        return False
+
+                    # 假设API成功时返回的json包含 code: 0
+                    if result.get('code') != 0:
+                        print(
+                            f"  上传分片 {part_number} 失败: {result.get('message', '未知错误')}")
+                        return False
+
+                except Exception as e:
+                    print(f"  上传分片 {part_number} 时发生网络或客户端错误: {e}")
+                    return False
+
+                print(f"  分片 {part_number} 上传成功。")
+                part_number += 1
+
+        print("所有分片上传成功。")
+        return True
+
+    def _complete_upload(self, preupload_id: str, max_retries: int = 5, retry_delay: int = 2) -> Optional[Dict[str, Any]]:
+        """
+        通知服务器所有分片已上传完毕。
+        包含针对“文件校验中”错误的重试逻辑。
+        """
+        print(f"正在发送上传完成请求, preuploadID: {preupload_id}...")
+
+        endpoint = "/upload/v2/file/upload_complete"
+        json_data = {"preuploadID": preupload_id}
+
+        for attempt in range(max_retries):
+            try:
+                result = self.http_client.post(endpoint, json_data=json_data)
+
+                # 成功 (code == 0)
+                data = result.get('data', {})
+                if data.get('completed'):
+                    print(f"文件上传成功! FileID: {data.get('fileID')}")
+                    return data
+                else:
+                    # API返回成功但未完成，这可能是一个需要重试的状态，但根据错误码20103，我们只处理特定错误。
+                    # 这里我们认为是一个失败状态。
+                    print("完成上传请求返回未完成状态。")
+                    return None
+
+            except Pan123APIError as e:
+                # 错误码 20103: "文件正在校验中,请间隔1秒后再试"
+                if e.error_code == 20103 and attempt < max_retries - 1:
+                    print(
+                        f"文件校验中，将在 {retry_delay} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
+                    time.sleep(retry_delay)
+                    continue  # 重试
+                else:
+                    # 其他API错误或达到最大重试次数
+                    print(f"完成上传请求失败: {e}")
+                    return None
+            except Exception as e:
+                # 网络错误等
+                print(f"完成上传请求时发生未知异常: {e}")
+                return None
+
+        print(f"达到最大重试次数 ({max_retries})，未能完成上传。")
+        return None
 
     def get_download_info(self, file_id: int) -> Dict[str, Any]:
         """

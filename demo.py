@@ -5,9 +5,11 @@ Pan123 API 重构后的演示程序
 测试各种功能模块
 """
 
+import os
 import sys
+import time
 import traceback
-from api import Pan123Client, Pan123APIError, AuthenticationError, ConfigurationError
+from api import Pan123Client, Pan123APIError, AuthenticationError, ConfigurationError, FileUploadError
 
 
 def print_separator(title: str):
@@ -531,6 +533,8 @@ def main():
     try:
         # 使用上下文管理器
         with client:
+            test_upload_file(client)
+            return
             # 2. 测试文件列表
             file_list = test_list_files(client)
 
@@ -563,6 +567,9 @@ def main():
             # 11. 测试WebDAV功能
             test_webdav_features(client, file_list)
 
+            # 12. 测试文件上传
+            test_upload_file(client)
+
     except KeyboardInterrupt:
         print("\n\n⚠️ 用户中断测试")
     except Exception as e:
@@ -571,6 +578,47 @@ def main():
 
     print_separator("测试完成")
     print("✨ 重构后的API测试已完成！")
+
+
+def test_upload_file(client: Pan123Client):
+    """测试文件上传"""
+    print("\n--- 测试文件上传 ---")
+
+    # 创建一个临时文件用于上传
+    local_file_path = "copilot_upload_test.txt"
+    test_content = f"这是一个由Copilot在 {time.ctime()} 创建的测试文件。"
+    try:
+        with open(local_file_path, "w", encoding="utf-8") as f:
+            f.write(test_content)
+        print(f"✓ 创建了临时测试文件: {local_file_path}")
+
+        # 测试上传
+        print(f"\n🚀 开始上传文件到根目录 (parent_id=0)...")
+        upload_result = client.file_service.upload_file(
+            local_path=local_file_path,
+            parent_id=0,  # 上传到根目录
+            # 指定文件名，如果省略，则使用本地文件名
+            filename=f"test_upload_{int(time.time())}.txt"
+        )
+
+        if upload_result:
+            print("\n🎉 文件上传测试成功！")
+            print("   返回结果:")
+            for key, value in upload_result.items():
+                print(f"     - {key}: {value}")
+        else:
+            print("\n❌ 文件上传测试失败。")
+
+    except (Pan123APIError, FileUploadError) as e:
+        print(f"✗ 文件上传失败: {e}")
+    except Exception as e:
+        print(f"✗ 未知错误: {e}")
+        traceback.print_exc()
+    finally:
+        # 清理临时文件
+        if os.path.exists(local_file_path):
+            os.remove(local_file_path)
+            print(f"\n✓ 清理了临时测试文件: {local_file_path}")
 
 
 if __name__ == "__main__":

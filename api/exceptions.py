@@ -41,3 +41,8 @@ class NetworkError(Pan123APIError):
 class ValidationError(Pan123APIError):
     """参数验证错误"""
     pass
+
+
+class FileUploadError(Pan123APIError):
+    """文件上传错误"""
+    pass

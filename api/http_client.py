@@ -34,7 +34,11 @@ class RequestHandler:
         :return: 响应数据
         """
         self._update_auth_header()
-        url = self.base_url + endpoint
+        # 如果endpoint是完整URL，则直接使用；否则，与base_url拼接
+        if endpoint.startswith(('http://', 'https://')):
+            url = endpoint
+        else:
+            url = self.base_url + endpoint
         retry_count = 0
 
         while True:
@@ -114,6 +118,6 @@ class RequestHandler:
         """GET请求"""
         return self.request("GET", endpoint, params=params)
 
-    def post(self, endpoint: str, json_data: Optional[Dict] = None, data: Optional[Dict] = None) -> Dict[str, Any]:
+    def post(self, endpoint: str, json_data: Optional[Dict] = None, data: Optional[Dict] = None, files: Optional[Dict] = None) -> Dict[str, Any]:
         """POST请求"""
-        return self.request("POST", endpoint, json=json_data, data=data)
+        return self.request("POST", endpoint, json=json_data, data=data, files=files)

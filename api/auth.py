@@ -79,7 +79,8 @@ class TokenManager:
             response = requests.post(
                 self.base_url + self.TOKEN_ENDPOINT,
                 json=payload,
-                headers={"Content-Type": "application/json"},
+                headers={"Content-Type": "application/json",
+                         "Platform": "open_platform"},
                 timeout=30
             )
             response.raise_for_status()

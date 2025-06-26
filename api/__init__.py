@@ -1,6 +1,6 @@
 # 123云盘API模块
 from .client import Pan123Client
-from .exceptions import Pan123APIError, AuthenticationError, ConfigurationError, NetworkError, ValidationError
+from .exceptions import Pan123APIError, AuthenticationError, ConfigurationError, NetworkError, ValidationError, FileUploadError
 from .cache import FileCacheManager
 from .auth import TokenManager
 from .config import ConfigManager
@@ -19,5 +19,6 @@ __all__ = [
     'ConfigManager',
     'FileService',
     'File',
-    'FileList'
+    'FileList',
+    'FileUploadError'
 ]
