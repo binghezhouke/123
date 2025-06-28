@@ -121,3 +121,15 @@ class RequestHandler:
     def post(self, endpoint: str, json_data: Optional[Dict] = None, data: Optional[Dict] = None, files: Optional[Dict] = None) -> Dict[str, Any]:
         """POST请求"""
         return self.request("POST", endpoint, json=json_data, data=data, files=files)
+
+    def mkdir(self, name: str, parent_id: int) -> int:
+        """
+        创建目录
+        :param name: 目录名(注:不能重名)
+        :param parent_id: 父目录id，上传到根目录时填写 0
+        :return: 创建的目录ID
+        """
+        endpoint = "/upload/v1/file/mkdir"
+        json_data = {"name": name, "parentID": parent_id}
+        data = self.post(endpoint, json_data=json_data)
+        return data['data']['dirID']

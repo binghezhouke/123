@@ -822,3 +822,12 @@ class FileService:
 
         print(f"无法获取任何下载URL，文件ID: {file_id}")
         return None
+
+    def mkdir(self, name: str, parent_id: int) -> int:
+        """
+        创建目录
+        :param name: 目录名(注:不能重名)
+        :param parent_id: 父目录id，上传到根目录时填写 0
+        :return: 创建的目录ID
+        """
+        return self.http_client.mkdir(name, parent_id)
