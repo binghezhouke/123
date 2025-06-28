@@ -133,3 +133,54 @@ class RequestHandler:
         json_data = {"name": name, "parentID": parent_id}
         data = self.post(endpoint, json_data=json_data)
         return data['data']['dirID']
+
+    def mkdir_recursive(self, path: str, parent_id: int = 0) -> int:
+        """
+        递归创建目录
+        :param path: 目录路径，如 "foo/bar/baz"
+        :param parent_id: 父目录id，上传到根目录时填写 0
+        :return: 创建的最终目录ID
+        """
+        # 处理空路径或根路径的情况
+        if not path or path == '/':
+            return parent_id
+
+        # 去除开头和结尾的斜杠
+        path = path.strip('/')
+
+        # 分割路径
+        parts = path.split('/')
+        current_id = parent_id
+
+        for part in parts:
+            if not part:  # 跳过空目录名
+                continue
+
+            try:
+                # 尝试创建目录
+                current_id = self.mkdir(part, current_id)
+                print(f"成功创建目录: {part}, ID: {current_id}")
+            except Exception as e:
+                # 如果创建失败，可能是目录已存在，尝试查找
+                if hasattr(self, 'list_files'):
+                    # 如果RequestHandler有list_files方法
+                    print(f"创建目录失败，尝试查找已有目录: {part}")
+                    try:
+                        # 假设list_files方法返回一个包含文件信息的对象
+                        files = self.list_files(current_id)
+                        for file in files:
+                            if file.get('name') == part and file.get('type') == 'folder':
+                                current_id = file.get('id')
+                                print(f"找到已存在的目录: {part}, ID: {current_id}")
+                                break
+                        else:
+                            raise ValueError(f"无法创建或找到目录: {part}")
+                    except Exception as find_error:
+                        # 如果查找也失败，则抛出异常
+                        raise ValueError(
+                            f"创建目录失败，且无法找到已有目录: {part}，错误: {str(e)}, {str(find_error)}")
+                else:
+                    # 如果没有list_files方法，直接抛出异常
+                    raise ValueError(f"创建目录失败: {part}，错误: {str(e)}")
+
+        return current_id

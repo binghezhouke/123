@@ -831,3 +831,12 @@ class FileService:
         :return: 创建的目录ID
         """
         return self.http_client.mkdir(name, parent_id)
+
+    def mkdir_recursive(self, path: str, parent_id: int = 0) -> int:
+        """
+        递归创建目录
+        :param path: 目录路径，如 "foo/bar/baz"
+        :param parent_id: 父目录id，上传到根目录时填写 0
+        :return: 创建的最终目录ID
+        """
+        return self.http_client.mkdir_recursive(path, parent_id)
