@@ -5,6 +5,25 @@ from api.client import Pan123Client
 import tqdm
 
 
+def file2json(json_file_path):
+    data = open(json_file_path).read()
+    cnts = data = data.strip().split("$")
+    out = {}
+    out["usesBase62EtagsInExport"] = True,
+    files = []
+    out["files"] = files
+
+    for x in cnts:
+        parts = x.strip().split("#")
+        if len(parts) == 3:
+            one_file = {}
+            one_file["path"] = parts[2]
+            one_file["size"] = parts[1]
+            one_file["etag"] = parts[0]
+            files.append(one_file)
+    return out
+
+
 def upload_from_json(json_file_path, remote_dir):
     """
     从 JSON 文件读取文件列表并上传到指定的远程目录。
@@ -14,7 +33,10 @@ def upload_from_json(json_file_path, remote_dir):
         return
 
     with open(json_file_path, 'r', encoding='utf-8') as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except:
+            data = file2json(json_file_path)
 
     client = Pan123Client()
     usesBase62EtagsInExport = data.get('usesBase62EtagsInExport', False)
