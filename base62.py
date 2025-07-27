@@ -35,6 +35,7 @@ def base62_decode_to_bytes(b62_string: str) -> bytes:
     # 将大整数转换为字节。
     # (num.bit_length() + 7) // 8 用于计算存储该整数所需的最少字节数。
     byte_length = (num.bit_length() + 7) // 8
+    byte_length = 16
     return num.to_bytes(byte_length, 'big')
 
 
