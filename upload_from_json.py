@@ -85,7 +85,7 @@ def upload_from_json(json_file_path, remote_dir):
                 continue
 
         import base62
-        if usesBase62EtagsInExport:
+        if usesBase62EtagsInExport and len(etag) != 32:
             etag = base62.base62_to_hex(etag)
         # 创建文件
         try:
