@@ -830,7 +830,28 @@ class FileService:
         :param parent_id: 父目录id，上传到根目录时填写 0
         :return: 创建的目录ID
         """
-        return self.http_client.mkdir(name, parent_id)
+        try:
+            return self.http_client.mkdir(name, parent_id)
+        except Exception as e:
+            print(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
+
+            # 获取父目录下的文件列表
+            try:
+                file_list, _ = self.list_files(parent_id=parent_id, limit=100)
+
+                # 查找同名的文件夹
+                for file_item in file_list.files:
+                    if file_item.filename == name and file_item.is_folder:
+                        print(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
+                        return file_item.file_id
+
+                # 如果没有找到同名目录，重新抛出原始异常
+                print(f"未找到同名目录: {name}")
+                raise e
+
+            except Exception as list_error:
+                print(f"获取文件列表失败: {list_error}")
+                raise e
 
     def mkdir_recursive(self, path: str, parent_id: int = 0) -> int:
         """
@@ -839,4 +860,32 @@ class FileService:
         :param parent_id: 父目录id，上传到根目录时填写 0
         :return: 创建的最终目录ID
         """
-        return self.http_client.mkdir_recursive(path, parent_id)
+        if not path or not path.strip():
+            raise ValidationError("目录路径不能为空")
+
+        # 移除开头和结尾的斜杠，并分割路径
+        path = path.strip('/')
+        if not path:
+            return parent_id
+
+        path_parts = path.split('/')
+        current_parent_id = parent_id
+
+        print(f"开始递归创建目录: {path}, 父目录ID: {parent_id}")
+
+        for i, dir_name in enumerate(path_parts):
+            if not dir_name.strip():
+                continue
+
+            print(f"创建目录: {dir_name} (父ID: {current_parent_id})")
+
+            try:
+                # 使用自己的 mkdir 方法创建目录
+                current_parent_id = self.mkdir(dir_name, current_parent_id)
+                print(f"成功创建/找到目录: {dir_name}, ID: {current_parent_id}")
+            except Exception as e:
+                print(f"创建目录失败: {dir_name}, 错误: {e}")
+                raise e
+
+        print(f"递归创建目录完成，最终目录ID: {current_parent_id}")
+        return current_parent_id

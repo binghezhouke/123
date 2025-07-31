@@ -9,4 +9,7 @@ dependencies = []
 [dependency-groups]
 dev = [
     "pybase62>=1.0.0",
+    "redis>=6.2.0",
+    "requests>=2.32.4",
+    "tqdm>=4.67.1",
 ]
