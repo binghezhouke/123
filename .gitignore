@@ -1,3 +1,34 @@
 .pan123_api_token_cache.json
 config.json
 __pycache__
+# .gitignore
+
+# 忽略 uv/Python 创建的虚拟环境
+# 无论你给它起什么名字，只要是目录都忽略
+.venv/
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# IDE 和编辑器配置
+.vscode/
+.idea/
+*.swp
+
+# 测试和覆盖率报告
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Mypy 缓存
+.mypy_cache/
+
+# 构建产物
+dist/
+build/
+*.egg-info/

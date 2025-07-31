@@ -1,0 +1,26 @@
+version = 1
+revision = 2
+requires-python = ">=3.12"
+
+[[package]]
+name = "123"
+version = "0.1.0"
+source = { virtual = "." }
+
+[package.dev-dependencies]
+dev = [
+    { name = "pybase62" },
+]
+
+[package.metadata]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pybase62", specifier = ">=1.0.0" }]
+
+[[package]]
+name = "pybase62"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/11/07/8fe498201daece90af1725cf48d5de9d1a87ea8d457df52c986ef926ff33/pybase62-1.0.0-py3-none-any.whl", hash = "sha256:60539ad956ec9e9de091bc7ae88c9550bc2fa17f503050cf34d021b75e73cb27", size = 4913, upload-time = "2023-05-29T08:43:05.677Z" },
+]

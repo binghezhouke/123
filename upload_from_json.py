@@ -85,10 +85,11 @@ def upload_from_json(json_file_path, remote_dir):
                 continue
 
         import base62
-        if usesBase62EtagsInExport and len(etag) != 32:
-            etag = base62.base62_to_hex(etag)
-        # 创建文件
         try:
+            if usesBase62EtagsInExport and len(etag) != 32:
+                etag = base62.decode(
+                    etag, charset=base62.CHARSET_INVERTED).to_bytes(16).hex()
+                # 创建文件
             # tqdm.tqdm.write(f"正在创建文件 '{filename}' 在目录 ID {current_parent_id}...")
             client.file_service.create_file(
                 parent_id=current_parent_id,
