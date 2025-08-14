@@ -3,6 +3,7 @@ import json
 import os
 from api.client import Pan123Client
 import tqdm
+import base62
 
 
 def file2json(json_file_path):
@@ -41,6 +42,9 @@ def upload_from_json(json_file_path, remote_dir):
     client = Pan123Client()
     usesBase62EtagsInExport = data.get('usesBase62EtagsInExport', False)
 
+    # 创建文件夹路径到ID的映射字典，避免重复创建
+    dir_path_to_id_map = {}
+
     # 确定根目录
     base_path = remote_dir if remote_dir else data.get('commonPath', '')
     if not base_path:
@@ -52,6 +56,7 @@ def upload_from_json(json_file_path, remote_dir):
     # 创建根目录
     try:
         root_id = client.file_service.mkdir_recursive(base_path)
+        dir_path_to_id_map[base_path] = root_id
         print(f"成功创建或找到根目录 '{base_path}', ID: {root_id}")
     except Exception as e:
         print(f"创建根目录 '{base_path}' 失败: {e}")
@@ -76,15 +81,22 @@ def upload_from_json(json_file_path, remote_dir):
 
         # 如果文件在子目录中，则创建子目录
         if dir_path:
-            try:
-                current_parent_id = client.file_service.mkdir_recursive(
-                    os.path.join(base_path, dir_path))
-                # print(f"成功创建或找到子目录: {dir_path}, ID: {current_parent_id}")
-            except Exception as e:
-                tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
-                continue
+            full_dir_path = os.path.join(base_path, dir_path)
 
-        import base62
+            # 检查映射中是否已存在该目录路径
+            if full_dir_path in dir_path_to_id_map:
+                current_parent_id = dir_path_to_id_map[full_dir_path]
+                # print(f"使用已缓存的目录ID: {dir_path}, ID: {current_parent_id}")
+            else:
+                try:
+                    current_parent_id = client.file_service.mkdir_recursive(
+                        full_dir_path)
+                    dir_path_to_id_map[full_dir_path] = current_parent_id
+                    # print(f"成功创建或找到子目录: {dir_path}, ID: {current_parent_id}")
+                except Exception as e:
+                    tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
+                    continue
+
         try:
             if usesBase62EtagsInExport and len(etag) != 32:
                 etag = base62.decode(
