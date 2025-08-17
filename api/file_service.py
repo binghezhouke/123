@@ -370,39 +370,22 @@ class FileService:
         endpoint = "/upload/v2/file/upload_complete"
         json_data = {"preuploadID": preupload_id}
 
-        for attempt in range(max_retries):
-            try:
-                result = self.http_client.post(endpoint, json_data=json_data)
-
-                # 成功 (code == 0)
-                data = result.get('data', {})
-                if data.get('completed'):
-                    print(f"文件上传成功! FileID: {data.get('fileID')}")
-                    return data
-                else:
-                    # API返回成功但未完成，这可能是一个需要重试的状态，但根据错误码20103，我们只处理特定错误。
-                    # 这里我们认为是一个失败状态。
-                    print("完成上传请求返回未完成状态。")
-                    return None
-
-            except Pan123APIError as e:
-                # 错误码 20103: "文件正在校验中,请间隔1秒后再试"
-                if e.error_code == 20103 and attempt < max_retries - 1:
-                    print(
-                        f"文件校验中，将在 {retry_delay} 秒后重试... (尝试 {attempt + 1}/{max_retries})")
-                    time.sleep(retry_delay)
-                    continue  # 重试
-                else:
-                    # 其他API错误或达到最大重试次数
-                    print(f"完成上传请求失败: {e}")
-                    return None
-            except Exception as e:
-                # 网络错误等
-                print(f"完成上传请求时发生未知异常: {e}")
-                return None
-
-        print(f"达到最大重试次数 ({max_retries})，未能完成上传。")
-        return None
+        # 将重试责任交给 http_client（网络层）。这里直接调用一次，
+        # http_client 会根据配置对网络/业务码（如20103）进行重试。
+        try:
+            result = self.http_client.post(endpoint, json_data=json_data)
+            data = result.get('data', {})
+            if data.get('completed'):
+                print(f"文件上传成功! FileID: {data.get('fileID')}")
+                return data
+            print("完成上传请求返回未完成状态。")
+            return None
+        except Pan123APIError as e:
+            print(f"完成上传请求失败: {e}")
+            return None
+        except Exception as e:
+            print(f"完成上传请求时发生未知异常: {e}")
+            return None
 
     def get_download_info(self, file_id: int) -> Dict[str, Any]:
         """
@@ -567,32 +550,13 @@ class FileService:
         :param max_retries: 最大重试次数
         :return: File对象，如果文件不存在返回None
         """
-        import time
-        from .exceptions import Pan123APIError
-
-        for attempt in range(max_retries + 1):
-            try:
-                return self.get_file_info_single(file_id, use_cache=use_cache)
-            except Pan123APIError as e:
-                # 检查是否是429错误（Too Many Requests）
-                if e.status_code == 429:
-                    if attempt < max_retries:
-                        wait_time = 1  # 等待1秒
-                        print(
-                            f"遇到429错误，等待 {wait_time} 秒后重试 (尝试 {attempt + 1}/{max_retries + 1})...")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        print(f"达到最大重试次数 ({max_retries + 1})，放弃重试")
-                        raise e
-                else:
-                    # 非429错误，直接抛出
-                    raise e
-            except Exception as e:
-                # 其他异常也直接抛出
-                raise e
-
-        return None
+        # http_client 已经实现重试策略，对于 429 等业务码也会自动重试，
+        # 所以这里直接调用单次接口并把异常向上抛出或返回结果。
+        try:
+            return self.get_file_info_single(file_id, use_cache=use_cache)
+        except Pan123APIError:
+            # 上层根据需要处理错误（日志/抛出）；这里返回 None 保持原来调用方行为
+            raise
 
     def get_file_path_with_details(self, file_id: int, use_cache: bool = True, max_retries: int = 3) -> Optional[Dict[str, Any]]:
         """
@@ -831,7 +795,12 @@ class FileService:
         :return: 创建的目录ID
         """
         try:
-            return self.http_client.mkdir(name, parent_id)
+            endpoint = "/upload/v1/file/mkdir"
+            json_data = {"name": name, "parentID": parent_id}
+            result = self.http_client.post(endpoint, json_data=json_data)
+            if result and 'data' in result:
+                return result['data'].get('dirID')
+            raise Exception("mkdir API 未返回 dirID")
         except Exception as e:
             print(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
 
