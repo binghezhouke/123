@@ -209,3 +209,14 @@ class FileList:
     def to_dict_list(self) -> list:
         """转换为字典列表（兼容性）"""
         return [file.to_dict() for file in self.files]
+
+    def find_by_name(self, filename: str) -> Optional[File]:
+        """
+        根据文件名查找文件
+        :param filename: 要查找的文件名
+        :return: 找到的File对象，如果未找到则返回None
+        """
+        for file in self.files:
+            if file.filename == filename:
+                return file
+        return None

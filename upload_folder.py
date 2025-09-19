@@ -139,12 +139,15 @@ def upload_folder(local_path: str, remote_path: str, client: Pan123Client, dry_r
                     continue
 
                 try:
-                    print(f"上传: {local_file} -> 远程目录ID {parent_id}")
+                    # print(f"上传: {local_file} -> 远程目录ID {parent_id}")
                     result = client.file_service.upload_file(
-                        local_path=local_file, parent_id=parent_id, filename=fname)
-                    if result:
+                        local_path=local_file, parent_id=parent_id, filename=fname, skip_if_exists=True)
+                    if result and not result.get("skipped"):
                         uploaded += 1
                         print(f"  ✓ 上传成功: {fname} -> {result}")
+                    elif result and result.get("skipped"):
+                        # 文件被跳过，也算作“成功”处理
+                        uploaded += 1
                     else:
                         failed += 1
                         print(f"  ✗ 上传返回失败: {fname}")

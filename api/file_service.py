@@ -20,6 +20,7 @@ class FileService:
         self.http_client = http_client
         self.cache_manager = cache_manager
         self.config = config or {}
+        self._dir_cache: Dict[int, Tuple[FileList, Optional[int]]] = {}
 
     def list_files(self,
                    parent_id: int = 0,
@@ -43,8 +44,14 @@ class FileService:
         :param max_pages: 最大页数限制，默认100页
         :return: (FileList对象, next_last_file_id)
         """
+        # 仅在获取所有页面且不搜索时使用缓存
+        use_dir_cache = auto_fetch_all and not search_data
+        if use_dir_cache and parent_id in self._dir_cache:
+            print(f"使用目录缓存: parent_id={parent_id}")
+            return self._dir_cache[parent_id]
+
         if auto_fetch_all:
-            return self._fetch_all_pages(
+            result = self._fetch_all_pages(
                 parent_id=parent_id,
                 limit=limit,
                 search_data=search_data,
@@ -52,6 +59,10 @@ class FileService:
                 qps_limit=qps_limit,
                 max_pages=max_pages
             )
+            if use_dir_cache:
+                print(f"缓存目录列表: parent_id={parent_id}")
+                self._dir_cache[parent_id] = result
+            return result
         else:
             return self._fetch_single_page(
                 parent_id=parent_id,
@@ -215,7 +226,8 @@ class FileService:
                     local_path: str,
                     parent_id: int,
                     filename: str = None,
-                    duplicate: int = 1) -> Optional[Dict[str, Any]]:
+                    duplicate: int = 1,
+                    skip_if_exists: bool = False) -> Optional[Dict[str, Any]]:
         """
         上传完整文件，处理预上传、分片上传和完成上传的整个流程。
 
@@ -223,21 +235,43 @@ class FileService:
         :param parent_id: 上传到的父目录ID
         :param filename: 在云端保存的文件名，如果为None则使用本地文件名
         :param duplicate: 文件名冲突策略 (1: 保留两者, 2: 覆盖)
+        :param skip_if_exists: 如果为True，且远程存在同名同大小文件，则跳过上传
         :return: 成功则返回文件信息字典，否则返回None
         """
         # 1. 检查文件是否存在
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"文件不存在: {local_path}")
 
-        # 2. 获取文件名、大小和MD5
+        # 2. 获取文件名和大小
         if filename is None:
             filename = os.path.basename(local_path)
-
         size = os.path.getsize(local_path)
+
+        # 2.1. 如果设置了 skip_if_exists，检查远程文件
+        if skip_if_exists:
+            print(f"检查远程文件是否存在: '{filename}' in parent {parent_id}")
+            # 这里我们假设list_files能获取所有文件，对于大目录可能需要分页
+            remote_files_list, _ = self.list_files(
+                parent_id=parent_id, auto_fetch_all=True)
+            existing_file = remote_files_list.find_by_name(filename)
+            if existing_file and not existing_file.is_folder:
+                if existing_file.size == size:
+                    print(f"  ✓ 文件 '{filename}' 已存在且大小相同，跳过上传。")
+                    return {
+                        "fileID": existing_file.file_id,
+                        "filename": filename,
+                        "size": size,
+                        "skipped": True
+                    }
+                else:
+                    print(
+                        f"  ! 文件 '{filename}' 已存在但大小不同 (本地: {size}, 远程: {existing_file.size})，继续上传。")
+
+        # 3. 计算MD5
         etag = self._calculate_md5(local_path)
         print(f"开始上传文件: '{filename}', 大小: {size}, MD5: {etag}")
 
-        # 3. 调用 create_file (预上传)
+        # 4. 调用 create_file (预上传)
         try:
             pre_upload_info = self.create_file(
                 parent_id=parent_id,
@@ -250,7 +284,7 @@ class FileService:
             print(f"预上传失败: {e}")
             return None
 
-        # 4. 检查是否秒传
+        # 5. 检查是否秒传
         if pre_upload_info.get("reuse"):
             print("文件秒传成功")
             return {
@@ -260,7 +294,7 @@ class FileService:
                 "reuse": True
             }
 
-        # 5. 如果不是秒传，准备分片上传
+        # 6. 如果不是秒传，准备分片上传
         preupload_id = pre_upload_info.get("preuploadID")
         slice_size = pre_upload_info.get("sliceSize")
         servers = pre_upload_info.get("servers")
@@ -271,7 +305,7 @@ class FileService:
 
         print(f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size}")
 
-        # 6. 上传分片
+        # 7. 上传分片
         upload_success = self._upload_chunks(
             local_path, preupload_id, slice_size, servers)
 
@@ -279,7 +313,7 @@ class FileService:
             print("分片上传失败")
             return None
 
-        # 7. 完成上传
+        # 8. 完成上传
         complete_info = self._complete_upload(preupload_id)
 
         if complete_info:
