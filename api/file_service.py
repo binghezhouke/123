@@ -205,22 +205,43 @@ class FileService:
         if not filename.strip():
             raise ValidationError("文件名不能为空")
 
-        endpoint = "/upload/v2/file/create"
-        json_data = {
-            "parentFileID": parent_id,
-            "filename": filename,
-            "etag": etag,
-            "size": size,
-            "duplicate": duplicate,
-            "containDir": contain_dir
-        }
+        try:
+            endpoint = "/upload/v2/file/create"
+            json_data = {
+                "parentFileID": parent_id,
+                "filename": filename,
+                "etag": etag,
+                "size": size,
+                "duplicate": duplicate,
+                "containDir": contain_dir
+            }
 
-        result = self.http_client.post(endpoint, json_data=json_data)
+            result = self.http_client.post(endpoint, json_data=json_data)
 
-        if result and 'data' in result:
-            return result['data']
+            if result and 'data' in result:
+                return result['data']
 
-        return {}
+            return {}
+        except Exception as e:
+            print(f"预上传失败: {e}, 尝试检查文件是否已存在...")
+            try:
+                remote_files_list, _ = self.list_files(
+                    parent_id=parent_id, auto_fetch_all=True)
+                existing_file = remote_files_list.find_by_name(filename)
+                if existing_file and not existing_file.is_folder and existing_file.size == size:
+                    print(
+                        f"  ✓ 找到已存在的文件 '{filename}' 且大小相同，返回现有文件信息。")
+                    return {
+                        "fileID": existing_file.file_id,
+                        "filename": filename,
+                        "size": size,
+                        "skipped": True,
+                        "reuse": True  # 模拟秒传成功
+                    }
+                raise e
+            except Exception as list_error:
+                print(f"检查已存在文件时出错: {list_error}")
+                raise e
 
     def upload_file(self,
                     local_path: str,
