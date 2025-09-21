@@ -98,7 +98,16 @@ class FileService:
         if not result or 'data' not in result:
             return FileList([]), None
 
-        file_list = result['data'].get('fileList', [])
+        raw_file_list = result['data'].get('fileList', [])
+        # 过滤掉已被移入垃圾桶的文件（trashed == 1）
+        try:
+            file_list = [f for f in raw_file_list if int(
+                f.get('trashed', 0)) != 1]
+        except Exception:
+            # 如果数据格式异常，回退到不抛出错误的原始列表
+            file_list = [f for f in raw_file_list if not (isinstance(
+                f.get('trashed', None), int) and f.get('trashed') == 1)]
+
         next_last_file_id = result['data'].get('lastFileId')
 
         return FileList(file_list), next_last_file_id
