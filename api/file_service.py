@@ -870,7 +870,7 @@ class FileService:
 
             # 获取父目录下的文件列表
             try:
-                file_list, _ = self.list_files(parent_id=parent_id, limit=100)
+                file_list, _ = self.list_files(parent_id=parent_id, limit=100,auto_fetch_all=True)
 
                 # 查找同名的文件夹
                 for file_item in file_list.files:
