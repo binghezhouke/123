@@ -30,7 +30,8 @@ class FileService:
                    last_file_id: int = None,
                    auto_fetch_all: bool = False,
                    qps_limit: float = 1.0,
-                   max_pages: int = 100) -> Tuple[FileList, Optional[int]]:
+                   max_pages: int = 100,
+                   use_cache: bool = True) -> Tuple[FileList, Optional[int]]:
         """
         列出文件并返回FileList对象
 
@@ -45,7 +46,7 @@ class FileService:
         :return: (FileList对象, next_last_file_id)
         """
         # 仅在获取所有页面且不搜索时使用缓存
-        use_dir_cache = auto_fetch_all and not search_data
+        use_dir_cache = auto_fetch_all and not search_data and use_cache
         if use_dir_cache and parent_id in self._dir_cache:
             print(f"使用目录缓存: parent_id={parent_id}")
             return self._dir_cache[parent_id]
@@ -866,11 +867,11 @@ class FileService:
                 return result['data'].get('dirID')
             raise Exception("mkdir API 未返回 dirID")
         except Exception as e:
-            print(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
+            #print(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
 
             # 获取父目录下的文件列表
             try:
-                file_list, _ = self.list_files(parent_id=parent_id, limit=100,auto_fetch_all=True)
+                file_list, _ = self.list_files(parent_id=parent_id, limit=100,auto_fetch_all=True,use_cache=True)
 
                 # 查找同名的文件夹
                 for file_item in file_list.files:
@@ -878,6 +879,13 @@ class FileService:
                         print(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
                         return file_item.file_id
 
+                file_list, _ = self.list_files(parent_id=parent_id, limit=100,auto_fetch_all=True,use_cache=False)
+
+                # 查找同名的文件夹
+                for file_item in file_list.files:
+                    if file_item.filename == name and file_item.is_folder:
+                        print(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
+                        return file_item.file_id
                 # 如果没有找到同名目录，重新抛出原始异常
                 print(f"未找到同名目录: {name}")
                 raise e
