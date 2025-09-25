@@ -208,10 +208,21 @@ class FileService:
         :return: API响应的JSON数据字典
         """
         # 验证文件名
+        # 当 contain_dir 为 True 时，允许传入包含路径的 filename（使用正斜杠 '/'），
+        # 但仍需限制总体字节长度不超过255，并且禁止其他非法字符。
         if len(filename.encode('utf-8')) > 255:
             raise ValidationError("文件名过长（超过255个字节）")
-        if re.search(r'[\\/:*?"<>|]', filename):
-            raise ValidationError('文件名包含非法字符: \\/:*?"<>|')
+
+        # 如果不包含目录，则严格禁止任何路径分隔符或非法字符
+        if not contain_dir:
+            if re.search(r'[\\/:*?"<>|]', filename):
+                raise ValidationError('文件名包含非法字符: \\\/:*?"<>|')
+        else:
+            # contain_dir == True 时，允许正斜杠 '/' 作为目录分隔符，
+            # 但仍禁止反斜杠和其他非法字符。
+            if re.search(r'[\\:*?"<>|]', filename):
+                raise ValidationError('包含路径的文件名包含非法字符: \\:*?"<>|')
+
         if not filename.strip():
             raise ValidationError("文件名不能为空")
 
@@ -867,11 +878,12 @@ class FileService:
                 return result['data'].get('dirID')
             raise Exception("mkdir API 未返回 dirID")
         except Exception as e:
-            #print(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
+            # print(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
 
             # 获取父目录下的文件列表
             try:
-                file_list, _ = self.list_files(parent_id=parent_id, limit=100,auto_fetch_all=True,use_cache=True)
+                file_list, _ = self.list_files(
+                    parent_id=parent_id, limit=100, auto_fetch_all=True, use_cache=True)
 
                 # 查找同名的文件夹
                 for file_item in file_list.files:
@@ -879,7 +891,8 @@ class FileService:
                         print(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
                         return file_item.file_id
 
-                file_list, _ = self.list_files(parent_id=parent_id, limit=100,auto_fetch_all=True,use_cache=False)
+                file_list, _ = self.list_files(
+                    parent_id=parent_id, limit=100, auto_fetch_all=True, use_cache=False)
 
                 # 查找同名的文件夹
                 for file_item in file_list.files:

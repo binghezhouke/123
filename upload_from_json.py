@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import re
 from api.client import Pan123Client
 import tqdm
 import base62
@@ -79,36 +80,57 @@ def upload_from_json(json_file_path, remote_dir):
 
         current_parent_id = root_id
 
-        # 如果文件在子目录中，则创建子目录
-        if dir_path:
-            full_dir_path = os.path.join(base_path, dir_path)
-
-            # 检查映射中是否已存在该目录路径
-            if full_dir_path in dir_path_to_id_map:
-                current_parent_id = dir_path_to_id_map[full_dir_path]
-                # print(f"使用已缓存的目录ID: {dir_path}, ID: {current_parent_id}")
-            else:
-                try:
-                    current_parent_id = client.file_service.mkdir_recursive(
-                        full_dir_path)
-                    dir_path_to_id_map[full_dir_path] = current_parent_id
-                    # print(f"成功创建或找到子目录: {dir_path}, ID: {current_parent_id}")
-                except Exception as e:
-                    tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
-                    continue
+        # 如果文件在子目录中，尝试直接传递带相对路径的 filename（contain_dir=True），
+        # 条件：整体字节长度 <= 255，且路径不以斜杠开头且不包含非法字符（\ <>: " | ? * 反斜杠除外）
+        use_contain_dir = False
+        full_relative_path = file_path.replace('\\', '/')  # 规范为正斜杠
 
         try:
             if usesBase62EtagsInExport and len(etag) != 32:
                 etag = base62.decode(
                     etag, charset=base62.CHARSET_INVERTED).to_bytes(16).hex()
-                # 创建文件
-            # tqdm.tqdm.write(f"正在创建文件 '{filename}' 在目录 ID {current_parent_id}...")
-            client.file_service.create_file(
-                parent_id=current_parent_id,
-                filename=filename,
-                size=int(size),
-                etag=etag
-            )
+
+            # 判断是否可以使用 contain_dir 直接创建（避免额外创建目录）
+            if dir_path:
+                byte_len = len(full_relative_path.encode('utf-8'))
+                # 不能以 '/' 开头，并且总长度限制为255字节
+                if byte_len <= 255 and not full_relative_path.startswith('/'):
+                    # 禁止反斜杠和一些特殊字符
+                    if not re.search(r'[\\:\\*\?\"<>\|]', full_relative_path):
+                        use_contain_dir = True
+
+            if use_contain_dir:
+                # 直接把包含相对路径的 filename 传给 create_file
+                client.file_service.create_file(
+                    parent_id=current_parent_id,
+                    filename=full_relative_path,
+                    size=int(size),
+                    etag=etag,
+                    contain_dir=True
+                )
+            else:
+                # 原有逻辑：确保目录存在并使用纯文件名创建
+                if dir_path:
+                    full_dir_path = os.path.join(base_path, dir_path)
+
+                    # 检查映射中是否已存在该目录路径
+                    if full_dir_path in dir_path_to_id_map:
+                        current_parent_id = dir_path_to_id_map[full_dir_path]
+                    else:
+                        try:
+                            current_parent_id = client.file_service.mkdir_recursive(
+                                full_dir_path)
+                            dir_path_to_id_map[full_dir_path] = current_parent_id
+                        except Exception as e:
+                            tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
+                            continue
+
+                client.file_service.create_file(
+                    parent_id=current_parent_id,
+                    filename=filename,
+                    size=int(size),
+                    etag=etag
+                )
             # tqdm.tqdm.write(f"成功为 '{filename}' 创建文件条目。")
         except Exception as e:
             tqdm.tqdm.write(f"为 '{filename}' 创建文件条目失败: {e}")
