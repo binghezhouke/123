@@ -22,6 +22,23 @@ class FileService:
         self.config = config or {}
         self._dir_cache: Dict[int, Tuple[FileList, Optional[int]]] = {}
 
+    @staticmethod
+    def _format_file_size(size_bytes: int) -> str:
+        """将字节数格式化为对人友好的字符串（GB/MB/KB/字节）。"""
+        try:
+            size = int(size_bytes)
+        except Exception:
+            return str(size_bytes)
+
+        if size >= 1024 * 1024 * 1024:
+            return f"{size / (1024 * 1024 * 1024):.2f} GB"
+        elif size >= 1024 * 1024:
+            return f"{size / (1024 * 1024):.2f} MB"
+        elif size >= 1024:
+            return f"{size / 1024:.2f} KB"
+        else:
+            return f"{size} 字节"
+
     def list_files(self,
                    parent_id: int = 0,
                    limit: int = 100,
@@ -289,6 +306,9 @@ class FileService:
             filename = os.path.basename(local_path)
         size = os.path.getsize(local_path)
 
+        # 友好格式化大小
+        size_friendly = self._format_file_size(size)
+
         # 2.1. 如果设置了 skip_if_exists，检查远程文件
         if skip_if_exists:
             print(f"检查远程文件是否存在: '{filename}' in parent {parent_id}")
@@ -311,7 +331,8 @@ class FileService:
 
         # 3. 计算MD5
         etag = self._calculate_md5(local_path)
-        print(f"开始上传文件: '{filename}', 大小: {size}, MD5: {etag}")
+        print(
+            f"开始上传文件: '{filename}', 大小: {size} bytes ({size_friendly}), MD5: {etag}")
 
         # 4. 调用 create_file (预上传)
         try:
@@ -345,7 +366,17 @@ class FileService:
             raise ValidationError(
                 "预上传响应缺少必要信息 (preuploadID, sliceSize, servers)")
 
-        print(f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size}")
+        # 估算分片数量（向上取整）
+        try:
+            estimated_parts = (size + int(slice_size) - 1) // int(slice_size)
+        except Exception:
+            estimated_parts = None
+
+        if estimated_parts:
+            print(
+                f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size} bytes, 预计分片数: {estimated_parts}")
+        else:
+            print(f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size}")
 
         # 7. 上传分片
         upload_success = self._upload_chunks(
