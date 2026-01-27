@@ -18,13 +18,22 @@
         </nav>
 
         <!-- 工具栏 -->
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h2><i class="fas fa-folder-open"></i> 文件列表</h2>
+        <div class="surface-card toolbar-card d-flex align-items-center justify-content-between flex-wrap gap-3">
+            <div>
+                <p class="text-uppercase text-muted small mb-1">目录</p>
+                <h3 class="mb-0 text-white d-flex align-items-center gap-2">
+                    <i class="fas fa-folder-open text-warning"></i> 当前文件夹
+                </h3>
+                <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="meta-pill"><i class="fas fa-layer-group"></i> {{ files|length }} 项</span>
+                    <span class="meta-pill"><i class="fas fa-sliders-h"></i> 每页 {{ limit }} 条</span>
+                </div>
+            </div>
             <div class="btn-group">
-                <button type="button" class="btn btn-outline-secondary" onclick="refreshFiles()">
+                <button type="button" class="btn btn-ghost" onclick="refreshFiles()">
                     <i class="fas fa-sync-alt"></i> 刷新
                 </button>
-                <button type="button" class="btn btn-outline-primary" onclick="toggleView()">
+                <button type="button" class="btn btn-glow" onclick="toggleView()">
                     <i class="fas fa-th-list"></i> 切换视图
                 </button>
             </div>
@@ -35,8 +44,8 @@
         <div class="file-list">
             <div class="row" id="fileContainer">
                 {% for file in files %}
-                <div class="col-12 mb-2 file-item" data-file-id="{{ file.fileId }}">
-                    <div class="card h-100 file-card">
+                <div class="col-12 mb-3 file-item" data-file-id="{{ file.fileId }}">
+                    <div class="file-card h-100 surface-card">
                         <div class="card-body d-flex align-items-center">
                             <!-- 文件图标 -->
                             <div class="file-icon me-3">
@@ -56,14 +65,14 @@
                                         </a>
                                     {% endif %}
                                 </h6>
-                                <div class="file-meta text-muted small">
-                                    <span class="me-3">
+                                <div class="file-meta small d-flex flex-wrap gap-2 mt-1">
+                                    <span class="meta-pill">
                                         <i class="fas fa-weight-hanging"></i> {{ file.size_formatted }}
                                     </span>
-                                    <span class="me-3">
+                                    <span class="meta-pill">
                                         <i class="fas fa-tag"></i> {{ file.category_name }}
                                     </span>
-                                    <span>
+                                    <span class="meta-pill">
                                         <i class="fas fa-calendar"></i> {{ file.createAt }}
                                     </span>
                                 </div>
@@ -73,11 +82,11 @@
                             <div class="file-actions">
                                 <div class="btn-group btn-group-sm">
                                     <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
-                                       class="btn btn-outline-info" title="查看详情">
+                                       class="btn btn-ghost" title="查看详情">
                                         <i class="fas fa-info-circle"></i>
                                     </a>
                                     {% if not file.is_folder %}
-                                    <button type="button" class="btn btn-outline-success" 
+                                    <button type="button" class="btn btn-glow" 
                                             onclick="getDownloadLink({{ file.fileId }})" title="获取下载链接">
                                         <i class="fas fa-download"></i>
                                     </button>
@@ -95,17 +104,17 @@
         {% if next_last_file_id and next_last_file_id != -1 %}
         <div class="d-flex justify-content-center mt-4">
             <a href="{{ url_for('index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}" 
-               class="btn btn-primary">
+               class="btn btn-glow px-4">
                 <i class="fas fa-chevron-right"></i> 加载更多
             </a>
         </div>
         {% endif %}
         
         {% else %}
-        <div class="text-center py-5">
+        <div class="surface-card text-center py-5">
             <i class="fas fa-folder-open fa-5x text-muted mb-3"></i>
-            <h3 class="text-muted">文件夹为空</h3>
-            <p class="text-muted">这个文件夹中还没有任何文件或子文件夹。</p>
+            <h3 class="text-white">文件夹为空</h3>
+            <p class="text-muted mb-0">这个文件夹中还没有任何文件或子文件夹。</p>
         </div>
         {% endif %}
     </div>

@@ -5,15 +5,23 @@
 {% block content %}
 <div class="row">
     <div class="col-12">
-        <h2><i class="fas fa-search"></i> 文件搜索</h2>
-        <hr>
+        <div class="surface-card toolbar-card d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
+            <div>
+                <p class="text-uppercase text-muted small mb-1">搜索</p>
+                <h3 class="mb-0 text-white d-flex align-items-center gap-2">
+                    <i class="fas fa-search"></i> 文件搜索
+                </h3>
+                {% if search_query %}
+                <div class="d-flex align-items-center gap-2 mt-2">
+                    <span class="meta-pill"><i class="fas fa-quote-right"></i> {{ search_query }}</span>
+                    <span class="meta-pill"><i class="fas fa-layer-group"></i> {{ files|length }} 结果</span>
+                </div>
+                {% endif %}
+            </div>
+        </div>
         
         <!-- 高级搜索表单 -->
-        <div class="card mb-4">
-            <div class="card-header">
-                <h5 class="mb-0">搜索选项</h5>
-            </div>
-            <div class="card-body">
+        <div class="search-form mb-4">
                 <form method="GET" action="{{ url_for('search') }}">
                     <div class="row">
                         <div class="col-md-6">
@@ -44,7 +52,7 @@
                             </div>
                         </div>
                     </div>
-                    <button type="submit" class="btn btn-primary">
+                    <button type="submit" class="btn btn-glow">
                         <i class="fas fa-search"></i> 搜索
                     </button>
                 </form>
@@ -68,7 +76,7 @@
                 <div class="row">
                     {% for file in files %}
                         <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="card file-card h-100">
+                            <div class="file-card surface-card h-100">
                                 <div class="card-body">
                                     <div class="d-flex align-items-start">
                                         <div class="file-icon me-3">
@@ -102,12 +110,12 @@
                                         <div class="btn-group w-100" role="group">
                                             {% if file.is_folder %}
                                                 <a href="{{ url_for('index', parent_id=file.fileId) }}" 
-                                                   class="btn btn-outline-primary btn-sm">
+                                                   class="btn btn-ghost btn-sm">
                                                     <i class="fas fa-folder-open"></i> 打开
                                                 </a>
                                             {% else %}
                                                 <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
-                                                   class="btn btn-outline-primary btn-sm">
+                                                   class="btn btn-ghost btn-sm">
                                                     <i class="fas fa-info-circle"></i> 详情
                                                 </a>
                                                 <button class="btn btn-outline-success btn-sm download-btn" 
@@ -128,7 +136,7 @@
                 {% if next_last_file_id %}
                     <div class="d-flex justify-content-center mt-4">
                         <a href="{{ url_for('search', q=search_query, mode=search_mode, limit=limit, last_file_id=next_last_file_id) }}" 
-                           class="btn btn-outline-primary">
+                           class="btn btn-glow px-4">
                             <i class="fas fa-chevron-right"></i> 加载更多
                         </a>
                     </div>

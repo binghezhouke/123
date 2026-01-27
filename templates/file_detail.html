@@ -17,10 +17,10 @@
             </ol>
         </nav>
 
-        <div class="card">
-            <div class="card-header">
+        <div class="surface-card">
+            <div class="card-header border-0 pb-0 bg-transparent">
                 <div class="d-flex align-items-center">
-                    <i class="{{ file.icon }} fa-2x text-primary me-3"></i>
+                    <i class="{{ file.icon }} file-detail-icon me-3"></i>
                     <div>
                         <h4 class="mb-0">{{ file.filename }}</h4>
                         <small class="text-muted">
@@ -37,7 +37,7 @@
                     <div class="col-md-8">
                         <h5><i class="fas fa-info-circle"></i> 文件信息</h5>
                         
-                        <table class="table table-striped">
+                        <table class="table table-striped align-middle">
                             <tbody>
                                 <tr>
                                     <td><strong>文件名</strong></td>
@@ -159,16 +159,16 @@
                         <div class="d-grid gap-2">
                             {% if file.is_folder %}
                                 <a href="{{ url_for('index', parent_id=file.fileId) }}" 
-                                   class="btn btn-primary">
+                                   class="btn btn-glow">
                                     <i class="fas fa-folder-open"></i> 打开文件夹
                                 </a>
                             {% else %}
                                 {% if download_url %}
-                                    <a href="{{ download_url }}" class="btn btn-success" target="_blank">
+                                    <a href="{{ download_url }}" class="btn btn-glow" target="_blank">
                                         <i class="fas fa-download"></i> 直接下载
                                     </a>
                                 {% else %}
-                                    <button class="btn btn-success download-btn" 
+                                    <button class="btn btn-glow download-btn" 
                                             data-file-id="{{ file.fileId }}" 
                                             data-file-name="{{ file.filename }}">
                                         <i class="fas fa-download"></i> 获取下载链接
@@ -176,23 +176,23 @@
                                 {% endif %}
                                 
                                 <!-- 智能下载按钮 -->
-                                <button class="btn btn-info" onclick="getFinalDownloadUrl()" id="finalDownloadBtn" data-file-id="{{ file.fileId }}">
+                                <button class="btn btn-ghost" onclick="getFinalDownloadUrl()" id="finalDownloadBtn" data-file-id="{{ file.fileId }}">
                                     <i class="fas fa-magic"></i> 智能下载
                                 </button>
                                 
                                 <!-- WebDAV演示按钮 -->
                                 {% if webdav_url %}
-                                <a href="{{ url_for('demo_webdav', file_id=file.fileId) }}" class="btn btn-outline-info">
+                                <a href="{{ url_for('demo_webdav', file_id=file.fileId) }}" class="btn btn-ghost">
                                     <i class="fas fa-play-circle"></i> WebDAV演示
                                 </a>
                                 {% endif %}
                             {% endif %}
                             
-                            <button class="btn btn-outline-secondary" onclick="history.back()">
+                            <button class="btn btn-ghost" onclick="history.back()">
                                 <i class="fas fa-arrow-left"></i> 返回
                             </button>
                             
-                            <a href="{{ url_for('index') }}" class="btn btn-outline-primary">
+                            <a href="{{ url_for('index') }}" class="btn btn-ghost">
                                 <i class="fas fa-home"></i> 返回首页
                             </a>
                         </div>
@@ -244,8 +244,8 @@
 
         <!-- 如果是文件夹，显示内容 -->
         {% if file.is_folder %}
-            <div class="card mt-4">
-                <div class="card-header">
+            <div class="surface-card mt-4">
+                <div class="card-header border-0 bg-transparent">
                     <h5 class="mb-0">
                         <i class="fas fa-folder"></i> 文件夹内容
                     </h5>
