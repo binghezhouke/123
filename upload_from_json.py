@@ -4,7 +4,6 @@ import os
 import re
 from api.client import Pan123Client
 import tqdm
-import base62
 
 
 def file2json(json_file_path):
@@ -37,6 +36,7 @@ def _decode_sha1(raw_value: str, uses_base62: bool = False) -> str:
     # 尝试base62解码
     if uses_base62 and re.fullmatch(r"[0-9A-Za-z]+", raw):
         try:
+            import base62
             num = base62.decode(raw, charset=base62.CHARSET_INVERTED)
             byte_len = max((num.bit_length() + 7) // 8, 1)
             candidate = num.to_bytes(byte_len, 'big').hex()
@@ -99,7 +99,8 @@ def upload_from_json(json_file_path, remote_dir):
 
         file_path = file_info.get('path')
         size = file_info.get('size')
-        etag = file_info.get('etag')
+        # 兼容 sha1 和 etag 两种字段名
+        etag = file_info.get('sha1') or file_info.get('etag')
 
         if not all([file_path, size, etag]):
             print(f"跳过不完整的文件记录: {file_info}")

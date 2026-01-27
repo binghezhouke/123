@@ -141,10 +141,20 @@ def upload_folder(local_path: str, remote_path: str, client: Pan123Client, dry_r
                 try:
                     # print(f"上传: {local_file} -> 远程目录ID {parent_id}")
                     result = client.file_service.upload_file(
-                        local_path=local_file, parent_id=parent_id, filename=fname, skip_if_exists=True)
+                        local_path=local_file,
+                        parent_id=parent_id,
+                        filename=fname,
+                        skip_if_exists=True,
+                        try_sha1_reuse=True  # 启用SHA1秒传
+                    )
                     if result and not result.get("skipped"):
                         uploaded += 1
-                        print(f"  ✓ 上传成功: {fname} -> {result}")
+                        upload_method = ""
+                        if result.get('method') == 'sha1_reuse':
+                            upload_method = " (SHA1秒传)"
+                        elif result.get('reuse'):
+                            upload_method = " (秒传)"
+                        print(f"  ✓ 上传成功: {fname}{upload_method} -> {result}")
                     elif result and result.get("skipped"):
                         # 文件被跳过，也算作“成功”处理
                         uploaded += 1

@@ -202,6 +202,32 @@ class Pan123Client:
         self.token_manager.clear_cache()
         self.token_manager.ensure_valid_token()
 
+    # 文件上传方法
+    def upload_file(self, local_path: str, parent_id: int, filename: str = None,
+                    duplicate: int = 1, skip_if_exists: bool = False,
+                    try_sha1_reuse: bool = True):
+        """
+        上传文件
+
+        :param local_path: 本地文件路径
+        :param parent_id: 父目录ID
+        :param filename: 文件名，None则使用本地文件名
+        :param duplicate: 重名策略（1保留两者，2覆盖）
+        :param skip_if_exists: 跳过已存在的同名同大小文件
+        :param try_sha1_reuse: 是否尝试SHA1秒传
+        :return: 上传结果字典
+        """
+        return self.file_service.upload_file(
+            local_path, parent_id, filename, duplicate, skip_if_exists, try_sha1_reuse)
+
+    def mkdir(self, name: str, parent_id: int):
+        """创建目录"""
+        return self.file_service.mkdir(name, parent_id)
+
+    def mkdir_recursive(self, path: str, parent_id: int = 0):
+        """递归创建目录"""
+        return self.file_service.mkdir_recursive(path, parent_id)
+
     def __enter__(self):
         """上下文管理器支持"""
         return self
