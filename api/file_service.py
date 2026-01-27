@@ -286,7 +286,8 @@ class FileService:
                     parent_id: int,
                     filename: str = None,
                     duplicate: int = 1,
-                    skip_if_exists: bool = False) -> Optional[Dict[str, Any]]:
+                    skip_if_exists: bool = False,
+                    try_sha1_reuse: bool = True) -> Optional[Dict[str, Any]]:
         """
         上传完整文件，处理预上传、分片上传和完成上传的整个流程。
 
@@ -295,6 +296,7 @@ class FileService:
         :param filename: 在云端保存的文件名，如果为None则使用本地文件名
         :param duplicate: 文件名冲突策略 (1: 保留两者, 2: 覆盖)
         :param skip_if_exists: 如果为True，且远程存在同名同大小文件，则跳过上传
+        :param try_sha1_reuse: 是否先尝试SHA1秒传，默认为True
         :return: 成功则返回文件信息字典，否则返回None
         """
         # 1. 检查文件是否存在
@@ -328,6 +330,22 @@ class FileService:
                 else:
                     print(
                         f"  ! 文件 '{filename}' 已存在但大小不同 (本地: {size}, 远程: {existing_file.size})，继续上传。")
+
+        # 2.2. 如果启用SHA1秒传，先尝试秒传
+        if try_sha1_reuse:
+            print(f"尝试SHA1秒传文件: '{filename}'...")
+            sha1_result = self.try_sha1_reuse(
+                local_path, filename, parent_id, duplicate)
+            if sha1_result and sha1_result.get('reuse'):
+                print(f"✓ SHA1秒传成功！文件ID: {sha1_result.get('fileID')}")
+                return {
+                    "fileID": sha1_result.get('fileID'),
+                    "filename": filename,
+                    "size": size,
+                    "reuse": True,
+                    "method": "sha1_reuse"
+                }
+            print("SHA1秒传未命中，继续常规上传流程...")
 
         # 3. 计算MD5
         etag = self._calculate_md5(local_path)
@@ -403,6 +421,76 @@ class FileService:
             while chunk := f.read(chunk_size):
                 md5.update(chunk)
         return md5.hexdigest()
+
+    def _calculate_sha1(self, file_path: str, chunk_size: int = 8192) -> str:
+        """计算文件的SHA1值"""
+        sha1 = hashlib.sha1()
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(chunk_size):
+                sha1.update(chunk)
+        return sha1.hexdigest()
+
+    def try_sha1_reuse(self,
+                       local_path: Optional[str],
+                       filename: str,
+                       parent_id: int,
+                       duplicate: int = 1,
+                       sha1: Optional[str] = None,
+                       size: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        """
+        尝试使用SHA1秒传文件，可接受本地文件或预先提供的sha1/size元数据。
+
+        :param local_path: 本地文件路径；如果提供了 sha1 和 size，则可以为 None
+        :param filename: 文件名
+        :param parent_id: 父目录ID
+        :param duplicate: 文件名冲突处理策略（1保留两者，2覆盖原文件）
+        :param sha1: 预先计算好的SHA1（40位hex）
+        :param size: 预先提供的文件大小（bytes）
+        :return: 如果秒传成功返回响应数据，否则返回None
+        """
+        try:
+            sha1_hash = sha1
+            file_size = size
+
+            # 如未提供sha1/size，则基于本地文件计算
+            if sha1_hash is None or file_size is None:
+                if not local_path or not os.path.isfile(local_path):
+                    raise FileNotFoundError("需要本地文件来计算SHA1，但未提供有效路径")
+                file_size = file_size or os.path.getsize(local_path)
+                sha1_hash = sha1_hash or self._calculate_sha1(local_path)
+
+            # 标准化sha1
+            sha1_hash = sha1_hash.lower() if sha1_hash else sha1_hash
+
+            print(f"  计算/使用SHA1: {sha1_hash}, 大小: {file_size} bytes")
+
+            endpoint = "/upload/v2/file/sha1_reuse"
+            json_data = {
+                "parentFileID": parent_id,
+                "filename": filename,
+                "sha1": sha1_hash,
+                "size": file_size,
+                "duplicate": duplicate
+            }
+
+            result = self.http_client.post(endpoint, json_data=json_data)
+
+            if result and result.get('code') == 0:
+                data = result.get('data', {})
+                if data.get('reuse'):
+                    file_id = data.get('fileID')
+                    print(f"  ✓ 文件秒传成功！文件ID: {file_id}")
+                    return data
+                else:
+                    print("  SHA1未命中，需要常规上传")
+                    return None
+            else:
+                print(f"  秒传API调用失败: {result.get('message', '未知错误')}")
+                return None
+
+        except Exception as e:
+            print(f"  SHA1秒传尝试失败: {e}")
+            return None
 
     def _upload_chunks(self, local_path: str, preupload_id: str, slice_size: int, servers: List[str]) -> bool:
         """

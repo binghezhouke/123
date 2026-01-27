@@ -26,6 +26,36 @@ def file2json(json_file_path):
     return out
 
 
+def _decode_sha1(raw_value: str, uses_base62: bool = False) -> str:
+    """从字符串或base62编码中解析出40位SHA1 hex，解析失败返回空字符串。"""
+    if not raw_value:
+        return ""
+
+    raw = str(raw_value).strip()
+    candidate = raw
+
+    # 尝试base62解码
+    if uses_base62 and re.fullmatch(r"[0-9A-Za-z]+", raw):
+        try:
+            num = base62.decode(raw, charset=base62.CHARSET_INVERTED)
+            byte_len = max((num.bit_length() + 7) // 8, 1)
+            candidate = num.to_bytes(byte_len, 'big').hex()
+        except Exception:
+            candidate = raw
+
+    candidate = candidate.lower()
+
+    # 补齐前导零，确保长度检测准确
+    if len(candidate) < 40:
+        candidate = candidate.zfill(40)
+
+    # 只接受40位sha1 hex
+    if re.fullmatch(r"[0-9a-f]{40}", candidate):
+        return candidate
+
+    return ""
+
+
 def upload_from_json(json_file_path, remote_dir):
     """
     从 JSON 文件读取文件列表并上传到指定的远程目录。
@@ -63,7 +93,7 @@ def upload_from_json(json_file_path, remote_dir):
         print(f"创建根目录 '{base_path}' 失败: {e}")
         return
 
-    # 遍历并创建文件
+    # 遍历并秒传文件
     files_to_upload = data.get('files', [])
     for file_info in tqdm.tqdm(files_to_upload, desc="上传文件"):
 
@@ -77,63 +107,52 @@ def upload_from_json(json_file_path, remote_dir):
 
         # 提取文件名和相对目录
         dir_path, filename = os.path.split(file_path)
-
         current_parent_id = root_id
 
-        # 如果文件在子目录中，尝试直接传递带相对路径的 filename（contain_dir=True），
-        # 条件：整体字节长度 <= 255，且路径不以斜杠开头且不包含非法字符（\ <>: " | ? * 反斜杠除外）
-        use_contain_dir = False
-        full_relative_path = file_path.replace('\\', '/')  # 规范为正斜杠
+        # 规范化SHA1
+        sha1_hex = _decode_sha1(etag, usesBase62EtagsInExport)
+        size_int = int(size)
+
+        if not sha1_hex:
+            tqdm.tqdm.write(f"跳过 '{filename}': 缺少有效的SHA1哈希")
+            continue
 
         try:
-            if usesBase62EtagsInExport and len(etag) != 32:
-                etag = base62.decode(
-                    etag, charset=base62.CHARSET_INVERTED).to_bytes(16).hex()
-
-            # 判断是否可以使用 contain_dir 直接创建（避免额外创建目录）
+            # 确保目录存在
             if dir_path:
-                byte_len = len(full_relative_path.encode('utf-8'))
-                # 不能以 '/' 开头，并且总长度限制为255字节
-                if byte_len <= 255 and not full_relative_path.startswith('/'):
-                    # 禁止反斜杠和一些特殊字符
-                    if not re.search(r'[\\:\\*\?\"<>\|]', full_relative_path):
-                        use_contain_dir = True
+                full_dir_path = os.path.join(base_path, dir_path)
 
-            if use_contain_dir:
-                # 直接把包含相对路径的 filename 传给 create_file
-                client.file_service.create_file(
-                    parent_id=current_parent_id,
-                    filename=full_relative_path,
-                    size=int(size),
-                    etag=etag,
-                    contain_dir=True
-                )
+                if full_dir_path in dir_path_to_id_map:
+                    current_parent_id = dir_path_to_id_map[full_dir_path]
+                else:
+                    try:
+                        current_parent_id = client.file_service.mkdir_recursive(
+                            full_dir_path)
+                        dir_path_to_id_map[full_dir_path] = current_parent_id
+                    except Exception as e:
+                        tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
+                        continue
+
+            # 调用SHA1秒传
+            reuse_result = client.file_service.try_sha1_reuse(
+                local_path=None,
+                filename=filename,
+                parent_id=current_parent_id,
+                duplicate=1,
+                sha1=sha1_hex,
+                size=size_int
+            )
+
+            if reuse_result and reuse_result.get('reuse'):
+                file_id = reuse_result.get('fileID')
+                tqdm.tqdm.write(
+                    f"  ✓ 秒传成功: {os.path.join(dir_path, filename)} (fileID={file_id})")
             else:
-                # 原有逻辑：确保目录存在并使用纯文件名创建
-                if dir_path:
-                    full_dir_path = os.path.join(base_path, dir_path)
+                tqdm.tqdm.write(
+                    f"  ⚠️ 秒传未命中: {os.path.join(dir_path, filename)} (云端无此文件)")
 
-                    # 检查映射中是否已存在该目录路径
-                    if full_dir_path in dir_path_to_id_map:
-                        current_parent_id = dir_path_to_id_map[full_dir_path]
-                    else:
-                        try:
-                            current_parent_id = client.file_service.mkdir_recursive(
-                                full_dir_path)
-                            dir_path_to_id_map[full_dir_path] = current_parent_id
-                        except Exception as e:
-                            tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
-                            continue
-
-                client.file_service.create_file(
-                    parent_id=current_parent_id,
-                    filename=filename,
-                    size=int(size),
-                    etag=etag
-                )
-            # tqdm.tqdm.write(f"成功为 '{filename}' 创建文件条目。")
         except Exception as e:
-            tqdm.tqdm.write(f"为 '{filename}' 创建文件条目失败: {e}")
+            tqdm.tqdm.write(f"处理 '{filename}' 失败: {e}")
 
 
 if __name__ == '__main__':
