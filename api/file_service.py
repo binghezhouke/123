@@ -683,6 +683,39 @@ class FileService:
 
         return None
 
+    def _collect_path_components(self, file_id: int, use_cache: bool = True, max_retries: int = 3) -> Optional[List[File]]:
+        """获取从根到目标文件的路径组件。"""
+        try:
+            path_components: List[File] = []
+            current_file_id = file_id
+
+            print(f"开始构建路径，文件ID: {file_id}")
+
+            while current_file_id is not None and current_file_id != 0:
+                file_info = self._get_file_info_with_retry(
+                    current_file_id, use_cache=use_cache, max_retries=max_retries)
+
+                if not file_info:
+                    print(f"无法获取文件信息，文件ID: {current_file_id}")
+                    return None
+
+                path_components.append(file_info)
+                print(
+                    f"添加路径组件: {file_info.filename} (ID: {current_file_id}, 父ID: {file_info.parent_file_id})")
+
+                if file_info.parent_file_id == 0 or file_info.parent_file_id is None:
+                    print("已到达根目录")
+                    break
+
+                current_file_id = file_info.parent_file_id
+
+            path_components.reverse()
+            return path_components
+
+        except Exception as e:
+            print(f"获取路径组件时发生错误: {e}")
+            return None
+
     def get_file_path(self, file_id: int, use_cache: bool = True, max_retries: int = 3) -> Optional[str]:
         """
         获取文件的完整路径
@@ -693,44 +726,20 @@ class FileService:
         :return: 文件的完整路径，如果文件不存在返回None
         """
         try:
-            path_parts = []
-            current_file_id = file_id
+            path_components = self._collect_path_components(
+                file_id, use_cache=use_cache, max_retries=max_retries)
 
-            print(f"开始构建文件路径，文件ID: {file_id}")
+            if path_components is None:
+                return None
 
-            while current_file_id is not None and current_file_id != 0:
-                # 获取当前文件信息，带重试逻辑
-                file_info = self._get_file_info_with_retry(
-                    current_file_id, use_cache=use_cache, max_retries=max_retries)
-
-                if not file_info:
-                    print(f"无法获取文件信息，文件ID: {current_file_id}")
-                    return None
-
-                # 将当前文件名添加到路径组件中
-                path_parts.append(file_info.filename)
-                print(
-                    f"添加路径组件: {file_info.filename} (ID: {current_file_id}, 父ID: {file_info.parent_file_id})")
-
-                # 检查是否到达根目录
-                if file_info.parent_file_id == 0 or file_info.parent_file_id is None:
-                    print("已到达根目录")
-                    break
-
-                # 移动到父目录
-                current_file_id = file_info.parent_file_id
-
-            # 反转路径组件（因为我们是从叶子节点向根节点遍历的）
-            path_parts.reverse()
-
-            # 构建完整路径
-            if path_parts:
-                full_path = "/" + "/".join(path_parts)
+            if path_components:
+                full_path = "/" + \
+                    "/".join(comp.filename for comp in path_components)
                 print(f"构建完成的路径: {full_path}")
                 return full_path
-            else:
-                print("路径为空，返回根目录")
-                return "/"
+
+            print("路径为空，返回根目录")
+            return "/"
 
         except Exception as e:
             print(f"获取文件路径时发生错误: {e}")
@@ -763,66 +772,41 @@ class FileService:
         :return: 包含路径和详细信息的字典，如果文件不存在返回None
         """
         try:
-            path_components = []
-            current_file_id = file_id
+            path_files = self._collect_path_components(
+                file_id, use_cache=use_cache, max_retries=max_retries)
 
-            print(f"开始构建详细路径信息，文件ID: {file_id}")
+            if path_files is None:
+                return None
 
-            while current_file_id is not None and current_file_id != 0:
-                # 获取当前文件信息，带重试逻辑
-                file_info = self._get_file_info_with_retry(
-                    current_file_id, use_cache=use_cache, max_retries=max_retries)
-
-                if not file_info:
-                    print(f"无法获取文件信息，文件ID: {current_file_id}")
-                    return None
-
-                # 添加路径组件信息
-                component = {
-                    "file_id": file_info.file_id,
-                    "name": file_info.filename,
-                    "is_folder": file_info.is_folder,
-                    "parent_id": file_info.parent_file_id,
-                    "size": file_info.size,
-                    "size_formatted": file_info.size_formatted
-                }
-                path_components.append(component)
-
-                print(
-                    f"添加详细路径组件: {file_info.filename} (ID: {current_file_id})")
-
-                # 检查是否到达根目录
-                if file_info.parent_file_id == 0 or file_info.parent_file_id is None:
-                    print("已到达根目录")
-                    break
-
-                # 移动到父目录
-                current_file_id = file_info.parent_file_id
-
-            # 反转路径组件
-            path_components.reverse()
-
-            # 构建结果
-            if path_components:
-                path_names = [comp["name"] for comp in path_components]
-                full_path = "/" + "/".join(path_names)
-
-                result = {
-                    "full_path": full_path,
-                    "path_components": path_components,
-                    "depth": len(path_components),
-                    "target_file": path_components[-1] if path_components else None
-                }
-
-                print(f"构建完成的详细路径: {full_path}")
-                return result
-            else:
+            if not path_files:
                 return {
                     "full_path": "/",
                     "path_components": [],
                     "depth": 0,
                     "target_file": None
                 }
+
+            path_components = [{
+                "file_id": file_info.file_id,
+                "name": file_info.filename,
+                "is_folder": file_info.is_folder,
+                "parent_id": file_info.parent_file_id,
+                "size": file_info.size,
+                "size_formatted": file_info.size_formatted
+            } for file_info in path_files]
+
+            path_names = [comp["name"] for comp in path_components]
+            full_path = "/" + "/".join(path_names)
+
+            result = {
+                "full_path": full_path,
+                "path_components": path_components,
+                "depth": len(path_components),
+                "target_file": path_components[-1] if path_components else None
+            }
+
+            print(f"构建完成的详细路径: {full_path}")
+            return result
 
         except Exception as e:
             print(f"获取详细文件路径时发生错误: {e}")

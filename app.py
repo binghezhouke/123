@@ -5,65 +5,13 @@
 """
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
-import os
-import json
 from api import Pan123Client, Pan123APIError
-from api.models import File, FileList
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key-change-this'  # 请更改为随机密钥
 
 # 全局变量存储客户端实例
 client = None
-
-
-def format_file_size(size_bytes):
-    """格式化文件大小"""
-    if size_bytes >= 1024 * 1024 * 1024:  # GB
-        return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
-    elif size_bytes >= 1024 * 1024:  # MB
-        return f"{size_bytes / (1024 * 1024):.2f} MB"
-    elif size_bytes >= 1024:  # KB
-        return f"{size_bytes / 1024:.2f} KB"
-    else:
-        return f"{size_bytes} 字节"
-
-
-def get_category_name(category):
-    """获取文件分类名称"""
-    category_map = {0: "未知", 1: "音频", 2: "视频", 3: "图片"}
-    return category_map.get(category, "未知")
-
-
-def get_file_icon(filename, file_type, category):
-    """根据文件类型返回图标类名"""
-    if file_type == 1:  # 文件夹
-        return "fas fa-folder"
-
-    # 根据分类
-    if category == 1:  # 音频
-        return "fas fa-file-audio"
-    elif category == 2:  # 视频
-        return "fas fa-file-video"
-    elif category == 3:  # 图片
-        return "fas fa-file-image"
-
-    # 根据文件扩展名
-    ext = os.path.splitext(filename)[1].lower()
-    if ext in ['.txt', '.md', '.log']:
-        return "fas fa-file-alt"
-    elif ext in ['.pdf']:
-        return "fas fa-file-pdf"
-    elif ext in ['.doc', '.docx']:
-        return "fas fa-file-word"
-    elif ext in ['.xls', '.xlsx']:
-        return "fas fa-file-excel"
-    elif ext in ['.ppt', '.pptx']:
-        return "fas fa-file-powerpoint"
-    elif ext in ['.zip', '.rar', '.7z']:
-        return "fas fa-file-archive"
-    else:
-        return "fas fa-file"
 
 
 @app.route('/')
