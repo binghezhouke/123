@@ -25,35 +25,63 @@ def file2json(json_file_path):
     return out
 
 
-def _decode_sha1(raw_value: str, uses_base62: bool = False) -> str:
-    """从字符串或base62编码中解析出40位SHA1 hex，解析失败返回空字符串。"""
+def _decode_hash(raw_value: str, uses_base62: bool = False) -> tuple:
+    """
+    从字符串或base62编码中解析出哈希值（SHA1 或 MD5/etag）。
+
+    支持的格式:
+    - 40位hex字符串: 识别为 SHA1
+    - 32位hex字符串: 识别为 MD5/etag
+    - base62编码的SHA1或MD5（优先解码为MD5）
+    - 不足标准长度的hex字符串: 补零后按位数判断
+
+    :param raw_value: 原始哈希值字符串
+    :param uses_base62: 是否标记为base62编码
+    :return: (hash_hex, hash_type) 其中 hash_type 为 'sha1'、'md5' 或 ''
+    """
     if not raw_value:
-        return ""
+        return "", ""
 
     raw = str(raw_value).strip()
-    candidate = raw
+    if not raw:
+        return "", ""
 
-    # 尝试base62解码
-    if uses_base62 and re.fullmatch(r"[0-9A-Za-z]+", raw):
+    lower = raw.lower()
+
+    # 1. 先检查是否为标准hex格式
+    if re.fullmatch(r'[0-9a-f]{40}', lower):
+        return lower, 'sha1'
+    if re.fullmatch(r'[0-9a-f]{32}', lower):
+        return lower, 'md5'
+
+    # 2. 尝试base62解码（显式标记 或 含非hex字符的纯字母数字串）
+    is_alnum = bool(re.fullmatch(r'[0-9A-Za-z]+', raw))
+    is_pure_hex = bool(re.fullmatch(r'[0-9a-fA-F]+', raw))
+
+    if is_alnum and (uses_base62 or not is_pure_hex):
         try:
             import base62
             num = base62.decode(raw, charset=base62.CHARSET_INVERTED)
             byte_len = max((num.bit_length() + 7) // 8, 1)
-            candidate = num.to_bytes(byte_len, 'big').hex()
+            hex_str = num.to_bytes(byte_len, 'big').hex().lower()
+
+            # 优先解码为MD5（16字节 = 32位hex）
+            if byte_len <= 16:
+                return hex_str.zfill(32), 'md5'
+            elif byte_len <= 20:
+                return hex_str.zfill(40), 'sha1'
+            # byte_len > 20 说明解码结果过长，不是有效哈希
         except Exception:
-            candidate = raw
+            pass
 
-    candidate = candidate.lower()
+    # 3. 不足标准长度的纯hex字符串，按位数补零判断
+    if is_pure_hex:
+        if len(lower) <= 32:
+            return lower.zfill(32), 'md5'
+        elif len(lower) <= 40:
+            return lower.zfill(40), 'sha1'
 
-    # 补齐前导零，确保长度检测准确
-    if len(candidate) < 40:
-        candidate = candidate.zfill(40)
-
-    # 只接受40位sha1 hex
-    if re.fullmatch(r"[0-9a-f]{40}", candidate):
-        return candidate
-
-    return ""
+    return "", ""
 
 
 def upload_from_json(json_file_path, remote_dir):
@@ -110,12 +138,12 @@ def upload_from_json(json_file_path, remote_dir):
         dir_path, filename = os.path.split(file_path)
         current_parent_id = root_id
 
-        # 规范化SHA1
-        sha1_hex = _decode_sha1(etag, usesBase62EtagsInExport)
+        # 解析哈希值（支持SHA1、MD5/etag、base62编码）
+        hash_hex, hash_type = _decode_hash(etag, usesBase62EtagsInExport)
         size_int = int(size)
 
-        if not sha1_hex:
-            tqdm.tqdm.write(f"跳过 '{filename}': 缺少有效的SHA1哈希")
+        if not hash_hex:
+            tqdm.tqdm.write(f"跳过 '{filename}': 缺少有效的哈希值 (原始值: {etag})")
             continue
 
         try:
@@ -134,23 +162,45 @@ def upload_from_json(json_file_path, remote_dir):
                         tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
                         continue
 
-            # 调用SHA1秒传
-            reuse_result = client.file_service.try_sha1_reuse(
-                local_path=None,
-                filename=filename,
-                parent_id=current_parent_id,
-                duplicate=1,
-                sha1=sha1_hex,
-                size=size_int
-            )
+            reuse_result = None
+            display_path = os.path.join(dir_path, filename)
 
-            if reuse_result and reuse_result.get('reuse'):
-                file_id = reuse_result.get('fileID')
-                tqdm.tqdm.write(
-                    f"  ✓ 秒传成功: {os.path.join(dir_path, filename)} (fileID={file_id})")
-            else:
-                tqdm.tqdm.write(
-                    f"  ⚠️ 秒传未命中: {os.path.join(dir_path, filename)} (云端无此文件)")
+            if hash_type == 'sha1':
+                # SHA1秒传
+                reuse_result = client.file_service.try_sha1_reuse(
+                    local_path=None,
+                    filename=filename,
+                    parent_id=current_parent_id,
+                    duplicate=1,
+                    sha1=hash_hex,
+                    size=size_int
+                )
+
+                if reuse_result and reuse_result.get('reuse'):
+                    file_id = reuse_result.get('fileID')
+                    tqdm.tqdm.write(
+                        f"  ✓ SHA1秒传成功: {display_path} (fileID={file_id})")
+                else:
+                    tqdm.tqdm.write(
+                        f"  ⚠️ SHA1秒传未命中: {display_path} (云端无此文件)")
+
+            elif hash_type == 'md5':
+                # MD5/etag秒传（通过预上传接口）
+                reuse_result = client.file_service.create_file(
+                    parent_id=current_parent_id,
+                    filename=filename,
+                    etag=hash_hex,
+                    size=size_int,
+                    duplicate=1
+                )
+
+                if reuse_result and reuse_result.get('reuse'):
+                    file_id = reuse_result.get('fileID')
+                    tqdm.tqdm.write(
+                        f"  ✓ MD5秒传成功: {display_path} (fileID={file_id})")
+                else:
+                    tqdm.tqdm.write(
+                        f"  ⚠️ MD5秒传未命中: {display_path} (云端无此文件)")
 
         except Exception as e:
             tqdm.tqdm.write(f"处理 '{filename}' 失败: {e}")
