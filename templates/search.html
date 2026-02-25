@@ -1,160 +1,246 @@
 {% extends "base.html" %}
 
-{% block title %}搜索文件 - 123云盘文件浏览器{% endblock %}
+{% block title %}搜索 - CloudArchive{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-12">
-        <div class="surface-card toolbar-card d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4">
-            <div>
-                <p class="text-uppercase text-muted small mb-1">搜索</p>
-                <h3 class="mb-0 text-white d-flex align-items-center gap-2">
-                    <i class="fas fa-search"></i> 文件搜索
-                </h3>
-                {% if search_query %}
-                <div class="d-flex align-items-center gap-2 mt-2">
-                    <span class="meta-pill"><i class="fas fa-quote-right"></i> {{ search_query }}</span>
-                    <span class="meta-pill"><i class="fas fa-layer-group"></i> {{ files|length }} 结果</span>
-                </div>
-                {% endif %}
-            </div>
-        </div>
-        
-        <!-- 高级搜索表单 -->
-        <div class="search-form mb-4">
-                <form method="GET" action="{{ url_for('main.search') }}">
-                    <div class="row">
-                        <div class="col-md-6">
-                            <div class="mb-3">
-                                <label for="searchQuery" class="form-label">搜索关键词</label>
-                                <input type="text" class="form-control" id="searchQuery" name="q" 
-                                       value="{{ search_query }}" placeholder="输入文件名或关键词..." required>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="mb-3">
-                                <label for="searchMode" class="form-label">搜索模式</label>
-                                <select class="form-select" id="searchMode" name="mode">
-                                    <option value="0" {% if search_mode == 0 %}selected{% endif %}>精确匹配</option>
-                                    <option value="1" {% if search_mode == 1 %}selected{% endif %}>模糊匹配</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div class="col-md-3">
-                            <div class="mb-3">
-                                <label for="searchLimit" class="form-label">结果数量</label>
-                                <select class="form-select" id="searchLimit" name="limit">
-                                    <option value="10" {% if limit == 10 %}selected{% endif %}>10条</option>
-                                    <option value="20" {% if limit == 20 %}selected{% endif %}>20条</option>
-                                    <option value="50" {% if limit == 50 %}selected{% endif %}>50条</option>
-                                    <option value="100" {% if limit == 100 %}selected{% endif %}>100条</option>
-                                </select>
-                            </div>
-                        </div>
+<!-- Search Header -->
+<div class="card mb-4">
+    <div class="card-header">
+        <h4><i class="fas fa-search" style="margin-right: 8px; color: var(--accent-blue);"></i>搜索文件</h4>
+    </div>
+    <div class="card-body">
+        <form method="GET" action="{{ url_for('main.search') }}">
+            <div class="row g-3">
+                <div class="col-md-6">
+                    <label for="searchQuery" class="form-label">搜索关键词</label>
+                    <div class="search-wrapper">
+                        <i class="fas fa-search search-icon"></i>
+                        <input type="text" class="search-input" id="searchQuery" name="q"
+                               value="{{ search_query }}" placeholder="输入文件名或关键词..." required>
                     </div>
-                    <button type="submit" class="btn btn-glow">
-                        <i class="fas fa-search"></i> 搜索
-                    </button>
-                </form>
+                </div>
+                <div class="col-md-3">
+                    <label for="searchMode" class="form-label">搜索模式</label>
+                    <select class="form-select" id="searchMode" name="mode">
+                        <option value="0" {% if search_mode == 0 %}selected{% endif %}>精确匹配</option>
+                        <option value="1" {% if search_mode == 1 %}selected{% endif %}>模糊匹配</option>
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label for="searchLimit" class="form-label">结果数量</label>
+                    <select class="form-select" id="searchLimit" name="limit">
+                        <option value="10" {% if limit == 10 %}selected{% endif %}>10条</option>
+                        <option value="20" {% if limit == 20 %}selected{% endif %}>20条</option>
+                        <option value="50" {% if limit == 50 %}selected{% endif %}>50条</option>
+                        <option value="100" {% if limit == 100 %}selected{% endif %}>100条</option>
+                    </select>
+                </div>
             </div>
-        </div>
-
-        <!-- 搜索结果 -->
-        {% if search_query %}
-            <div class="d-flex justify-content-between align-items-center mb-3">
-                <h4>
-                    搜索结果 
-                    <span class="badge bg-secondary">{{ files|length }} 个文件</span>
-                </h4>
+            <div class="mt-3">
+                <button type="submit" class="btn btn-primary">
+                    <i class="fas fa-search" style="margin-right: 6px;"></i> 搜索
+                </button>
                 {% if search_query %}
-                    <small class="text-muted">关键词: "{{ search_query }}"</small>
+                <a href="{{ url_for('main.search') }}" class="btn btn-secondary" style="margin-left: 8px;">
+                    <i class="fas fa-times" style="margin-right: 6px;"></i> 清除
+                </a>
                 {% endif %}
             </div>
-
-            {% if files %}
-                <!-- 文件列表 -->
-                <div class="row">
-                    {% for file in files %}
-                        <div class="col-md-6 col-lg-4 mb-3">
-                            <div class="file-card surface-card h-100">
-                                <div class="card-body">
-                                    <div class="d-flex align-items-start">
-                                        <div class="file-icon me-3">
-                                            <i class="{{ file.icon }} fa-2x text-primary"></i>
-                                        </div>
-                                        <div class="flex-grow-1">
-                                            <h6 class="card-title mb-1">
-                                                {% if file.is_folder %}
-                                                    <a href="{{ url_for('main.index', parent_id=file.fileId) }}" 
-                                                       class="text-decoration-none">
-                                                        {{ file.filename }}
-                                                    </a>
-                                                {% else %}
-                                                    <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" 
-                                                       class="text-decoration-none">
-                                                        {{ file.filename }}
-                                                    </a>
-                                                {% endif %}
-                                            </h6>
-                                            <p class="card-text small text-muted mb-1">
-                                                <i class="fas fa-tag"></i> {{ file.category_name }}
-                                                {% if not file.is_folder %}
-                                                    <br><i class="fas fa-hdd"></i> {{ file.size_formatted }}
-                                                {% endif %}
-                                            </p>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- 文件操作 -->
-                                    <div class="mt-2">
-                                        <div class="btn-group w-100" role="group">
-                                            {% if file.is_folder %}
-                                                <a href="{{ url_for('index', parent_id=file.fileId) }}" 
-                                                   class="btn btn-ghost btn-sm">
-                                                    <i class="fas fa-folder-open"></i> 打开
-                                                </a>
-                                            {% else %}
-                                                <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
-                                                   class="btn btn-ghost btn-sm">
-                                                    <i class="fas fa-info-circle"></i> 详情
-                                                </a>
-                                                <button class="btn btn-outline-success btn-sm download-btn" 
-                                                        data-file-id="{{ file.fileId }}" 
-                                                        data-file-name="{{ file.filename }}">
-                                                    <i class="fas fa-download"></i> 下载
-                                                </button>
-                                            {% endif %}
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    {% endfor %}
-                </div>
-
-                <!-- 分页控制 -->
-                {% if next_last_file_id %}
-                    <div class="d-flex justify-content-center mt-4">
-                        <a href="{{ url_for('main.search', q=search_query, mode=search_mode, limit=limit, last_file_id=next_last_file_id) }}" 
-                           class="btn btn-glow px-4">
-                            <i class="fas fa-chevron-right"></i> 加载更多
-                        </a>
-                    </div>
-                {% endif %}
-            {% else %}
-                <div class="alert alert-info text-center">
-                    <i class="fas fa-info-circle fa-2x mb-3"></i>
-                    <h5>没有找到匹配的文件</h5>
-                    <p class="mb-0">尝试使用不同的关键词或搜索模式</p>
-                </div>
-            {% endif %}
-        {% else %}
-            <div class="text-center text-muted">
-                <i class="fas fa-search fa-4x mb-3"></i>
-                <h5>开始搜索您的文件</h5>
-                <p>在上面的搜索框中输入关键词来查找文件</p>
-            </div>
-        {% endif %}
+        </form>
     </div>
 </div>
+
+<!-- Search Results -->
+{% if search_query %}
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h5 style="margin: 0; font-weight: 600;">
+            搜索结果
+            {% if files %}
+            <span class="badge bg-primary" style="margin-left: 8px;">{{ files|length }}</span>
+            {% endif %}
+        </h5>
+        {% if search_query %}
+        <span style="font-size: 13px; color: var(--text-secondary);">
+            "{{ search_query }}"
+        </span>
+        {% endif %}
+    </div>
+
+    {% if files %}
+        <!-- Results Grid -->
+        <div class="file-grid" id="fileContainer">
+            {% for file in files %}
+            <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+                <div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}">
+                    <i class="{{ file.icon }}"></i>
+                </div>
+                <div class="file-grid-name">
+                    {% if file.is_folder %}
+                        <a href="{{ url_for('main.index', parent_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
+                            {{ file.filename }}
+                        </a>
+                    {% else %}
+                        <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
+                            {{ file.filename }}
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Results List View (Hidden by default) -->
+        <div class="file-list" id="fileListView" style="display: none;">
+            <div class="file-list-header">
+                <div>名称</div>
+                <div>大小</div>
+                <div>类型</div>
+                <div>操作</div>
+            </div>
+            {% for file in files %}
+            <div class="file-list-row file-item" data-file-id="{{ file.fileId }}">
+                <div class="file-list-name">
+                    <span class="file-list-icon {{ 'folder' if file.is_folder else file.category|lower }}">
+                        <i class="{{ file.icon }}"></i>
+                    </span>
+                    {{ file.filename }}
+                </div>
+                <div class="file-list-meta">{{ file.size_formatted if not file.is_folder else '--' }}</div>
+                <div class="file-list-meta">{{ file.category_name }}</div>
+                <div class="file-list-meta">
+                    {% if file.is_folder %}
+                    <a href="{{ url_for('main.index', parent_id=file.fileId) }}" class="btn btn-sm btn-ghost">
+                        <i class="fas fa-folder-open"></i> 打开
+                    </a>
+                    {% else %}
+                    <button class="btn btn-sm btn-primary download-btn"
+                            data-file-id="{{ file.fileId }}"
+                            data-file-name="{{ file.filename }}">
+                        <i class="fas fa-download"></i> 下载
+                    </button>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <!-- Pagination -->
+        {% if next_last_file_id %}
+        <div class="d-flex justify-content-center mt-4">
+            <a href="{{ url_for('main.search', q=search_query, mode=search_mode, limit=limit, last_file_id=next_last_file_id) }}"
+               class="btn btn-primary">
+                <i class="fas fa-chevron-right" style="margin-right: 6px;"></i> 加载更多
+            </a>
+        </div>
+        {% endif %}
+
+    {% else %}
+        <!-- No Results -->
+        <div class="empty-state">
+            <div class="empty-state-icon">
+                <i class="fas fa-search"></i>
+            </div>
+            <div class="empty-state-title">未找到结果</div>
+            <div class="empty-state-subtitle">尝试使用不同的关键词或搜索模式</div>
+        </div>
+    {% endif %}
+
+{% else %}
+    <!-- Initial State -->
+    <div class="empty-state">
+        <div class="empty-state-icon">
+            <i class="fas fa-search"></i>
+        </div>
+        <div class="empty-state-title">开始搜索</div>
+        <div class="empty-state-subtitle">输入关键词来查找您的文件</div>
+    </div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// View switching - Override the base function for this page
+function switchView(view) {
+    const iconBtn = document.getElementById('iconViewBtn');
+    const listBtn = document.getElementById('listViewBtn');
+    const gridView = document.getElementById('fileContainer');
+    const listView = document.getElementById('fileListView');
+
+    if (view === 'icons') {
+        iconBtn.classList.add('active');
+        listBtn.classList.remove('active');
+        if (gridView) gridView.style.display = 'grid';
+        if (listView) listView.style.display = 'none';
+    } else {
+        listBtn.classList.add('active');
+        iconBtn.classList.remove('active');
+        if (gridView) gridView.style.display = 'none';
+        if (listView) listView.style.display = 'block';
+    }
+
+    // Save preference
+    localStorage.setItem('finderViewMode', view);
+}
+
+// Bind download buttons in search results
+document.addEventListener('DOMContentLoaded', function() {
+    const downloadButtons = document.querySelectorAll('.download-btn');
+    downloadButtons.forEach(button => {
+        button.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            const fileId = this.dataset.fileId;
+            const fileName = this.dataset.fileName || '文件';
+            if (typeof downloadFile === 'function') {
+                downloadFile(fileId, fileName);
+            }
+        });
+    });
+
+    // Single click to open
+    const fileItems = document.querySelectorAll('.file-item');
+    fileItems.forEach(item => {
+        item.addEventListener('click', function(e) {
+            if (e.target.closest('.btn')) return; // Don't open if clicking buttons
+
+            const link = this.querySelector('a');
+            if (link) {
+                window.location.href = link.href;
+            }
+        });
+
+        // Selection on hover (visual feedback only)
+        item.addEventListener('mouseenter', function() {
+            fileItems.forEach(i => i.classList.remove('selected'));
+            this.classList.add('selected');
+        });
+    });
+
+    // Restore view preference
+    const savedView = localStorage.getItem('finderViewMode');
+    if (savedView === 'list') {
+        switchView('list');
+    }
+
+    // Update status bar
+    const statusCount = document.getElementById('statusCount');
+    if (statusCount && fileItems.length > 0) {
+        statusCount.textContent = fileItems.length + ' 个项目';
+    }
+
+    // Update status text on hover
+    fileItems.forEach(item => {
+        item.addEventListener('mouseenter', function() {
+            const fileName = this.querySelector('.file-grid-name, .file-list-name')?.textContent?.trim() || '项目';
+            const statusText = document.getElementById('statusText');
+            if (statusText) statusText.textContent = fileName;
+        });
+
+        item.addEventListener('mouseleave', function() {
+            const statusText = document.getElementById('statusText');
+            if (statusText) statusText.textContent = '就绪';
+        });
+    });
+});
+</script>
 {% endblock %}

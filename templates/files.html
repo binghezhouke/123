@@ -1,225 +1,157 @@
 {% extends "base.html" %}
 
-{% block title %}文件列表 - 123云盘浏览器{% endblock %}
+{% block title %}{% if parent_id != 0 %}文件夹 - {% endif %}CloudArchive{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-12">
-        <!-- 面包屑导航 -->
-        <nav aria-label="breadcrumb">
-            <ol class="breadcrumb">
-                <li class="breadcrumb-item">
-                    <a href="{{ url_for('main.index') }}"><i class="fas fa-home"></i> 根目录</a>
-                </li>
-                {% if parent_id != 0 %}
-                <li class="breadcrumb-item active" aria-current="page">文件夹 ID: {{ parent_id }}</li>
-                {% endif %}
-            </ol>
-        </nav>
-
-        <!-- 工具栏 -->
-        <div class="surface-card toolbar-card d-flex align-items-center justify-content-between flex-wrap gap-3">
-            <div>
-                <p class="text-uppercase text-muted small mb-1">目录</p>
-                <h3 class="mb-0 text-white d-flex align-items-center gap-2">
-                    <i class="fas fa-folder-open text-warning"></i> 当前文件夹
-                </h3>
-                <div class="d-flex align-items-center gap-2 mt-2">
-                    <span class="meta-pill"><i class="fas fa-layer-group"></i> {{ files|length }} 项</span>
-                    <span class="meta-pill"><i class="fas fa-sliders-h"></i> 每页 {{ limit }} 条</span>
-                </div>
-            </div>
-            <div class="btn-group">
-                <button type="button" class="btn btn-ghost" onclick="refreshFiles()">
-                    <i class="fas fa-sync-alt"></i> 刷新
-                </button>
-                <button type="button" class="btn btn-glow" onclick="toggleView()">
-                    <i class="fas fa-th-list"></i> 切换视图
-                </button>
-            </div>
+<!-- File Grid View -->
+{% if files %}
+<div class="file-grid" id="fileContainer">
+    {% for file in files %}
+    <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+        <div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}">
+            <i class="{{ file.icon }}"></i>
         </div>
-
-        <!-- 文件列表 -->
-        {% if files %}
-        <div class="file-list">
-            <div class="row" id="fileContainer">
-                {% for file in files %}
-                <div class="col-12 mb-3 file-item" data-file-id="{{ file.fileId }}">
-                    <div class="file-card h-100 surface-card">
-                        <div class="card-body d-flex align-items-center">
-                            <!-- 文件图标 -->
-                            <div class="file-icon me-3">
-                                <i class="{{ file.icon }} fa-2x text-{{ 'warning' if file.is_folder else 'primary' }}"></i>
-                            </div>
-                            
-                            <!-- 文件信息 -->
-                            <div class="file-info flex-grow-1">
-                                <h6 class="card-title mb-1">
-                                    {% if file.is_folder %}
-                                        <a href="{{ url_for('main.index', parent_id=file.fileId) }}" class="text-decoration-none">
-                                            {{ file.filename }}
-                                        </a>
-                                    {% else %}
-                                        <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" class="text-decoration-none">
-                                            {{ file.filename }}
-                                        </a>
-                                    {% endif %}
-                                </h6>
-                                <div class="file-meta small d-flex flex-wrap gap-2 mt-1">
-                                    <span class="meta-pill">
-                                        <i class="fas fa-weight-hanging"></i> {{ file.size_formatted }}
-                                    </span>
-                                    <span class="meta-pill">
-                                        <i class="fas fa-tag"></i> {{ file.category_name }}
-                                    </span>
-                                    <span class="meta-pill">
-                                        <i class="fas fa-calendar"></i> {{ file.createAt }}
-                                    </span>
-                                </div>
-                            </div>
-                            
-                            <!-- 操作按钮 -->
-                            <div class="file-actions">
-                                <div class="btn-group btn-group-sm">
-                                    <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" 
-                                       class="btn btn-ghost" title="查看详情">
-                                        <i class="fas fa-info-circle"></i>
-                                    </a>
-                                    {% if not file.is_folder %}
-                                    <button type="button" class="btn btn-glow" 
-                                            onclick="getDownloadLink({{ file.fileId }})" title="获取下载链接">
-                                        <i class="fas fa-download"></i>
-                                    </button>
-                                    {% endif %}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
+        <div class="file-grid-name">
+            {% if file.is_folder %}
+                <a href="{{ url_for('main.index', parent_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
+                    {{ file.filename }}
+                </a>
+            {% else %}
+                <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
+                    {{ file.filename }}
+                </a>
+            {% endif %}
         </div>
-
-        <!-- 分页 -->
-        {% if next_last_file_id and next_last_file_id != -1 %}
-        <div class="d-flex justify-content-center mt-4">
-            <a href="{{ url_for('main.index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}" 
-               class="btn btn-glow px-4">
-                <i class="fas fa-chevron-right"></i> 加载更多
-            </a>
-        </div>
-        {% endif %}
-        
-        {% else %}
-        <div class="surface-card text-center py-5">
-            <i class="fas fa-folder-open fa-5x text-muted mb-3"></i>
-            <h3 class="text-white">文件夹为空</h3>
-            <p class="text-muted mb-0">这个文件夹中还没有任何文件或子文件夹。</p>
-        </div>
-        {% endif %}
     </div>
+    {% endfor %}
 </div>
+
+<!-- File List View (Hidden by default) -->
+<div class="file-list" id="fileListView" style="display: none;">
+    <div class="file-list-header">
+        <div>名称</div>
+        <div>大小</div>
+        <div>类型</div>
+        <div>修改日期</div>
+    </div>
+    {% for file in files %}
+    <div class="file-list-row file-item" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+        <div class="file-list-name">
+            <span class="file-list-icon {{ 'folder' if file.is_folder else file.category|lower }}">
+                <i class="{{ file.icon }}"></i>
+            </span>
+            {% if file.is_folder %}
+                <a href="{{ url_for('main.index', parent_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
+                    {{ file.filename }}
+                </a>
+            {% else %}
+                <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
+                    {{ file.filename }}
+                </a>
+            {% endif %}
+        </div>
+        <div class="file-list-meta">{{ file.size_formatted if not file.is_folder else '--' }}</div>
+        <div class="file-list-meta">{{ file.category_name }}</div>
+        <div class="file-list-date">{{ file.createAt }}</div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% if next_last_file_id and next_last_file_id != -1 %}
+<div class="d-flex justify-content-center mt-4">
+    <a href="{{ url_for('main.index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}"
+       class="btn btn-primary">
+        <i class="fas fa-chevron-right" style="margin-right: 6px;"></i> 加载更多
+    </a>
+</div>
+{% endif %}
+
+{% else %}
+<!-- Empty State -->
+<div class="empty-state">
+    <div class="empty-state-icon">
+        <i class="fas fa-folder-open"></i>
+    </div>
+    <div class="empty-state-title">文件夹为空</div>
+    <div class="empty-state-subtitle">这个文件夹中还没有任何文件或子文件夹</div>
+</div>
+{% endif %}
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
-// 刷新文件列表
-function refreshFiles() {
-    window.location.reload();
-}
+// View switching - Override the base function for this page
+function switchView(view) {
+    const iconBtn = document.getElementById('iconViewBtn');
+    const listBtn = document.getElementById('listViewBtn');
+    const gridView = document.getElementById('fileContainer');
+    const listView = document.getElementById('fileListView');
 
-// 切换视图模式
-function toggleView() {
-    const container = document.getElementById('fileContainer');
-    if (!container) return;
-
-    container.classList.toggle('row');
-    const items = container.querySelectorAll('.file-item');
-    items.forEach(item => {
-        item.classList.toggle('col-12');
-        item.classList.toggle('col-md-6');
-        item.classList.toggle('col-lg-4');
-    });
-}
-
-// 获取下载链接（使用全局下载模态框）
-function getDownloadLink(fileId) {
-    if (typeof downloadFile === 'function') {
-        downloadFile(fileId, '文件');
+    if (view === 'icons') {
+        iconBtn.classList.add('active');
+        listBtn.classList.remove('active');
+        if (gridView) gridView.style.display = 'grid';
+        if (listView) listView.style.display = 'none';
     } else {
-        // 降级处理：如果全局函数未加载，使用内联实现
-        const modal = new bootstrap.Modal(document.getElementById('downloadModal'));
-        modal.show();
-
-        const modalBody = document.getElementById('downloadModalBody');
-        const downloadLink = document.getElementById('downloadLink');
-        const copyBtn = document.getElementById('copyDownloadLinkBtn');
-
-        if (modalBody) {
-            modalBody.innerHTML = `
-                <p>正在获取下载链接...</p>
-                <div class="text-center">
-                    <div class="spinner-border text-amber" role="status"></div>
-                </div>
-            `;
-        }
-        if (downloadLink) downloadLink.style.display = 'none';
-        if (copyBtn) copyBtn.style.display = 'none';
-
-        fetch(`/api/download/${fileId}`)
-            .then(response => response.json())
-            .then(data => {
-                if (data.success && data.download_url) {
-                    if (modalBody) {
-                        modalBody.innerHTML = `
-                            <div class="alert alert-success"><i class="fas fa-check-circle"></i> 下载链接获取成功！</div>
-                            <p class="text-muted small">点击下方按钮开始下载，链接可能有时效性。</p>
-                        `;
-                    }
-                    if (downloadLink) {
-                        downloadLink.href = data.download_url;
-                        downloadLink.style.display = 'inline-block';
-                    }
-                    if (copyBtn) {
-                        copyBtn.style.display = 'inline-block';
-                        copyBtn.dataset.url = data.download_url;
-                    }
-                } else {
-                    if (modalBody) {
-                        modalBody.innerHTML = `<div class="alert alert-danger">获取下载链接失败</div>`;
-                    }
-                    if (typeof showToast === 'function') {
-                        showToast('获取下载链接失败: ' + (data.error || '未知错误'), 'error');
-                    }
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                if (modalBody) {
-                    modalBody.innerHTML = `<div class="alert alert-danger">获取下载链接时发生错误</div>`;
-                }
-                if (typeof showToast === 'function') {
-                    showToast('获取下载链接时发生错误', 'error');
-                }
-            });
+        listBtn.classList.add('active');
+        iconBtn.classList.remove('active');
+        if (gridView) gridView.style.display = 'none';
+        if (listView) listView.style.display = 'block';
     }
+
+    // Save preference
+    localStorage.setItem('finderViewMode', view);
 }
 
-// 复制下载链接
-function copyDownloadLink() {
-    const copyBtn = document.getElementById('copyDownloadLinkBtn');
-    const url = copyBtn?.dataset?.url;
+// Single click to open files and folders
+document.addEventListener('DOMContentLoaded', function() {
+    const fileItems = document.querySelectorAll('.file-item');
 
-    if (url && typeof copyToClipboard === 'function') {
-        copyToClipboard(url);
-    } else if (url) {
-        // 降级方案
-        navigator.clipboard?.writeText(url).then(() => {
-            if (typeof showToast === 'function') {
-                showToast('已复制到剪贴板', 'success');
+    fileItems.forEach(item => {
+        // Single click to open
+        item.addEventListener('click', function(e) {
+            // Don't open if clicking buttons
+            if (e.target.closest('.btn')) return;
+
+            const link = this.querySelector('a');
+            if (link) {
+                window.location.href = link.href;
             }
         });
+
+        // Selection on hover (visual feedback only)
+        item.addEventListener('mouseenter', function() {
+            fileItems.forEach(i => i.classList.remove('selected'));
+            this.classList.add('selected');
+        });
+    });
+
+    // Restore view preference
+    const savedView = localStorage.getItem('finderViewMode');
+    if (savedView === 'list') {
+        switchView('list');
     }
-}
+
+    // Update status bar with file count
+    const statusCount = document.getElementById('statusCount');
+    if (statusCount && fileItems.length > 0) {
+        statusCount.textContent = fileItems.length + ' 个项目';
+    }
+
+    // Update status text on hover
+    fileItems.forEach(item => {
+        item.addEventListener('mouseenter', function() {
+            const fileName = this.querySelector('.file-grid-name, .file-list-name')?.textContent?.trim() || '项目';
+            const statusText = document.getElementById('statusText');
+            if (statusText) statusText.textContent = fileName;
+        });
+
+        item.addEventListener('mouseleave', function() {
+            const statusText = document.getElementById('statusText');
+            if (statusText) statusText.textContent = '就绪';
+        });
+    });
+});
 </script>
 {% endblock %}

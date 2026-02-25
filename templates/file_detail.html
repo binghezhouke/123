@@ -1,271 +1,230 @@
 {% extends "base.html" %}
 
-{% block title %}{{ file.filename }} - 文件详情 - 123云盘文件浏览器{% endblock %}
+{% block title %}{{ file.filename }} - CloudArchive{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-12">
-        <!-- 面包屑导航 -->
-        <nav aria-label="breadcrumb">
-            <ol class="breadcrumb">
-                <li class="breadcrumb-item">
-                    <a href="{{ url_for('main.index') }}"
-                        <i class="fas fa-home"></i> 首页
-                    </a>
-                </li>
-                <li class="breadcrumb-item active">文件详情</li>
-            </ol>
-        </nav>
-
-        <div class="surface-card">
-            <div class="card-header border-0 pb-0 bg-transparent">
-                <div class="d-flex align-items-center">
-                    <i class="{{ file.icon }} file-detail-icon me-3"></i>
-                    <div>
-                        <h4 class="mb-0">{{ file.filename }}</h4>
-                        <small class="text-muted">
-                            {{ file.category_name }}
-                            {% if not file.is_folder %} · {{ file.size_formatted }}{% endif %}
-                        </small>
-                    </div>
-                </div>
-            </div>
-
-            <div class="card-body">
-                <div class="row">
-                    <!-- 文件信息 -->
-                    <div class="col-md-8">
-                        <h5><i class="fas fa-info-circle"></i> 文件信息</h5>
-                        
-                        <table class="table table-striped align-middle">
-                            <tbody>
-                                <tr>
-                                    <td><strong>文件名</strong></td>
-                                    <td>{{ file.filename }}</td>
-                                </tr>
-                                <tr>
-                                    <td><strong>文件ID</strong></td>
-                                    <td><code>{{ file.fileId }}</code></td>
-                                </tr>
-                                <tr>
-                                    <td><strong>类型</strong></td>
-                                    <td>
-                                        {% if file.is_folder %}
-                                            <span class="badge bg-primary">文件夹</span>
-                                        {% else %}
-                                            <span class="badge bg-success">文件</span>
-                                        {% endif %}
-                                    </td>
-                                </tr>
-                                <tr>
-                                    <td><strong>分类</strong></td>
-                                    <td>
-                                        <span class="badge bg-info">{{ file.category_name }}</span>
-                                    </td>
-                                </tr>
-                                {% if not file.is_folder %}
-                                    <tr>
-                                        <td><strong>文件大小</strong></td>
-                                        <td>{{ file.size_formatted }} ({{ file.size }} 字节)</td>
-                                    </tr>
-                                {% endif %}
-                                {% if file.get('parentFileId') %}
-                                    <tr>
-                                        <td><strong>父目录ID</strong></td>
-                                        <td>
-                                            <a href="{{ url_for('main.index', parent_id=file.parentFileId) }}" class="text-decoration-none">
-                                                <code>{{ file.parentFileId }}</code>
-                                            </a>
-                                        </td>
-                                    </tr>
-                                {% endif %}
-                                {% if file.get('etag') %}
-                                    <tr>
-                                        <td><strong>ETag</strong></td>
-                                        <td><code class="small">{{ file.etag }}</code></td>
-                                    </tr>
-                                {% endif %}
-                                {% if file.get('createAt') %}
-                                    <tr>
-                                        <td><strong>创建时间</strong></td>
-                                        <td>{{ file.createAt }}</td>
-                                    </tr>
-                                {% endif %}
-                                {% if file.get('updateAt') %}
-                                    <tr>
-                                        <td><strong>修改时间</strong></td>
-                                        <td>{{ file.updateAt }}</td>
-                                    </tr>
-                                {% endif %}
-                                {% if webdav_url %}
-                                    <tr>
-                                        <td><strong>WebDAV URL</strong></td>
-                                        <td>
-                                            <div class="input-group">
-                                                <input type="text" class="form-control form-control-sm" id="webdavUrlInput" value="{{ webdav_url }}" readonly>
-                                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyWebdavUrl()">
-                                                    <i class="fas fa-copy"></i> 复制
-                                                </button>
-                                            </div>
-                                            <small class="text-muted">此URL包含认证信息，请妥善保管。</small>
-                                        </td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>重定向下载链接</strong></td>
-                                        <td>
-                                            <div class="input-group">
-                                                <input type="text" class="form-control form-control-sm" id="redirectUrlInput" placeholder="点击获取重定向链接..." readonly>
-                                                <button class="btn btn-outline-primary btn-sm" type="button" onclick="getRedirectUrl()" id="getRedirectBtn" data-file-id="{{ file.fileId }}">
-                                                    <i class="fas fa-external-link-alt"></i> 获取
-                                                </button>
-                                                <button class="btn btn-outline-secondary btn-sm" type="button" onclick="copyRedirectUrl()" id="copyRedirectBtn" style="display: none;">
-                                                    <i class="fas fa-copy"></i> 复制
-                                                </button>
-                                            </div>
-                                            <small class="text-muted">获取WebDAV跳转后的直接下载链接。</small>
-                                        </td>
-                                    </tr>
-                                {% endif %}
-                            </tbody>
-                        </table>
-
-                        <!-- 额外信息 -->
-                        {% if file.get('hidden') or file.get('starred') or file.get('trashed') %}
-                            <h5 class="mt-4"><i class="fas fa-flag"></i> 状态标志</h5>
-                            <div class="mb-3">
-                                {% if file.get('hidden') %}
-                                    <span class="badge bg-secondary me-2">
-                                        <i class="fas fa-eye-slash"></i> 隐藏
-                                    </span>
-                                {% endif %}
-                                {% if file.get('starred') %}
-                                    <span class="badge bg-warning me-2">
-                                        <i class="fas fa-star"></i> 收藏
-                                    </span>
-                                {% endif %}
-                                {% if file.get('trashed') %}
-                                    <span class="badge bg-danger me-2">
-                                        <i class="fas fa-trash"></i> 已删除
-                                    </span>
-                                {% endif %}
-                            </div>
-                        {% endif %}
-                    </div>
-
-                    <!-- 操作面板 -->
-                    <div class="col-md-4">
-                        <h5><i class="fas fa-tools"></i> 操作</h5>
-                        
-                        <div class="d-grid gap-2">
-                            {% if file.is_folder %}
-                                <a href="{{ url_for('main.index', parent_id=file.fileId) }}" 
-                                   class="btn btn-glow">
-                                    <i class="fas fa-folder-open"></i> 打开文件夹
-                                </a>
-                            {% else %}
-                                {% if download_url %}
-                                    <a href="{{ download_url }}" class="btn btn-glow" target="_blank">
-                                        <i class="fas fa-download"></i> 直接下载
-                                    </a>
-                                {% else %}
-                                    <button class="btn btn-glow download-btn" 
-                                            data-file-id="{{ file.fileId }}" 
-                                            data-file-name="{{ file.filename }}">
-                                        <i class="fas fa-download"></i> 获取下载链接
-                                    </button>
-                                {% endif %}
-                                
-                                <!-- 智能下载按钮 -->
-                                <button class="btn btn-ghost" onclick="getFinalDownloadUrl()" id="finalDownloadBtn" data-file-id="{{ file.fileId }}">
-                                    <i class="fas fa-magic"></i> 智能下载
-                                </button>
-                                
-                                <!-- WebDAV演示按钮 -->
-                                {% if webdav_url %}
-                                <a href="{{ url_for('main.demo_webdav', file_id=file.fileId) }}" class="btn btn-ghost">
-                                    <i class="fas fa-play-circle"></i> WebDAV演示
-                                </a>
-                                {% endif %}
-                            {% endif %}
-                            
-                            <button class="btn btn-ghost" onclick="history.back()">
-                                <i class="fas fa-arrow-left"></i> 返回
-                            </button>
-                            
-                            <a href="{{ url_for('main.index') }}" class="btn btn-ghost">
-                                <i class="fas fa-home"></i> 返回首页
-                            </a>
-                        </div>
-
-                        <!-- 文件预览区域 -->
-                        {% if not file.is_folder %}
-                            <div class="mt-4">
-                                <h6><i class="fas fa-eye"></i> 文件预览</h6>
-                                
-                                {% set file_ext = file.filename.lower().split('.')[-1] if '.' in file.filename else '' %}
-                                
-                                {% if file.category == 3 and file_ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'] %}
-                                    <!-- 图片预览 -->
-                                    <div class="text-center">
-                                        <p class="text-muted small">图片文件，可下载后查看</p>
-                                        <i class="fas fa-image fa-4x text-muted"></i>
-                                    </div>
-                                {% elif file.category == 2 %}
-                                    <!-- 视频预览 -->
-                                    <div class="text-center">
-                                        <p class="text-muted small">视频文件</p>
-                                        <i class="fas fa-video fa-4x text-muted"></i>
-                                    </div>
-                                {% elif file.category == 1 %}
-                                    <!-- 音频预览 -->
-                                    <div class="text-center">
-                                        <p class="text-muted small">音频文件</p>
-                                        <i class="fas fa-music fa-4x text-muted"></i>
-                                    </div>
-                                {% elif file_ext in ['txt', 'md', 'log'] %}
-                                    <!-- 文本文件 -->
-                                    <div class="text-center">
-                                        <p class="text-muted small">文本文件</p>
-                                        <i class="fas fa-file-alt fa-4x text-muted"></i>
-                                    </div>
-                                {% else %}
-                                    <!-- 其他文件 -->
-                                    <div class="text-center">
-                                        <p class="text-muted small">{{ file_ext.upper() if file_ext else '未知' }} 文件</p>
-                                        <i class="{{ file.icon }} fa-4x text-muted"></i>
-                                    </div>
-                                {% endif %}
-                            </div>
-                        {% endif %}
-                    </div>
-                </div>
+<!-- File Info Card -->
+<div class="card mb-4">
+    <div class="card-header" style="display: flex; align-items: center; gap: 16px;">
+        <div class="file-icon {{ 'folder' if file.is_folder else file.category|lower }}" style="width: 48px; height: 48px; font-size: 24px;">
+            <i class="{{ file.icon }}"></i>
+        </div>
+        <div>
+            <h4 style="margin: 0; font-weight: 600; font-size: 18px;">{{ file.filename }}</h4>
+            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px;">
+                {{ file.category_name }}
+                {% if not file.is_folder %} · {{ file.size_formatted }}{% endif %}
             </div>
         </div>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <!-- File Information -->
+            <div class="col-md-8">
+                <h6 style="font-weight: 600; margin-bottom: 16px; font-size: 14px;">
+                    <i class="fas fa-info-circle" style="margin-right: 8px; color: var(--accent-blue);"></i>文件信息
+                </h6>
 
-        <!-- 如果是文件夹，显示内容 -->
-        {% if file.is_folder %}
-            <div class="surface-card mt-4">
-                <div class="card-header border-0 bg-transparent">
-                    <h5 class="mb-0">
-                        <i class="fas fa-folder"></i> 文件夹内容
-                    </h5>
-                </div>
-                <div class="card-body">
-                    <div class="text-center">
-                        <a href="{{ url_for('index', parent_id=file.fileId) }}" 
-                           class="btn btn-outline-primary">
-                            <i class="fas fa-folder-open"></i> 查看文件夹内容
-                        </a>
+                <table class="table" style="font-size: 13px;">
+                    <tbody>
+                        <tr>
+                            <td style="width: 30%; color: var(--text-secondary);">文件名</td>
+                            <td>{{ file.filename }}</td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-secondary);">文件ID</td>
+                            <td><code style="background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{{ file.fileId }}</code></td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-secondary);">类型</td>
+                            <td>
+                                {% if file.is_folder %}
+                                    <span class="badge bg-primary">文件夹</span>
+                                {% else %}
+                                    <span class="badge bg-success">文件</span>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        <tr>
+                            <td style="color: var(--text-secondary);">分类</td>
+                            <td>
+                                <span class="badge bg-info">{{ file.category_name }}</span>
+                            </td>
+                        </tr>
+                        {% if not file.is_folder %}
+                            <tr>
+                                <td style="color: var(--text-secondary);">文件大小</td>
+                                <td>{{ file.size_formatted }} ({{ file.size }} 字节)</td>
+                            </tr>
+                        {% endif %}
+                        {% if file.get('parentFileId') %}
+                            <tr>
+                                <td style="color: var(--text-secondary);">父目录</td>
+                                <td>
+                                    <a href="{{ url_for('main.index', parent_id=file.parentFileId) }}" style="color: var(--accent-blue); text-decoration: none;">
+                                        <code style="background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{{ file.parentFileId }}</code>
+                                    </a>
+                                </td>
+                            </tr>
+                        {% endif %}
+                        {% if file.get('etag') %}
+                            <tr>
+                                <td style="color: var(--text-secondary);">ETag</td>
+                                <td><code style="background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 4px; font-size: 11px;">{{ file.etag }}</code></td>
+                            </tr>
+                        {% endif %}
+                        {% if file.get('createAt') %}
+                            <tr>
+                                <td style="color: var(--text-secondary);">创建时间</td>
+                                <td>{{ file.createAt }}</td>
+                            </tr>
+                        {% endif %}
+                        {% if file.get('updateAt') %}
+                            <tr>
+                                <td style="color: var(--text-secondary);">修改时间</td>
+                                <td>{{ file.updateAt }}</td>
+                            </tr>
+                        {% endif %}
+                        {% if webdav_url %}
+                            <tr>
+                                <td style="color: var(--text-secondary);">WebDAV URL</td>
+                                <td>
+                                    <div style="display: flex; gap: 8px;">
+                                        <input type="text" id="webdavUrlInput" value="{{ webdav_url }}" readonly
+                                               style="flex: 1; padding: 4px 8px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 12px; background: rgba(0,0,0,0.02);">
+                                        <button type="button" class="btn btn-sm btn-secondary" onclick="copyWebdavUrl()">
+                                            <i class="fas fa-copy"></i>
+                                        </button>
+                                    </div>
+                                    <small style="color: var(--text-secondary); font-size: 11px;">此URL包含认证信息，请妥善保管</small>
+                                </td>
+                            </tr>
+                            <tr>
+                                <td style="color: var(--text-secondary);">重定向链接</td>
+                                <td>
+                                    <div style="display: flex; gap: 8px;">
+                                        <input type="text" id="redirectUrlInput" placeholder="点击获取..." readonly
+                                               style="flex: 1; padding: 4px 8px; border: 1px solid var(--border-color); border-radius: 6px; font-size: 12px; background: rgba(0,0,0,0.02);">
+                                        <button type="button" class="btn btn-sm btn-primary" id="getRedirectBtn" data-file-id="{{ file.fileId }}" onclick="getRedirectUrl()">
+                                            <i class="fas fa-external-link-alt"></i>
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-secondary" id="copyRedirectBtn" style="display: none;" onclick="copyRedirectUrl()">
+                                            <i class="fas fa-copy"></i>
+                                        </button>
+                                    </div>
+                                    <small style="color: var(--text-secondary); font-size: 11px;">获取WebDAV跳转后的直接下载链接</small>
+                                </td>
+                            </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+
+                <!-- Status Flags -->
+                {% if file.get('hidden') or file.get('starred') or file.get('trashed') %}
+                    <h6 style="font-weight: 600; margin: 24px 0 12px; font-size: 14px;">
+                        <i class="fas fa-flag" style="margin-right: 8px; color: var(--accent-orange);"></i>状态
+                    </h6>
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                        {% if file.get('hidden') %}
+                            <span class="badge bg-secondary">
+                                <i class="fas fa-eye-slash" style="margin-right: 4px;"></i>隐藏
+                            </span>
+                        {% endif %}
+                        {% if file.get('starred') %}
+                            <span class="badge bg-primary" style="background: var(--accent-orange) !important;">
+                                <i class="fas fa-star" style="margin-right: 4px;"></i>收藏
+                            </span>
+                        {% endif %}
+                        {% if file.get('trashed') %}
+                            <span class="badge bg-danger">
+                                <i class="fas fa-trash" style="margin-right: 4px;"></i>已删除
+                            </span>
+                        {% endif %}
                     </div>
-                </div>
+                {% endif %}
             </div>
-        {% endif %}
+
+            <!-- Actions Panel -->
+            <div class="col-md-4">
+                <h6 style="font-weight: 600; margin-bottom: 16px; font-size: 14px;">
+                    <i class="fas fa-tools" style="margin-right: 8px; color: var(--accent-green);"></i>操作
+                </h6>
+
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    {% if file.is_folder %}
+                        <a href="{{ url_for('main.index', parent_id=file.fileId) }}" class="btn btn-primary">
+                            <i class="fas fa-folder-open" style="margin-right: 6px;"></i> 打开文件夹
+                        </a>
+                    {% else %}
+                        {% if download_url %}
+                            <a href="{{ download_url }}" class="btn btn-primary" target="_blank">
+                                <i class="fas fa-download" style="margin-right: 6px;"></i> 直接下载
+                            </a>
+                        {% else %}
+                            <button class="btn btn-primary download-btn"
+                                    data-file-id="{{ file.fileId }}"
+                                    data-file-name="{{ file.filename }}">
+                                <i class="fas fa-download" style="margin-right: 6px;"></i> 获取下载链接
+                            </button>
+                        {% endif %}
+
+                        <button class="btn btn-secondary" onclick="getFinalDownloadUrl()" id="finalDownloadBtn" data-file-id="{{ file.fileId }}">
+                            <i class="fas fa-magic" style="margin-right: 6px;"></i> 智能下载
+                        </button>
+
+                        {% if webdav_url %}
+                        <a href="{{ url_for('main.demo_webdav', file_id=file.fileId) }}" class="btn btn-secondary">
+                            <i class="fas fa-play-circle" style="margin-right: 6px;"></i> WebDAV演示
+                        </a>
+                        {% endif %}
+                    {% endif %}
+
+                    <button class="btn btn-ghost" onclick="history.back()">
+                        <i class="fas fa-arrow-left" style="margin-right: 6px;"></i> 返回
+                    </button>
+
+                    <a href="{{ url_for('main.index') }}" class="btn btn-ghost">
+                        <i class="fas fa-home" style="margin-right: 6px;"></i> 首页
+                    </a>
+                </div>
+
+                <!-- Preview Section -->
+                {% if not file.is_folder %}
+                    <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border-light);">
+                        <h6 style="font-weight: 600; margin-bottom: 16px; font-size: 14px;">
+                            <i class="fas fa-eye" style="margin-right: 8px; color: var(--accent-teal);"></i>预览
+                        </h6>
+
+                        {% set file_ext = file.filename.lower().split('.')[-1] if '.' in file.filename else '' %}
+
+                        <div style="text-align: center; padding: 24px; background: rgba(0,0,0,0.02); border-radius: var(--radius-md);">
+                            {% if file.category == 3 and file_ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'] %}
+                                <i class="fas fa-image" style="font-size: 48px; color: var(--accent-purple);"></i>
+                                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">图片文件</div>
+                            {% elif file.category == 2 %}
+                                <i class="fas fa-video" style="font-size: 48px; color: var(--accent-red);"></i>
+                                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">视频文件</div>
+                            {% elif file.category == 1 %}
+                                <i class="fas fa-music" style="font-size: 48px; color: var(--accent-pink, #ff375f);"></i>
+                                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">音频文件</div>
+                            {% elif file_ext in ['txt', 'md', 'log'] %}
+                                <i class="fas fa-file-alt" style="font-size: 48px; color: var(--accent-blue);"></i>
+                                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">文本文件</div>
+                            {% else %}
+                                <i class="{{ file.icon }}" style="font-size: 48px; color: var(--text-tertiary);"></i>
+                                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">{{ file_ext.upper() if file_ext else '未知' }} 文件</div>
+                            {% endif %}
+                        </div>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
     </div>
 </div>
 
-<!-- 内联脚本确保函数可用 -->
+<!-- Inline Scripts -->
 <script>
-// 重定向下载链接获取函数
+// Redirect URL functions
 window.getRedirectUrl = function() {
     const getBtn = document.getElementById("getRedirectBtn");
     const fileId = parseInt(getBtn.getAttribute('data-file-id'));
@@ -280,42 +239,39 @@ window.getRedirectUrl = function() {
     const copyBtn = document.getElementById("copyRedirectBtn");
     const urlInput = document.getElementById("redirectUrlInput");
 
-    // 更新按钮状态
-    getBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+    getBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
     getBtn.disabled = true;
-    urlInput.value = "正在获取重定向链接...";
+    urlInput.value = "获取中...";
 
-    // 调用API获取重定向URL
     fetch('/api/webdav/redirect/' + fileId)
         .then(response => response.json())
         .then(data => {
             if (data.success) {
                 urlInput.value = data.redirect_url;
                 copyBtn.style.display = 'inline-block';
-                getBtn.innerHTML = '<i class="fas fa-check"></i> 已获取';
-                getBtn.classList.remove('btn-outline-primary');
-                getBtn.classList.add('btn-outline-success');
+                getBtn.innerHTML = '<i class="fas fa-check"></i>';
+                getBtn.classList.remove('btn-primary');
+                getBtn.classList.add('btn-secondary');
                 if (typeof showToast === 'function') {
                     showToast('重定向链接获取成功', 'success');
                 }
             } else {
-                urlInput.value = "获取失败: " + (data.error || "未知错误");
-                getBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
-                getBtn.classList.remove('btn-outline-primary');
-                getBtn.classList.add('btn-outline-danger');
+                urlInput.value = "获取失败";
+                getBtn.innerHTML = '<i class="fas fa-times"></i>';
+                getBtn.classList.remove('btn-primary');
+                getBtn.classList.add('btn-danger');
                 if (typeof showToast === 'function') {
-                    showToast('获取重定向链接失败: ' + (data.error || "未知错误"), 'error');
+                    showToast('获取失败: ' + (data.error || "未知错误"), 'error');
                 }
             }
         })
         .catch(error => {
-            console.error('获取重定向URL失败:', error);
-            urlInput.value = "获取失败: " + error.message;
-            getBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
-            getBtn.classList.remove('btn-outline-primary');
-            getBtn.classList.add('btn-outline-danger');
+            urlInput.value = "错误";
+            getBtn.innerHTML = '<i class="fas fa-times"></i>';
+            getBtn.classList.remove('btn-primary');
+            getBtn.classList.add('btn-danger');
             if (typeof showToast === 'function') {
-                showToast('获取重定向链接失败: ' + error.message, 'error');
+                showToast('错误: ' + error.message, 'error');
             }
         })
         .finally(() => {
@@ -323,7 +279,7 @@ window.getRedirectUrl = function() {
         });
 };
 
-// 智能下载函数
+// Smart download
 window.getFinalDownloadUrl = function() {
     const finalBtn = document.getElementById("finalDownloadBtn");
     const fileId = parseInt(finalBtn.getAttribute('data-file-id'));
@@ -335,119 +291,80 @@ window.getFinalDownloadUrl = function() {
         return;
     }
 
-    // 更新按钮状态
-    finalBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+    finalBtn.innerHTML = '<i class="fas fa-spinner fa-spin" style="margin-right: 6px;"></i> 获取中...';
     finalBtn.disabled = true;
 
-    // 调用API获取最终下载URL
     fetch('/api/download/final/' + fileId + '?prefer_webdav=true')
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                // 直接打开下载链接
                 window.open(data.download_url, '_blank');
-                finalBtn.innerHTML = '<i class="fas fa-check"></i> 下载已开始';
-                finalBtn.classList.remove('btn-info');
-                finalBtn.classList.add('btn-success');
+                finalBtn.innerHTML = '<i class="fas fa-check" style="margin-right: 6px;"></i> 已开始';
                 if (typeof showToast === 'function') {
                     showToast('下载已开始', 'success');
                 }
-
-                // 3秒后恢复按钮状态
                 setTimeout(() => {
-                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
-                    finalBtn.classList.remove('btn-success');
-                    finalBtn.classList.add('btn-info');
-                }, 3000);
+                    finalBtn.innerHTML = '<i class="fas fa-magic" style="margin-right: 6px;"></i> 智能下载';
+                    finalBtn.disabled = false;
+                }, 2000);
             } else {
-                finalBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
-                finalBtn.classList.remove('btn-info');
-                finalBtn.classList.add('btn-danger');
+                finalBtn.innerHTML = '<i class="fas fa-times" style="margin-right: 6px;"></i> 失败';
                 if (typeof showToast === 'function') {
-                    showToast('获取下载链接失败: ' + (data.error || "未知错误"), 'error');
+                    showToast('获取失败: ' + (data.error || "未知错误"), 'error');
                 }
-
-                // 3秒后恢复按钮状态
                 setTimeout(() => {
-                    finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
-                    finalBtn.classList.remove('btn-danger');
-                    finalBtn.classList.add('btn-info');
-                }, 3000);
+                    finalBtn.innerHTML = '<i class="fas fa-magic" style="margin-right: 6px;"></i> 智能下载';
+                    finalBtn.disabled = false;
+                }, 2000);
             }
         })
         .catch(error => {
-            console.error('获取最终下载URL失败:', error);
-            finalBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
-            finalBtn.classList.remove('btn-info');
-            finalBtn.classList.add('btn-danger');
+            finalBtn.innerHTML = '<i class="fas fa-times" style="margin-right: 6px;"></i> 错误';
             if (typeof showToast === 'function') {
-                showToast('获取下载链接失败: ' + error.message, 'error');
+                showToast('错误: ' + error.message, 'error');
             }
-
-            // 3秒后恢复按钮状态
             setTimeout(() => {
-                finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
-                finalBtn.classList.remove('btn-danger');
-                finalBtn.classList.add('btn-info');
-            }, 3000);
-        })
-        .finally(() => {
-            finalBtn.disabled = false;
+                finalBtn.innerHTML = '<i class="fas fa-magic" style="margin-right: 6px;"></i> 智能下载';
+                finalBtn.disabled = false;
+            }, 2000);
         });
 };
-</script>
 
-{% endblock %}
-
-{% block extra_scripts %}
-<script>
-// 复制WebDAV URL
+// Copy functions
 function copyWebdavUrl() {
-    const copyText = document.getElementById("webdavUrlInput");
-    if (!copyText) return;
-
-    const text = copyText.value;
-    copyText.select();
-    copyText.setSelectionRange(0, 99999);
+    const input = document.getElementById("webdavUrlInput");
+    if (!input) return;
+    const text = input.value;
 
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(text).then(() => {
-            showToast('WebDAV URL 已复制到剪贴板', 'success');
-        }).catch(() => {
-            fallbackCopy(text, 'WebDAV URL');
-        });
+            showToast('已复制到剪贴板', 'success');
+        }).catch(() => fallbackCopy(text));
     } else {
-        fallbackCopy(text, 'WebDAV URL');
+        fallbackCopy(text);
     }
 }
 
-// 复制重定向URL
 function copyRedirectUrl() {
-    const copyText = document.getElementById("redirectUrlInput");
-    if (!copyText) return;
+    const input = document.getElementById("redirectUrlInput");
+    if (!input) return;
+    const text = input.value;
 
-    const text = copyText.value;
-    if (!text || text === "点击获取重定向链接..." || text.includes("获取失败") || text.includes("失败")) {
-        showToast('没有有效的重定向URL可复制', 'warning');
+    if (!text || text.includes("获取") || text.includes("失败")) {
+        showToast('没有有效的链接可复制', 'warning');
         return;
     }
 
-    copyText.select();
-    copyText.setSelectionRange(0, 99999);
-
     if (navigator.clipboard && window.isSecureContext) {
         navigator.clipboard.writeText(text).then(() => {
-            showToast('重定向URL 已复制到剪贴板', 'success');
-        }).catch(() => {
-            fallbackCopy(text, '重定向URL');
-        });
+            showToast('已复制到剪贴板', 'success');
+        }).catch(() => fallbackCopy(text));
     } else {
-        fallbackCopy(text, '重定向URL');
+        fallbackCopy(text);
     }
 }
 
-// 降级复制方案
-function fallbackCopy(text, name) {
+function fallbackCopy(text) {
     const textArea = document.createElement('textarea');
     textArea.value = text;
     textArea.style.position = 'fixed';
@@ -457,11 +374,29 @@ function fallbackCopy(text, name) {
 
     try {
         const success = document.execCommand('copy');
-        showToast(success ? `${name} 已复制到剪贴板` : '复制失败，请手动复制', success ? 'success' : 'error');
+        showToast(success ? '已复制到剪贴板' : '复制失败', success ? 'success' : 'error');
     } catch (err) {
-        showToast('复制失败，请手动复制', 'error');
+        showToast('复制失败', 'error');
     }
     document.body.removeChild(textArea);
 }
+</script>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+// Bind download button
+document.addEventListener('DOMContentLoaded', function() {
+    const downloadBtn = document.querySelector('.download-btn');
+    if (downloadBtn) {
+        downloadBtn.addEventListener('click', function() {
+            const fileId = this.dataset.fileId;
+            const fileName = this.dataset.fileName || '文件';
+            if (typeof downloadFile === 'function') {
+                downloadFile(fileId, fileName);
+            }
+        });
+    }
+});
 </script>
 {% endblock %}

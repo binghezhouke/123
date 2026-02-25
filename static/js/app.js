@@ -1,40 +1,40 @@
-// 123云盘文件浏览器 JavaScript - ES6+ 版本
+// CloudArchive - macOS Finder Style JavaScript
 
-// 等待 DOM 加载完成
+// Wait for DOM to load
 document.addEventListener('DOMContentLoaded', () => {
-    // 初始化工具提示
+    // Initialize tooltips
     const tooltipTriggerList = document.querySelectorAll('[data-bs-toggle="tooltip"]');
     tooltipTriggerList.forEach(el => new bootstrap.Tooltip(el));
 
-    // 绑定下载按钮事件
+    // Bind download buttons
     bindDownloadButtons();
 
-    // 文件卡片动画效果
+    // Initialize card animations
     initCardAnimations();
 
-    // 搜索表单增强
+    // Search enhancement
     initSearchEnhancement();
 
-    // 文件夹双击进入
-    initFolderDoubleClick();
+    // Folder/file click to open
+    initItemClick();
 
-    // 键盘快捷键
+    // Keyboard shortcuts
     initKeyboardShortcuts();
 
-    // 自动隐藏提示消息
+    // Auto-hide alerts
     initAutoHideAlerts();
 
-    console.log('123云盘文件浏览器已加载完成');
+    console.log('CloudArchive - Finder style loaded');
 
-    // 性能监控
+    // Performance monitoring
     if (window.performance && window.performance.timing) {
         const loadTime = window.performance.timing.loadEventEnd - window.performance.timing.navigationStart;
-        console.log('页面加载时间:', loadTime + 'ms');
+        console.log('Page load time:', loadTime + 'ms');
     }
 });
 
 /**
- * 绑定下载按钮事件
+ * Bind download button events
  */
 function bindDownloadButtons() {
     const downloadButtons = document.querySelectorAll('.download-btn');
@@ -44,7 +44,7 @@ function bindDownloadButtons() {
 }
 
 /**
- * 处理下载按钮点击
+ * Handle download button click
  */
 function handleDownloadClick(e) {
     const button = e.currentTarget;
@@ -60,24 +60,24 @@ function handleDownloadClick(e) {
 }
 
 /**
- * 统一下载文件函数
- * @param {string|number} fileId - 文件ID
- * @param {string} fileName - 文件名
+ * Unified download file function
+ * @param {string|number} fileId - File ID
+ * @param {string} fileName - File name
  */
 function downloadFile(fileId, fileName = '文件') {
-    // 显示模态框
+    // Show modal
     const modal = new bootstrap.Modal(document.getElementById('downloadModal'));
     modal.show();
 
-    // 重置模态框内容
+    // Reset modal content
     const modalBody = document.getElementById('downloadModalBody');
     const downloadLink = document.getElementById('downloadLink');
     const copyBtn = document.getElementById('copyDownloadLinkBtn');
 
     modalBody.innerHTML = `
         <p>正在获取 "${escapeHtml(fileName)}" 的下载链接...</p>
-        <div class="text-center">
-            <div class="spinner-border text-amber" role="status">
+        <div class="text-center" style="padding: 20px;">
+            <div class="spinner-border" role="status" style="color: var(--accent-blue);">
                 <span class="visually-hidden">加载中...</span>
             </div>
         </div>
@@ -85,7 +85,7 @@ function downloadFile(fileId, fileName = '文件') {
     downloadLink.style.display = 'none';
     copyBtn.style.display = 'none';
 
-    // 请求下载链接
+    // Request download link
     fetch(`/api/download/${fileId}`)
         .then(response => {
             if (!response.ok) {
@@ -96,23 +96,23 @@ function downloadFile(fileId, fileName = '文件') {
         .then(data => {
             if (data.success && data.download_url) {
                 modalBody.innerHTML = `
-                    <div class="alert alert-success">
+                    <div class="alert alert-success" style="margin-bottom: 16px;">
                         <i class="fas fa-check-circle"></i> 下载链接获取成功！
                     </div>
-                    <p>文件: <strong>${escapeHtml(fileName)}</strong></p>
-                    <p class="text-muted small">点击下方按钮开始下载，链接可能有时效性。</p>
+                    <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 8px;">文件: <strong style="color: var(--text-primary);">${escapeHtml(fileName)}</strong></p>
+                    <p style="font-size: 12px; color: var(--text-secondary);">点击下方按钮开始下载，链接可能有时效性。</p>
                 `;
                 downloadLink.href = data.download_url;
-                downloadLink.style.display = 'inline-block';
-                copyBtn.style.display = 'inline-block';
+                downloadLink.style.display = 'inline-flex';
+                copyBtn.style.display = 'inline-flex';
                 copyBtn.dataset.url = data.download_url;
             } else {
                 modalBody.innerHTML = `
-                    <div class="alert alert-danger">
+                    <div class="alert alert-danger" style="margin-bottom: 16px;">
                         <i class="fas fa-exclamation-triangle"></i> 获取下载链接失败
                     </div>
-                    <p>无法获取文件 "${escapeHtml(fileName)}" 的下载链接</p>
-                    <p class="text-muted small">${data.error || '未知错误'}</p>
+                    <p style="font-size: 13px; color: var(--text-secondary);">无法获取文件 "${escapeHtml(fileName)}" 的下载链接</p>
+                    <p style="font-size: 12px; color: var(--text-secondary);">${data.error || '未知错误'}</p>
                 `;
                 showToast('获取下载链接失败', 'error');
             }
@@ -120,18 +120,18 @@ function downloadFile(fileId, fileName = '文件') {
         .catch(error => {
             console.error('下载请求失败:', error);
             modalBody.innerHTML = `
-                <div class="alert alert-danger">
+                <div class="alert alert-danger" style="margin-bottom: 16px;">
                     <i class="fas fa-exclamation-triangle"></i> 下载失败
                 </div>
-                <p>错误信息: ${escapeHtml(error.message)}</p>
-                <p class="text-muted small">请检查网络连接或稍后重试</p>
+                <p style="font-size: 13px; color: var(--text-secondary);">错误信息: ${escapeHtml(error.message)}</p>
+                <p style="font-size: 12px; color: var(--text-secondary);">请检查网络连接或稍后重试</p>
             `;
             showToast('获取下载链接失败: ' + error.message, 'error');
         });
 }
 
 /**
- * 复制下载链接
+ * Copy download URL
  */
 function copyDownloadUrl() {
     const copyBtn = document.getElementById('copyDownloadLinkBtn');
@@ -143,33 +143,33 @@ function copyDownloadUrl() {
 }
 
 /**
- * 获取下载链接 (用于 files.html 中的内联调用)
- * @param {string|number} fileId - 文件ID
+ * Get download link (for inline calls in files.html)
+ * @param {string|number} fileId - File ID
  */
 function getDownloadLink(fileId) {
     downloadFile(fileId, '文件');
 }
 
 /**
- * 复制下载链接 (用于 files.html 中的内联调用)
+ * Copy download link (for inline calls in files.html)
  */
 function copyDownloadLink() {
     copyDownloadUrl();
 }
 
 /**
- * 初始化文件卡片动画
+ * Initialize card animations
  */
 function initCardAnimations() {
-    const fileCards = document.querySelectorAll('.file-card');
+    const fileCards = document.querySelectorAll('.file-card, .file-grid-item, .file-list-row');
     fileCards.forEach((card, index) => {
-        card.style.animationDelay = `${index * 0.1}s`;
+        card.style.animationDelay = `${index * 0.03}s`;
         card.classList.add('fade-in');
     });
 }
 
 /**
- * 搜索表单增强
+ * Search enhancement
  */
 function initSearchEnhancement() {
     const searchQuery = document.getElementById('searchQuery');
@@ -182,16 +182,30 @@ function initSearchEnhancement() {
             }
         });
     }
+
+    // Toolbar search focus
+    const toolbarSearch = document.getElementById('toolbarSearch');
+    if (toolbarSearch) {
+        toolbarSearch.addEventListener('focus', () => {
+            toolbarSearch.parentElement.classList.add('focus');
+        });
+        toolbarSearch.addEventListener('blur', () => {
+            toolbarSearch.parentElement.classList.remove('focus');
+        });
+    }
 }
 
 /**
- * 文件夹双击进入
+ * Item single click to open
  */
-function initFolderDoubleClick() {
-    const fileCards = document.querySelectorAll('.file-card');
-    fileCards.forEach(card => {
-        card.addEventListener('dblclick', () => {
-            const link = card.querySelector('a');
+function initItemClick() {
+    const fileItems = document.querySelectorAll('.file-item');
+    fileItems.forEach(item => {
+        item.addEventListener('click', (e) => {
+            // Don't navigate if clicking buttons or links directly
+            if (e.target.closest('.btn') || e.target.tagName === 'A') return;
+
+            const link = item.querySelector('a');
             if (link) {
                 window.location.href = link.href;
             }
@@ -200,21 +214,21 @@ function initFolderDoubleClick() {
 }
 
 /**
- * 键盘快捷键
+ * Keyboard shortcuts
  */
 function initKeyboardShortcuts() {
     document.addEventListener('keydown', (e) => {
-        // Ctrl/Cmd + F 聚焦搜索框
+        // Cmd/Ctrl + F focus search
         if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
             e.preventDefault();
-            const searchInput = document.querySelector('.navbar .search-input[name="q"]');
+            const searchInput = document.getElementById('toolbarSearch');
             if (searchInput) {
                 searchInput.focus();
                 searchInput.select();
             }
         }
 
-        // ESC 关闭模态框
+        // ESC close modals
         if (e.key === 'Escape') {
             const openModals = document.querySelectorAll('.modal.show');
             openModals.forEach(modalEl => {
@@ -225,33 +239,36 @@ function initKeyboardShortcuts() {
             });
         }
 
-        // 回车键搜索
-        if (e.key === 'Enter' && document.activeElement?.name === 'q') {
-            document.activeElement.closest('form')?.submit();
+        // Enter to search when in search box
+        if (e.key === 'Enter' && document.activeElement?.id === 'toolbarSearch') {
+            const query = document.activeElement.value;
+            if (query) {
+                window.location.href = `/search?q=${encodeURIComponent(query)}`;
+            }
         }
     });
 }
 
 /**
- * 自动隐藏提示消息
+ * Auto-hide alerts
  */
 function initAutoHideAlerts() {
     setTimeout(() => {
-        const alerts = document.querySelectorAll('.alert:not(.alert-permanent)');
+        const alerts = document.querySelectorAll('.alert:not(.alert-permanent):not(.alert-success):not(.alert-danger)');
         alerts.forEach(alert => {
-            alert.style.transition = 'opacity 0.5s ease';
+            alert.style.transition = 'opacity 0.4s ease';
             alert.style.opacity = '0';
-            setTimeout(() => alert.remove(), 500);
+            setTimeout(() => alert.remove(), 400);
         });
     }, 5000);
 }
 
-// 文件操作相关函数
+// File operations
 window.FileOperations = {
     /**
-     * 获取文件详情
-     * @param {string|number} fileId - 文件ID
-     * @param {function} callback - 回调函数
+     * Get file info
+     * @param {string|number} fileId - File ID
+     * @param {function} callback - Callback function
      */
     getFileInfo: function(fileId, callback) {
         fetch(`/api/files/batch?ids=${fileId}`)
@@ -269,9 +286,9 @@ window.FileOperations = {
     },
 
     /**
-     * 批量获取文件详情
-     * @param {Array} fileIds - 文件ID数组
-     * @param {function} callback - 回调函数
+     * Batch get file info
+     * @param {Array} fileIds - File ID array
+     * @param {function} callback - Callback function
      */
     getBatchFileInfo: function(fileIds, callback) {
         const ids = fileIds.join(',');
@@ -290,12 +307,12 @@ window.FileOperations = {
     }
 };
 
-// 工具函数
+// Utility functions
 
 /**
- * 文件大小格式化
- * @param {number} bytes - 字节数
- * @returns {string} - 格式化后的字符串
+ * Format file size
+ * @param {number} bytes - Bytes
+ * @returns {string} - Formatted string
  */
 function formatFileSize(bytes) {
     if (bytes === 0) return '0 字节';
@@ -308,9 +325,9 @@ function formatFileSize(bytes) {
 }
 
 /**
- * 时间格式化
- * @param {number} timestamp - Unix时间戳
- * @returns {string} - 格式化后的字符串
+ * Format time
+ * @param {number} timestamp - Unix timestamp
+ * @returns {string} - Formatted string
  */
 function formatTime(timestamp) {
     const date = new Date(timestamp * 1000);
@@ -318,9 +335,9 @@ function formatTime(timestamp) {
 }
 
 /**
- * HTML转义
- * @param {string} text - 原始文本
- * @returns {string} - 转义后的文本
+ * Escape HTML
+ * @param {string} text - Raw text
+ * @returns {string} - Escaped text
  */
 function escapeHtml(text) {
     if (!text) return '';
@@ -330,8 +347,8 @@ function escapeHtml(text) {
 }
 
 /**
- * 复制到剪贴板
- * @param {string} text - 要复制的文本
+ * Copy to clipboard
+ * @param {string} text - Text to copy
  */
 function copyToClipboard(text) {
     if (navigator.clipboard && window.isSecureContext) {
@@ -344,8 +361,8 @@ function copyToClipboard(text) {
 }
 
 /**
- * 复制到剪贴板（降级方案）
- * @param {string} text - 要复制的文本
+ * Fallback copy to clipboard
+ * @param {string} text - Text to copy
  */
 function fallbackCopyToClipboard(text) {
     const textArea = document.createElement('textarea');
@@ -374,9 +391,9 @@ function fallbackCopyToClipboard(text) {
 }
 
 /**
- * 显示 Toast 通知
- * @param {string} message - 消息内容
- * @param {string} type - 类型: 'info', 'success', 'error', 'warning'
+ * Show Toast notification
+ * @param {string} message - Message content
+ * @param {string} type - Type: 'info', 'success', 'error', 'warning'
  */
 function showToast(message, type = 'info') {
     const container = document.getElementById('toastContainer');
@@ -385,25 +402,33 @@ function showToast(message, type = 'info') {
         return;
     }
 
-    const bgClass = type === 'error' ? 'bg-danger' :
-                   type === 'success' ? 'bg-success' :
-                   type === 'warning' ? 'bg-warning text-dark' :
-                   'bg-primary';
+    // macOS style toast colors
+    const colors = {
+        success: { bg: 'rgba(52, 199, 89, 0.95)', icon: 'fa-check-circle' },
+        error: { bg: 'rgba(255, 59, 48, 0.95)', icon: 'fa-exclamation-circle' },
+        warning: { bg: 'rgba(255, 149, 0, 0.95)', icon: 'fa-exclamation-triangle' },
+        info: { bg: 'rgba(0, 122, 255, 0.95)', icon: 'fa-info-circle' }
+    };
 
-    const icon = type === 'error' ? 'fa-exclamation-circle' :
-                type === 'success' ? 'fa-check-circle' :
-                type === 'warning' ? 'fa-exclamation-triangle' :
-                'fa-info-circle';
+    const { bg, icon } = colors[type] || colors.info;
 
     const toast = document.createElement('div');
-    toast.className = `toast align-items-center text-white ${bgClass} border-0`;
+    toast.className = 'toast align-items-center text-white border-0';
     toast.setAttribute('role', 'alert');
+    toast.style.cssText = `
+        background: ${bg};
+        border-radius: 10px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        margin-bottom: 8px;
+    `;
     toast.innerHTML = `
         <div class="d-flex">
-            <div class="toast-body">
-                <i class="fas ${icon} me-2"></i>${escapeHtml(message)}
+            <div class="toast-body" style="padding: 12px 16px; font-size: 13px;">
+                <i class="fas ${icon}" style="margin-right: 8px;"></i>${escapeHtml(message)}
             </div>
-            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭"></button>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="关闭" style="opacity: 0.8;"></button>
         </div>
     `;
 
@@ -417,7 +442,7 @@ function showToast(message, type = 'info') {
     });
 }
 
-// 暴露全局函数供内联脚本调用
+// Expose global functions
 window.downloadFile = downloadFile;
 window.getDownloadLink = getDownloadLink;
 window.copyDownloadLink = copyDownloadLink;
@@ -428,21 +453,23 @@ window.formatFileSize = formatFileSize;
 window.formatTime = formatTime;
 window.escapeHtml = escapeHtml;
 
-// 刷新文件列表（用于 files.html）
+// Refresh files
 window.refreshFiles = function() {
     window.location.reload();
 };
 
-// 切换视图（用于 files.html）
+// Toggle view (placeholder for compatibility)
 window.toggleView = function() {
     const container = document.getElementById('fileContainer');
     if (!container) return;
 
-    container.classList.toggle('row');
-    const items = container.querySelectorAll('.file-item');
-    items.forEach(item => {
-        item.classList.toggle('col-12');
-        item.classList.toggle('col-md-6');
-        item.classList.toggle('col-lg-4');
-    });
+    // Call the new switchView function if available
+    if (typeof switchView === 'function') {
+        const iconBtn = document.getElementById('iconViewBtn');
+        if (iconBtn && iconBtn.classList.contains('active')) {
+            switchView('list');
+        } else {
+            switchView('icons');
+        }
+    }
 };

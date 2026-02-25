@@ -3,121 +3,180 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}123云盘文件浏览器{% endblock %}</title>
-    
+    <title>{% block title %}CloudArchive{% endblock %}</title>
+
     <!-- Bootstrap CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <!-- Font Awesome -->
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
-    <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700;800&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
     <!-- 自定义CSS -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
-    
+
     {% block extra_head %}{% endblock %}
 </head>
-<body class="page-shell">
-    <div class="fluid-bg"></div>
-    <div class="ambient-grain"></div>
-    <!-- 导航栏 -->
-    <nav class="navbar navbar-expand-lg navbar-dark luxury-nav">
-        <div class="container">
-            <a class="navbar-brand brand-luxury" href="{{ url_for('main.index') }}">
-                <span class="brand-icon">⋰</span>
-                <span class="brand-text">Cloud<span class="brand-accent">Archive</span></span>
-            </a>
-            
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav me-auto">
-                    <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('main.index') }}">
-                            <i class="fas fa-home"></i> 首页
-                        </a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link" href="{{ url_for('main.search') }}">
-                            <i class="fas fa-search"></i> 搜索
-                        </a>
-                    </li>
-                </ul>
-                
-                <!-- 搜索框 -->
-                <form class="d-flex search-luxury" method="GET" action="{{ url_for('main.search') }}">
-                    <div class="search-wrapper">
-                        <i class="fas fa-search search-icon"></i>
-                        <input class="search-input" type="search" name="q" placeholder="探索文件..." 
-                               value="{{ request.args.get('q', '') }}">
+<body>
+    <!-- Finder Window Container -->
+    <div class="finder-window">
+        <!-- Sidebar -->
+        <aside class="finder-sidebar">
+            <!-- Favorites Section -->
+            <div class="sidebar-section">
+                <div class="sidebar-header">收藏</div>
+                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint == 'main.index' and not request.args.get('parent_id') %}active{% endif %}">
+                    <span class="sidebar-icon favorites"><i class="fas fa-home"></i></span>
+                    <span class="sidebar-label">首页</span>
+                </a>
+                <a href="{{ url_for('main.search') }}" class="sidebar-item {% if request.endpoint == 'main.search' %}active{% endif %}">
+                    <span class="sidebar-icon search"><i class="fas fa-search"></i></span>
+                    <span class="sidebar-label">搜索</span>
+                </a>
+            </div>
+
+            <!-- Locations Section -->
+            <div class="sidebar-section">
+                <div class="sidebar-header">位置</div>
+                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint == 'main.index' and not request.args.get('parent_id') %}active{% endif %}">
+                    <span class="sidebar-icon documents"><i class="fas fa-hdd"></i></span>
+                    <span class="sidebar-label">123云盘</span>
+                </a>
+            </div>
+
+            <!-- Tags Section (for future use) -->
+            <div class="sidebar-section">
+                <div class="sidebar-header">标签</div>
+                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
+                    <span class="sidebar-icon" style="color: var(--accent-red);"><i class="fas fa-tag"></i></span>
+                    <span class="sidebar-label">红色</span>
+                </a>
+                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
+                    <span class="sidebar-icon" style="color: var(--accent-orange);"><i class="fas fa-tag"></i></span>
+                    <span class="sidebar-label">橙色</span>
+                </a>
+                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
+                    <span class="sidebar-icon" style="color: var(--accent-yellow);"><i class="fas fa-tag"></i></span>
+                    <span class="sidebar-label">黄色</span>
+                </a>
+                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
+                    <span class="sidebar-icon" style="color: var(--accent-green);"><i class="fas fa-tag"></i></span>
+                    <span class="sidebar-label">绿色</span>
+                </a>
+                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
+                    <span class="sidebar-icon" style="color: var(--accent-blue);"><i class="fas fa-tag"></i></span>
+                    <span class="sidebar-label">蓝色</span>
+                </a>
+                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
+                    <span class="sidebar-icon" style="color: var(--accent-purple);"><i class="fas fa-tag"></i></span>
+                    <span class="sidebar-label">紫色</span>
+                </a>
+            </div>
+        </aside>
+
+        <!-- Main Content Area -->
+        <div class="finder-content">
+            <!-- Toolbar -->
+            <div class="finder-toolbar">
+                <div class="toolbar-left">
+                    <!-- Navigation Controls -->
+                    <div class="toolbar-btn" onclick="history.back()" title="后退">
+                        <i class="fas fa-chevron-left"></i>
                     </div>
-                    <button class="btn btn-luxury" type="submit">
-                        <span>搜索</span>
+                    <div class="toolbar-btn" onclick="history.forward()" title="前进">
+                        <i class="fas fa-chevron-right"></i>
+                    </div>
+                    <div class="toolbar-separator"></div>
+
+                    <!-- Path Bar -->
+                    <div class="path-bar">
+                        <a href="{{ url_for('main.index') }}" class="path-item">
+                            <i class="fas fa-hdd" style="margin-right: 4px;"></i> 123云盘
+                        </a>
+                        {% if request.args.get('parent_id') %}
+                        <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
+                        <span class="path-current">文件夹 {{ request.args.get('parent_id') }}</span>
+                        {% elif request.endpoint == 'main.search' %}
+                        <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
+                        <span class="path-current">搜索</span>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <div class="toolbar-right">
+                    <!-- View Toggle -->
+                    <div class="view-toggle">
+                        <button type="button" class="view-toggle-btn active" id="iconViewBtn" title="图标视图" onclick="switchView('icons')">
+                            <i class="fas fa-th-large"></i>
+                        </button>
+                        <button type="button" class="view-toggle-btn" id="listViewBtn" title="列表视图" onclick="switchView('list')">
+                            <i class="fas fa-list"></i>
+                        </button>
+                    </div>
+                    <div class="toolbar-separator"></div>
+
+                    <!-- Search in Toolbar -->
+                    <div class="toolbar-search">
+                        <i class="fas fa-search toolbar-search-icon"></i>
+                        <input type="search" placeholder="搜索" id="toolbarSearch" onkeypress="if(event.key==='Enter'){location.href='{{ url_for('main.search') }}?q='+this.value;}">
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <button type="button" class="toolbar-btn" onclick="refreshFiles()" title="刷新">
+                        <i class="fas fa-sync-alt"></i>
                     </button>
-                </form>
+                    <button type="button" class="toolbar-btn" title="操作" onclick="showToast('更多功能即将推出', 'info')">
+                        <i class="fas fa-ellipsis-h"></i>
+                    </button>
+                </div>
             </div>
-        </div>
-    </nav>
 
-    <!-- 消息提示 -->
-    {% with messages = get_flashed_messages(with_categories=true) %}
-        {% if messages %}
-            <div class="container mt-3">
-                {% for category, message in messages %}
-                    <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show shadow-soft" role="alert">
-                        {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            <!-- Flash Messages -->
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    <div style="padding: 12px 20px;">
+                        {% for category, message in messages %}
+                            <div class="alert alert-{{ 'danger' if category == 'error' else 'success' }} alert-dismissible fade show" role="alert">
+                                {{ message }}
+                                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                            </div>
+                        {% endfor %}
                     </div>
-                {% endfor %}
-            </div>
-        {% endif %}
-    {% endwith %}
+                {% endif %}
+            {% endwith %}
 
-    <!-- 主要内容 -->
-    <main class="container py-4 page-content">
-        {% block content %}{% endblock %}
-    </main>
+            <!-- Main Content -->
+            <main class="finder-main page-content">
+                {% block content %}{% endblock %}
+            </main>
 
-    <!-- 页脚 -->
-    <footer class="luxury-footer py-5 mt-5">
-        <div class="container">
-            <div class="row align-items-center">
-                <div class="col-md-6 text-center text-md-start mb-3 mb-md-0">
-                    <span class="footer-brand">CloudArchive</span>
-                    <p class="footer-tagline mb-0">Elegance in every file</p>
-                </div>
-                <div class="col-md-6 text-center text-md-end">
-                    <p class="footer-copyright mb-0">&copy; 2025 · Designed with precision</p>
-                </div>
+            <!-- Status Bar -->
+            <div class="status-bar">
+                <span id="statusText">就绪</span>
+                <span id="statusCount"></span>
             </div>
         </div>
-    </footer>
+    </div>
 
-    <!-- 全局下载模态框 -->
+    <!-- Global Download Modal -->
     <div class="modal fade" id="downloadModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog">
+        <div class="modal-dialog modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title"><i class="fas fa-download"></i> 下载文件</h5>
+                    <h5 class="modal-title"><i class="fas fa-download" style="margin-right: 8px;"></i> 下载文件</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
                 </div>
                 <div class="modal-body" id="downloadModalBody">
                     <p>正在获取下载链接...</p>
                     <div class="text-center">
-                        <div class="spinner-border text-amber" role="status">
+                        <div class="spinner-border" role="status" style="color: var(--accent-blue);">
                             <span class="visually-hidden">加载中...</span>
                         </div>
                     </div>
                 </div>
                 <div class="modal-footer">
-                    <button type="button" class="btn btn-ghost" data-bs-dismiss="modal">关闭</button>
-                    <a href="#" class="btn btn-glow" id="downloadLink" target="_blank" style="display: none;">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
+                    <a href="#" class="btn btn-primary" id="downloadLink" target="_blank" style="display: none;">
                         <i class="fas fa-download"></i> 立即下载
                     </a>
-                    <button type="button" class="btn btn-ghost" id="copyDownloadLinkBtn" style="display: none;" onclick="copyDownloadUrl()">
+                    <button type="button" class="btn btn-secondary" id="copyDownloadLinkBtn" style="display: none;" onclick="copyDownloadUrl()">
                         <i class="fas fa-copy"></i> 复制链接
                     </button>
                 </div>
@@ -125,13 +184,85 @@
         </div>
     </div>
 
-    <!-- Toast 通知容器 -->
+    <!-- Toast Container -->
     <div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
 
     <!-- Bootstrap JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
     <!-- 自定义JS -->
     <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+    <script>
+        // View switching functionality
+        function switchView(view) {
+            const iconBtn = document.getElementById('iconViewBtn');
+            const listBtn = document.getElementById('listViewBtn');
+            const container = document.getElementById('fileContainer');
+
+            if (view === 'icons') {
+                iconBtn.classList.add('active');
+                listBtn.classList.remove('active');
+                if (container) {
+                    container.classList.remove('file-list-view');
+                    container.classList.add('file-grid');
+                }
+            } else {
+                listBtn.classList.add('active');
+                iconBtn.classList.remove('active');
+                if (container) {
+                    container.classList.remove('file-grid');
+                    container.classList.add('file-list-view');
+                }
+            }
+
+            // Save preference
+            localStorage.setItem('finderViewMode', view);
+        }
+
+        // Restore view preference
+        document.addEventListener('DOMContentLoaded', function() {
+            const savedView = localStorage.getItem('finderViewMode');
+            if (savedView) {
+                switchView(savedView);
+            }
+
+            // Update status bar
+            updateStatusBar();
+        });
+
+        // Update status bar with file count
+        function updateStatusBar() {
+            const fileItems = document.querySelectorAll('.file-item');
+            const count = fileItems.length;
+            const statusCount = document.getElementById('statusCount');
+            const statusText = document.getElementById('statusText');
+
+            if (count > 0) {
+                statusCount.textContent = count + ' 个项目';
+            }
+
+            // Update on hover
+            fileItems.forEach(item => {
+                item.addEventListener('mouseenter', function() {
+                    const fileName = this.querySelector('h6')?.textContent?.trim() || '项目';
+                    statusText.textContent = fileName;
+                });
+                item.addEventListener('mouseleave', function() {
+                    statusText.textContent = '就绪';
+                });
+            });
+        }
+
+        // Refresh files
+        function refreshFiles() {
+            const btn = document.querySelector('.toolbar-btn[onclick="refreshFiles()"] i');
+            if (btn) {
+                btn.classList.add('fa-spin');
+                setTimeout(() => btn.classList.remove('fa-spin'), 500);
+            }
+            window.location.reload();
+        }
+    </script>
 
     {% block extra_scripts %}{% endblock %}
 </body>

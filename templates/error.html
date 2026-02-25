@@ -1,68 +1,60 @@
 {% extends "base.html" %}
 
-{% block title %}错误 - 123云盘文件浏览器{% endblock %}
+{% block title %}错误 - CloudArchive{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
-    <div class="col-md-8 col-lg-6">
-        <div class="card">
-            <div class="card-body text-center">
-                <div class="mb-4">
-                    <i class="fas fa-exclamation-triangle fa-4x text-warning"></i>
-                </div>
-                
-                <h3 class="card-title text-danger">出现错误</h3>
-                
-                {% if error %}
-                    <p class="card-text text-muted">{{ error }}</p>
-                {% else %}
-                    <p class="card-text text-muted">抱歉，发生了未知错误</p>
-                {% endif %}
-                
-                <div class="mt-4">
-                    <div class="btn-group" role="group">
-                        <button class="btn btn-outline-secondary" onclick="history.back()">
-                            <i class="fas fa-arrow-left"></i> 返回上页
-                        </button>
-                        <a href="{{ url_for('main.index') }}" class="btn btn-primary">
-                            <i class="fas fa-home"></i> 返回首页
-                        </a>
-                    </div>
-                </div>
-                
-                <div class="mt-3">
-                    <small class="text-muted">
-                        如果问题持续存在，请检查您的网络连接或联系管理员
-                    </small>
-                </div>
-            </div>
+<div class="empty-state" style="padding-top: 80px;">
+    <div class="empty-state-icon" style="background: rgba(255, 59, 48, 0.1);">
+        <i class="fas fa-exclamation-triangle" style="color: var(--accent-red);"></i>
+    </div>
+    <div class="empty-state-title">出现错误</div>
+    <div class="empty-state-subtitle">
+        {% if error %}
+            {{ error }}
+        {% else %}
+            抱歉，发生了未知错误
+        {% endif %}
+    </div>
+
+    <div class="mt-4" style="display: flex; gap: 12px; justify-content: center;">
+        <button class="btn btn-secondary" onclick="history.back()">
+            <i class="fas fa-arrow-left" style="margin-right: 6px;"></i> 返回
+        </button>
+        <a href="{{ url_for('main.index') }}" class="btn btn-primary">
+            <i class="fas fa-home" style="margin-right: 6px;"></i> 首页
+        </a>
+    </div>
+
+    <!-- 常见问题 -->
+    <div class="card mt-5" style="max-width: 500px; margin-left: auto; margin-right: auto;">
+        <div class="card-header">
+            <h6 style="margin: 0; font-weight: 600;">
+                <i class="fas fa-question-circle" style="margin-right: 8px; color: var(--accent-blue);"></i>常见问题
+            </h6>
         </div>
-        
-        <!-- 常见问题解决方案 -->
-        <div class="card mt-4">
-            <div class="card-header">
-                <h6 class="mb-0">
-                    <i class="fas fa-question-circle"></i> 常见问题解决方案
-                </h6>
+        <div class="card-body" style="padding: 0;">
+            <div style="padding: 12px 20px; border-bottom: 1px solid var(--border-light);">
+                <strong style="font-size: 13px; color: var(--text-primary);">API客户端未初始化</strong>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    请检查config.json配置文件是否正确设置
+                </div>
             </div>
-            <div class="card-body">
-                <div class="list-group list-group-flush">
-                    <div class="list-group-item border-0">
-                        <strong>API客户端未初始化</strong>
-                        <br><small class="text-muted">请检查config.json配置文件是否正确设置</small>
-                    </div>
-                    <div class="list-group-item border-0">
-                        <strong>网络连接问题</strong>
-                        <br><small class="text-muted">请检查您的网络连接是否正常</small>
-                    </div>
-                    <div class="list-group-item border-0">
-                        <strong>文件不存在</strong>
-                        <br><small class="text-muted">文件可能已被移动或删除</small>
-                    </div>
-                    <div class="list-group-item border-0">
-                        <strong>权限不足</strong>
-                        <br><small class="text-muted">您可能没有访问该文件的权限</small>
-                    </div>
+            <div style="padding: 12px 20px; border-bottom: 1px solid var(--border-light);">
+                <strong style="font-size: 13px; color: var(--text-primary);">网络连接问题</strong>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    请检查您的网络连接是否正常
+                </div>
+            </div>
+            <div style="padding: 12px 20px; border-bottom: 1px solid var(--border-light);">
+                <strong style="font-size: 13px; color: var(--text-primary);">文件不存在</strong>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    文件可能已被移动或删除
+                </div>
+            </div>
+            <div style="padding: 12px 20px;">
+                <strong style="font-size: 13px; color: var(--text-primary);">权限不足</strong>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 2px;">
+                    您可能没有访问该文件的权限
                 </div>
             </div>
         </div>
