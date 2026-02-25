@@ -9,11 +9,12 @@
     --soft-white: #f5f1eb;
     --muted-gold: #a3957a;
     --text-primary: #e8e4df;
-    --text-muted: #9b94887;
+    --text-muted: #9b9488;
     --radius-sm: 8px;
     --radius-md: 16px;
     --radius-lg: 24px;
     --shadow-luxury: 0 24px 60px rgba(0, 0, 0, 0.4), 0 0 1px rgba(212, 165, 116, 0.1);
+    --shadow-glow: 0 0 40px rgba(212, 165, 116, 0.15);
     --transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -75,14 +76,15 @@ body {
     to { opacity: 1; transform: translateY(0); }
 }
 
-/* Luxury Navigation */
+/* Luxury Navigation - Enhanced Glassmorphism */
 .luxury-nav {
     position: relative;
     z-index: 100;
-    backdrop-filter: blur(20px) saturate(180%);
-    background: rgba(10, 22, 40, 0.85);
-    border-bottom: 1px solid rgba(212, 165, 116, 0.1);
+    backdrop-filter: blur(24px) saturate(200%);
+    background: linear-gradient(135deg, rgba(10, 22, 40, 0.92) 0%, rgba(21, 33, 46, 0.88) 100%);
+    border-bottom: 1px solid rgba(212, 165, 116, 0.15);
     padding: 1.2rem 0;
+    box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(212, 165, 116, 0.05);
 }
 
 .brand-luxury {
@@ -146,7 +148,7 @@ body {
     width: 100%;
 }
 
-/* Luxury Search */
+/* Luxury Search - Enhanced */
 .search-luxury {
     display: flex;
     gap: 0.75rem;
@@ -155,7 +157,7 @@ body {
 
 .search-wrapper {
     position: relative;
-    width: 280px;
+    width: 300px;
 }
 
 .search-icon {
@@ -166,17 +168,19 @@ body {
     color: var(--muted-gold);
     font-size: 0.9rem;
     pointer-events: none;
+    transition: var(--transition);
 }
 
 .search-input {
     width: 100%;
-    padding: 0.65rem 1rem 0.65rem 2.75rem;
-    background: rgba(26, 41, 66, 0.6);
-    border: 1px solid rgba(212, 165, 116, 0.15);
+    padding: 0.75rem 1rem 0.75rem 2.75rem;
+    background: linear-gradient(135deg, rgba(26, 41, 66, 0.7) 0%, rgba(21, 33, 46, 0.5) 100%);
+    border: 1px solid rgba(212, 165, 116, 0.2);
     border-radius: var(--radius-sm);
     color: var(--text-primary);
     font-size: 0.9rem;
     transition: var(--transition);
+    backdrop-filter: blur(10px);
 }
 
 .search-input::placeholder {
@@ -186,9 +190,13 @@ body {
 
 .search-input:focus {
     outline: none;
-    background: rgba(26, 41, 66, 0.9);
+    background: linear-gradient(135deg, rgba(26, 41, 66, 0.95) 0%, rgba(21, 33, 46, 0.8) 100%);
     border-color: var(--amber);
-    box-shadow: 0 0 0 3px rgba(212, 165, 116, 0.1);
+    box-shadow: 0 0 0 4px rgba(212, 165, 116, 0.15), inset 0 1px 2px rgba(0, 0, 0, 0.1);
+}
+
+.search-wrapper:focus-within .search-icon {
+    color: var(--amber);
 }
 
 .btn-luxury {
@@ -340,10 +348,25 @@ body {
     color: var(--text-primary);
 }
 
-.toolbar-card { 
+/* Toolbar - Enhanced Glassmorphism */
+.toolbar-card {
     padding: 2rem;
     margin-bottom: 2rem;
     position: relative;
+    background: linear-gradient(135deg, rgba(26, 41, 66, 0.8) 0%, rgba(21, 33, 46, 0.9) 100%);
+    border: 1px solid rgba(212, 165, 116, 0.15);
+    backdrop-filter: blur(16px) saturate(180%);
+    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35), 0 0 0 1px rgba(212, 165, 116, 0.08);
+}
+
+.toolbar-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(212, 165, 116, 0.3), transparent);
 }
 
 .toolbar-card h3 {
@@ -382,13 +405,13 @@ body {
     transform: translateY(-1px);
 }
 
-/* File Cards - Editorial Luxury */
+/* File Cards - Enhanced Visual Hierarchy */
 .file-card {
     position: relative;
     border-radius: var(--radius-md);
     border: 1px solid rgba(212, 165, 116, 0.12);
-    background: linear-gradient(135deg, rgba(26, 41, 66, 0.6) 0%, rgba(21, 33, 46, 0.7) 100%);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    background: linear-gradient(145deg, rgba(26, 41, 66, 0.7) 0%, rgba(21, 33, 46, 0.85) 50%, rgba(26, 41, 66, 0.6) 100%);
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35), 0 2px 4px rgba(0, 0, 0, 0.2);
     transition: var(--transition);
     overflow: hidden;
 }
@@ -398,17 +421,28 @@ body {
     position: absolute;
     top: 0;
     left: 0;
-    width: 3px;
+    width: 4px;
     height: 100%;
-    background: linear-gradient(180deg, var(--amber), var(--coral));
+    background: linear-gradient(180deg, var(--amber) 0%, var(--coral) 50%, var(--amber) 100%);
     opacity: 0;
     transition: opacity 0.4s ease;
 }
 
+.file-card::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, rgba(212, 165, 116, 0.4), transparent);
+    opacity: 0.5;
+}
+
 .file-card:hover {
-    transform: translateY(-6px) translateX(2px);
-    border-color: var(--amber);
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(212, 165, 116, 0.2);
+    transform: translateY(-8px) translateX(2px);
+    border-color: rgba(212, 165, 116, 0.3);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(212, 165, 116, 0.25), var(--shadow-glow);
 }
 
 .file-card:hover::before {
@@ -558,18 +592,31 @@ body {
     border: 1px solid var(--coral);
 }
 
-/* Modal */
-.modal-content { 
-    background: linear-gradient(135deg, rgba(26, 41, 66, 0.95) 0%, rgba(21, 33, 46, 0.98) 100%);
+/* Modal - Enhanced */
+.modal-content {
+    background: linear-gradient(135deg, rgba(26, 41, 66, 0.98) 0%, rgba(21, 33, 46, 0.99) 100%);
     border: 1px solid rgba(212, 165, 116, 0.2);
-    box-shadow: var(--shadow-luxury);
-    backdrop-filter: blur(20px);
+    box-shadow: var(--shadow-luxury), 0 0 60px rgba(0, 0, 0, 0.5);
+    backdrop-filter: blur(24px) saturate(200%);
     border-radius: var(--radius-md);
 }
 
-.modal-header, .modal-footer { 
+.modal-header, .modal-footer {
     border-color: rgba(212, 165, 116, 0.15);
     background: rgba(212, 165, 116, 0.05);
+}
+
+.modal-header {
+    border-bottom: 1px solid rgba(212, 165, 116, 0.15);
+}
+
+.modal-footer {
+    border-top: 1px solid rgba(212, 165, 116, 0.15);
+}
+
+/* Utility Classes */
+.text-amber {
+    color: var(--amber) !important;
 }
 
 .modal-title {
@@ -664,6 +711,22 @@ body {
 .file-item:nth-child(3) { animation-delay: 0.15s; }
 .file-item:nth-child(4) { animation-delay: 0.2s; }
 .file-item:nth-child(5) { animation-delay: 0.25s; }
+
+/* Skeleton Loading Animation */
+@keyframes skeletonShimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.skeleton {
+    background: linear-gradient(90deg, 
+        rgba(26, 41, 66, 0.6) 25%, 
+        rgba(212, 165, 116, 0.1) 50%, 
+        rgba(26, 41, 66, 0.6) 75%);
+    background-size: 200% 100%;
+    animation: skeletonShimmer 1.5s infinite;
+    border-radius: var(--radius-sm);
+}
 
 /* Scrollbar */
 ::-webkit-scrollbar { 

@@ -1,10 +1,17 @@
 {
-    "CLIENT_ID": "YOUR_CLIENT_ID_HERE",
-    "CLIENT_SECRET": "YOUR_CLIENT_SECRET_HERE",
-    WEBDAV": {
-    "ENABLED": true,
-    "USERNAME": "your_webdav_username",
+  "CLIENT_ID": "your_client_id_here",
+  "CLIENT_SECRET": "your_client_secret_here",
+  "SECRET_KEY": "replace-with-random-string-for-flask-sessions",
+  "REDIS": {
+    "HOST": "192.168.2.254",
+    "PORT": 6379,
+    "DB": 0,
+    "PASSWORD": null,
+    "ENABLED": true
+  },
+  "WEBDAV": {
+    "USER": "your_webdav_username",
     "PASSWORD": "your_webdav_password",
-    "BASE_URL": "webdav-1836076489.pd1.123pan.cn"
+    "HOST": "webdav-1836076489.pd1.123pan.cn"
   }
 }

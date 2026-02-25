@@ -1,318 +1,92 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-123云盘文件浏览器 - Flask Web应用
+123云盘文件浏览器 - Flask Web应用 (应用工厂模式)
 """
 
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash
-from api import Pan123Client, Pan123APIError
-
-app = Flask(__name__)
-app.secret_key = 'your-secret-key-change-this'  # 请更改为随机密钥
-
-# 全局变量存储客户端实例
-client = None
+import json
+import logging
+import os
+from flask import Flask, render_template
+from routes import main_bp, api_bp
 
 
-@app.route('/')
-def index():
-    """首页 - 显示根目录文件列表"""
-    try:
-        if not client:
-            flash('API客户端未初始化', 'error')
-            return render_template('error.html', error="API客户端未初始化")
+def load_config(config_path='config.json'):
+    """加载配置文件"""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"配置文件 {config_path} 不存在")
 
-        parent_id = request.args.get('parent_id', 0, type=int)
-        limit = request.args.get('limit', 20, type=int)
-        last_file_id = request.args.get('last_file_id', type=int)
-
-        # 获取文件列表，返回FileList对象
-        file_list, next_last_file_id = client.list_files(
-            parent_id=parent_id,
-            limit=limit,
-            last_file_id=last_file_id
-        )
-
-        return render_template('files.html',
-                               files=file_list,
-                               parent_id=parent_id,
-                               next_last_file_id=next_last_file_id,
-                               limit=limit)
-
-    except Pan123APIError as e:
-        flash(f'API错误: {e}', 'error')
-        return render_template('files.html', files=[], parent_id=0)
-    except Exception as e:
-        flash(f'未知错误: {e}', 'error')
-        return render_template('files.html', files=[], parent_id=0)
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
 
-@app.route('/search')
-def search():
-    """搜索文件"""
-    try:
-        if not client:
-            flash('API客户端未初始化', 'error')
-            return render_template('search.html', files=[])
+def create_app(config_path='config.json'):
+    """
+    Flask应用工厂函数
 
-        search_query = request.args.get('q', '').strip()
-        search_mode = request.args.get('mode', 0, type=int)
-        limit = request.args.get('limit', 20, type=int)
-        last_file_id = request.args.get('last_file_id', type=int)
+    :param config_path: 配置文件路径
+    :return: Flask应用实例
+    """
+    # 加载配置
+    config = load_config(config_path)
 
-        if not search_query:
-            return render_template('search.html', files=[], search_query='')
+    # 创建Flask应用
+    app = Flask(__name__)
 
-        # 执行搜索，返回FileList对象
-        file_list, next_last_file_id = client.list_files(
-            search_data=search_query,
-            search_mode=search_mode,
-            limit=limit,
-            last_file_id=last_file_id
-        )
+    # 从配置读取SECRET_KEY
+    app.secret_key = config.get('SECRET_KEY', 'dev-secret-key-change-in-production')
 
-        return render_template('search.html',
-                               files=file_list,
-                               search_query=search_query,
-                               search_mode=search_mode,
-                               next_last_file_id=next_last_file_id,
-                               limit=limit)
+    # 存储完整配置供蓝图使用
+    app.config['PAN123_CONFIG'] = config
 
-    except Pan123APIError as e:
-        flash(f'搜索失败: {e}', 'error')
-        return render_template('search.html', files=[], search_query=search_query)
-    except Exception as e:
-        flash(f'搜索时发生错误: {e}', 'error')
-        return render_template('search.html', files=[], search_query=search_query)
+    # 注册蓝图
+    app.register_blueprint(main_bp)
+    app.register_blueprint(api_bp)
 
+    # 配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    app.logger.setLevel(logging.INFO)
 
-@app.route('/file/<int:file_id>')
-def file_detail(file_id):
-    """查看文件详情"""
-    try:
-        if not client:
-            flash('API客户端未初始化', 'error')
-            return redirect(url_for('index'))
+    # 错误处理器
+    @app.errorhandler(404)
+    def not_found(error):
+        return render_template('error.html', error="页面不存在"), 404
 
-        # 使用API客户端的缓存功能获取文件详情
-        file_info = client.get_file_info_single(file_id, use_cache=True)
+    @app.errorhandler(500)
+    def internal_error(error):
+        return render_template('error.html', error="服务器内部错误"), 500
 
-        if not file_info:
-            flash('文件不存在', 'error')
-            return redirect(url_for('index'))
-
-        # 如果是文件（非文件夹），尝试获取下载链接
-        download_url = None
-        if not file_info.is_folder:  # 不是文件夹
+    # 请求结束时清理资源
+    @app.teardown_appcontext
+    def teardown_client(exception):
+        """在请求结束时清理Pan123Client资源"""
+        from flask import g
+        client = g.pop('client', None)
+        if client is not None:
             try:
-                download_info = client.get_download_info(file_id)
-                if download_info and 'data' in download_info:
-                    download_url = download_info['data'].get('downloadUrl')
-            except Pan123APIError:
-                pass  # 忽略下载链接获取失败
-
-        # 获取WebDAV URL
-        webdav_url = None
-        if client.is_webdav_available():
-            try:
-                webdav_url = client.get_webdav_url(file_id)
+                if hasattr(client, 'http_client') and hasattr(client.http_client, 'session'):
+                    client.http_client.session.close()
             except Exception as e:
-                print(f"获取WebDAV URL失败: {e}")  # 记录错误，但不中断页面
+                app.logger.warning(f"关闭client session时出错: {e}")
 
-        return render_template('file_detail.html',
-                               file=file_info,
-                               download_url=download_url,
-                               webdav_url=webdav_url)
-
-    except Pan123APIError as e:
-        flash(f'获取文件详情失败: {e}', 'error')
-        return redirect(url_for('index'))
-    except Exception as e:
-        flash(f'查看文件详情时发生错误: {e}', 'error')
-        return redirect(url_for('index'))
-
-
-@app.route('/api/download/<int:file_id>')
-def api_download(file_id):
-    """API接口：获取文件下载链接"""
-    try:
-        if not client:
-            return jsonify({'error': 'API客户端未初始化'}), 500
-
-        download_info = client.get_download_info(file_id)
-
-        if download_info and 'data' in download_info and 'downloadUrl' in download_info['data']:
-            return jsonify({
-                'success': True,
-                'download_url': download_info['data']['downloadUrl']
-            })
-        else:
-            return jsonify({'error': '获取下载链接失败'}), 404
-
-    except Pan123APIError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'服务器错误: {e}'}), 500
-
-
-@app.route('/api/files/batch')
-def api_files_batch():
-    """API接口：批量获取文件详情"""
-    try:
-        if not client:
-            return jsonify({'error': 'API客户端未初始化'}), 500
-
-        file_ids_str = request.args.get('ids', '')
-        if not file_ids_str:
-            return jsonify({'error': '缺少文件ID参数'}), 400
-
-        try:
-            file_ids = [int(id.strip())
-                        for id in file_ids_str.split(',') if id.strip()]
-        except ValueError:
-            return jsonify({'error': '文件ID格式错误'}), 400
-
-        if not file_ids:
-            return jsonify({'error': '没有有效的文件ID'}), 400
-
-        # 使用FileList对象
-        file_list = client.get_files_info(file_ids)
-
-        if file_list and len(file_list) > 0:
-            # 转换为字典列表以保持API兼容性
-            return jsonify({
-                'success': True,
-                'files': file_list.to_dict_list()
-            })
-        else:
-            return jsonify({'error': '获取文件详情失败'}), 404
-
-    except Pan123APIError as e:
-        return jsonify({'error': str(e)}), 400
-    except Exception as e:
-        return jsonify({'error': f'服务器错误: {e}'}), 500
-
-
-@app.route('/api/webdav/redirect/<int:file_id>')
-def api_webdav_redirect(file_id):
-    """API接口：获取WebDAV重定向后的最终下载URL"""
-    try:
-        if not client:
-            return jsonify({'error': 'API客户端未初始化'}), 500
-
-        # 获取WebDAV重定向URL
-        redirect_url = client.get_webdav_redirect_url(file_id)
-
-        if redirect_url:
-            return jsonify({
-                'success': True,
-                'redirect_url': redirect_url,
-                'file_id': file_id
-            })
-        else:
-            return jsonify({'error': '获取WebDAV重定向URL失败，可能是文件不存在或WebDAV配置问题'}), 404
-
-    except Exception as e:
-        return jsonify({'error': f'服务器错误: {e}'}), 500
-
-
-@app.route('/api/download/final/<int:file_id>')
-def api_final_download(file_id):
-    """API接口：获取最终下载URL（优先WebDAV，回退API）"""
-    try:
-        if not client:
-            return jsonify({'error': 'API客户端未初始化'}), 500
-
-        prefer_webdav = request.args.get(
-            'prefer_webdav', 'true').lower() == 'true'
-
-        # 获取最终下载URL
-        final_url = client.get_final_download_url(
-            file_id, prefer_webdav=prefer_webdav)
-
-        if final_url:
-            # 判断URL类型
-            url_type = 'webdav' if 'webdav' in final_url or 'pd1' in final_url else 'api'
-
-            return jsonify({
-                'success': True,
-                'download_url': final_url,
-                'url_type': url_type,
-                'file_id': file_id
-            })
-        else:
-            return jsonify({'error': '获取下载URL失败，请检查文件是否存在或重试'}), 404
-
-    except Exception as e:
-        return jsonify({'error': f'服务器错误: {e}'}), 500
-
-
-@app.route('/demo/webdav/<int:file_id>')
-def demo_webdav(file_id):
-    """演示WebDAV功能的页面"""
-    try:
-        if not client:
-            flash('API客户端未初始化', 'error')
-            return redirect(url_for('index'))
-
-        # 获取文件信息
-        file_info = client.get_file_info_single(file_id, use_cache=True)
-        if not file_info:
-            flash('文件不存在', 'error')
-            return redirect(url_for('index'))
-
-        # 获取WebDAV URL
-        webdav_url = None
-        if client.is_webdav_available():
-            try:
-                webdav_url = client.get_webdav_url(file_id)
-            except Exception as e:
-                print(f"获取WebDAV URL失败: {e}")
-
-        return render_template('demo_webdav.html',
-                               file=file_info,
-                               webdav_url=webdav_url)
-
-    except Exception as e:
-        flash(f'加载演示页面时发生错误: {e}', 'error')
-        return redirect(url_for('index'))
-
-
-@app.errorhandler(404)
-def not_found(error):
-    return render_template('error.html', error="页面不存在"), 404
-
-
-@app.errorhandler(500)
-def internal_error(error):
-    return render_template('error.html', error="服务器内部错误"), 500
-
-
-def init_client():
-    """初始化API客户端"""
-    global client
-    try:
-        # 初始化API客户端，启用Redis缓存
-        client = Pan123Client(
-            redis_host='192.168.2.254',
-            redis_port=6379,
-            redis_db=0,
-            redis_password=None,
-            enable_cache=True
-        )
-        print("✓ 123云盘API客户端初始化成功")
-        return True
-    except Exception as e:
-        print(f"✗ 123云盘API客户端初始化失败: {e}")
-        return False
+    return app
 
 
 if __name__ == '__main__':
     print("123云盘文件浏览器启动中...")
 
-    # 初始化API客户端
-    if not init_client():
-        print("错误: 无法初始化API客户端，请检查config.json配置")
+    try:
+        app = create_app()
+        app.logger.info("✓ Flask应用创建成功")
+    except FileNotFoundError as e:
+        print(f"错误: {e}")
+        print("请确保config.json配置文件存在")
+        exit(1)
+    except Exception as e:
+        print(f"✗ 应用初始化失败: {e}")
         exit(1)
 
     print("启动Flask服务器...")

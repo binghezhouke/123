@@ -9,7 +9,7 @@
         <nav aria-label="breadcrumb">
             <ol class="breadcrumb">
                 <li class="breadcrumb-item">
-                    <a href="{{ url_for('index') }}">
+                    <a href="{{ url_for('main.index') }}"
                         <i class="fas fa-home"></i> 首页
                     </a>
                 </li>
@@ -73,7 +73,7 @@
                                     <tr>
                                         <td><strong>父目录ID</strong></td>
                                         <td>
-                                            <a href="{{ url_for('index', parent_id=file.parentFileId) }}" class="text-decoration-none">
+                                            <a href="{{ url_for('main.index', parent_id=file.parentFileId) }}" class="text-decoration-none">
                                                 <code>{{ file.parentFileId }}</code>
                                             </a>
                                         </td>
@@ -158,7 +158,7 @@
                         
                         <div class="d-grid gap-2">
                             {% if file.is_folder %}
-                                <a href="{{ url_for('index', parent_id=file.fileId) }}" 
+                                <a href="{{ url_for('main.index', parent_id=file.fileId) }}" 
                                    class="btn btn-glow">
                                     <i class="fas fa-folder-open"></i> 打开文件夹
                                 </a>
@@ -182,7 +182,7 @@
                                 
                                 <!-- WebDAV演示按钮 -->
                                 {% if webdav_url %}
-                                <a href="{{ url_for('demo_webdav', file_id=file.fileId) }}" class="btn btn-ghost">
+                                <a href="{{ url_for('main.demo_webdav', file_id=file.fileId) }}" class="btn btn-ghost">
                                     <i class="fas fa-play-circle"></i> WebDAV演示
                                 </a>
                                 {% endif %}
@@ -192,7 +192,7 @@
                                 <i class="fas fa-arrow-left"></i> 返回
                             </button>
                             
-                            <a href="{{ url_for('index') }}" class="btn btn-ghost">
+                            <a href="{{ url_for('main.index') }}" class="btn btn-ghost">
                                 <i class="fas fa-home"></i> 返回首页
                             </a>
                         </div>
@@ -263,52 +263,28 @@
     </div>
 </div>
 
-<!-- 下载链接模态框 -->
-<div class="modal fade" id="downloadModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">下载文件</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <p>正在获取下载链接...</p>
-                <div class="text-center">
-                    <div class="spinner-border" role="status">
-                        <span class="visually-hidden">加载中...</span>
-                    </div>
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <a href="#" class="btn btn-primary" id="downloadLink" target="_blank" style="display: none;">
-                    <i class="fas fa-download"></i> 下载
-                </a>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- 内联脚本确保函数可用 -->
 <script>
 // 重定向下载链接获取函数
 window.getRedirectUrl = function() {
     const getBtn = document.getElementById("getRedirectBtn");
     const fileId = parseInt(getBtn.getAttribute('data-file-id'));
-    
+
     if (!fileId || isNaN(fileId)) {
-        alert('文件ID获取失败');
+        if (typeof showToast === 'function') {
+            showToast('文件ID获取失败', 'error');
+        }
         return;
     }
-    
+
     const copyBtn = document.getElementById("copyRedirectBtn");
     const urlInput = document.getElementById("redirectUrlInput");
-    
+
     // 更新按钮状态
     getBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
     getBtn.disabled = true;
     urlInput.value = "正在获取重定向链接...";
-    
+
     // 调用API获取重定向URL
     fetch('/api/webdav/redirect/' + fileId)
         .then(response => response.json())
@@ -319,11 +295,17 @@ window.getRedirectUrl = function() {
                 getBtn.innerHTML = '<i class="fas fa-check"></i> 已获取';
                 getBtn.classList.remove('btn-outline-primary');
                 getBtn.classList.add('btn-outline-success');
+                if (typeof showToast === 'function') {
+                    showToast('重定向链接获取成功', 'success');
+                }
             } else {
                 urlInput.value = "获取失败: " + (data.error || "未知错误");
                 getBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
                 getBtn.classList.remove('btn-outline-primary');
                 getBtn.classList.add('btn-outline-danger');
+                if (typeof showToast === 'function') {
+                    showToast('获取重定向链接失败: ' + (data.error || "未知错误"), 'error');
+                }
             }
         })
         .catch(error => {
@@ -332,6 +314,9 @@ window.getRedirectUrl = function() {
             getBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
             getBtn.classList.remove('btn-outline-primary');
             getBtn.classList.add('btn-outline-danger');
+            if (typeof showToast === 'function') {
+                showToast('获取重定向链接失败: ' + error.message, 'error');
+            }
         })
         .finally(() => {
             getBtn.disabled = false;
@@ -342,16 +327,18 @@ window.getRedirectUrl = function() {
 window.getFinalDownloadUrl = function() {
     const finalBtn = document.getElementById("finalDownloadBtn");
     const fileId = parseInt(finalBtn.getAttribute('data-file-id'));
-    
+
     if (!fileId || isNaN(fileId)) {
-        alert('文件ID获取失败');
+        if (typeof showToast === 'function') {
+            showToast('文件ID获取失败', 'error');
+        }
         return;
     }
-    
+
     // 更新按钮状态
     finalBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
     finalBtn.disabled = true;
-    
+
     // 调用API获取最终下载URL
     fetch('/api/download/final/' + fileId + '?prefer_webdav=true')
         .then(response => response.json())
@@ -362,7 +349,10 @@ window.getFinalDownloadUrl = function() {
                 finalBtn.innerHTML = '<i class="fas fa-check"></i> 下载已开始';
                 finalBtn.classList.remove('btn-info');
                 finalBtn.classList.add('btn-success');
-                
+                if (typeof showToast === 'function') {
+                    showToast('下载已开始', 'success');
+                }
+
                 // 3秒后恢复按钮状态
                 setTimeout(() => {
                     finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
@@ -373,8 +363,10 @@ window.getFinalDownloadUrl = function() {
                 finalBtn.innerHTML = '<i class="fas fa-times"></i> 失败';
                 finalBtn.classList.remove('btn-info');
                 finalBtn.classList.add('btn-danger');
-                alert('获取下载链接失败: ' + (data.error || "未知错误"));
-                
+                if (typeof showToast === 'function') {
+                    showToast('获取下载链接失败: ' + (data.error || "未知错误"), 'error');
+                }
+
                 // 3秒后恢复按钮状态
                 setTimeout(() => {
                     finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
@@ -388,8 +380,10 @@ window.getFinalDownloadUrl = function() {
             finalBtn.innerHTML = '<i class="fas fa-times"></i> 错误';
             finalBtn.classList.remove('btn-info');
             finalBtn.classList.add('btn-danger');
-            alert('获取下载链接失败: ' + error.message);
-            
+            if (typeof showToast === 'function') {
+                showToast('获取下载链接失败: ' + error.message, 'error');
+            }
+
             // 3秒后恢复按钮状态
             setTimeout(() => {
                 finalBtn.innerHTML = '<i class="fas fa-magic"></i> 智能下载';
@@ -405,71 +399,69 @@ window.getFinalDownloadUrl = function() {
 
 {% endblock %}
 
-{% block scripts %}
-{{ super() }}
+{% block extra_scripts %}
 <script>
+// 复制WebDAV URL
 function copyWebdavUrl() {
-    var copyText = document.getElementById("webdavUrlInput");
+    const copyText = document.getElementById("webdavUrlInput");
+    if (!copyText) return;
+
+    const text = copyText.value;
     copyText.select();
-    copyText.setSelectionRange(0, 99999); /* For mobile devices */
-    try {
-        navigator.clipboard.writeText(copyText.value).then(function() {
-            alert("WebDAV URL 已复制到剪贴板！");
-        }, function(err) {
-            console.error('无法复制文本: ', err);
-            // Fallback for older browsers
-            document.execCommand("copy");
-            alert("WebDAV URL 已复制到剪贴板 (fallback)！");
-        });
-    } catch (err) {
-        console.error('Fallback复制错误: ', err);
-        try {
-            document.execCommand("copy");
-            alert("WebDAV URL 已复制到剪贴板 (fallback)！");
-        } catch (e) {
-            alert("复制失败，请手动复制。");
-        }
-    }
-}
+    copyText.setSelectionRange(0, 99999);
 
-function copyRedirectUrl() {
-    var copyText = document.getElementById("redirectUrlInput");
-    if (copyText.value && copyText.value !== "点击获取重定向链接..." && !copyText.value.includes("获取失败")) {
-        copyText.select();
-        copyText.setSelectionRange(0, 99999);
-        try {
-            navigator.clipboard.writeText(copyText.value).then(function() {
-                alert("重定向URL 已复制到剪贴板！");
-            }, function(err) {
-                console.error('无法复制文本: ', err);
-                document.execCommand("copy");
-                alert("重定向URL 已复制到剪贴板 (fallback)！");
-            });
-        } catch (err) {
-            console.error('Fallback复制错误: ', err);
-            try {
-                document.execCommand("copy");
-                alert("重定向URL 已复制到剪贴板 (fallback)！");
-            } catch (e) {
-                alert("复制失败，请手动复制。");
-            }
-        }
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => {
+            showToast('WebDAV URL 已复制到剪贴板', 'success');
+        }).catch(() => {
+            fallbackCopy(text, 'WebDAV URL');
+        });
     } else {
-        alert("没有有效的重定向URL可复制！");
+        fallbackCopy(text, 'WebDAV URL');
     }
 }
 
-// 下载按钮事件处理
-document.addEventListener('DOMContentLoaded', function() {
-    const downloadButtons = document.querySelectorAll('.download-btn');
-    downloadButtons.forEach(button => {
-        button.addEventListener('click', function() {
-            const fileId = this.dataset.fileId;
-            const fileName = this.dataset.fileName;
-            alert(`正在为 ${fileName} (ID: ${fileId}) 获取下载链接...`);
-            // 这里可以添加实际的下载逻辑
+// 复制重定向URL
+function copyRedirectUrl() {
+    const copyText = document.getElementById("redirectUrlInput");
+    if (!copyText) return;
+
+    const text = copyText.value;
+    if (!text || text === "点击获取重定向链接..." || text.includes("获取失败") || text.includes("失败")) {
+        showToast('没有有效的重定向URL可复制', 'warning');
+        return;
+    }
+
+    copyText.select();
+    copyText.setSelectionRange(0, 99999);
+
+    if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => {
+            showToast('重定向URL 已复制到剪贴板', 'success');
+        }).catch(() => {
+            fallbackCopy(text, '重定向URL');
         });
-    });
-});
+    } else {
+        fallbackCopy(text, '重定向URL');
+    }
+}
+
+// 降级复制方案
+function fallbackCopy(text, name) {
+    const textArea = document.createElement('textarea');
+    textArea.value = text;
+    textArea.style.position = 'fixed';
+    textArea.style.opacity = '0';
+    document.body.appendChild(textArea);
+    textArea.select();
+
+    try {
+        const success = document.execCommand('copy');
+        showToast(success ? `${name} 已复制到剪贴板` : '复制失败，请手动复制', success ? 'success' : 'error');
+    } catch (err) {
+        showToast('复制失败，请手动复制', 'error');
+    }
+    document.body.removeChild(textArea);
+}
 </script>
 {% endblock %}

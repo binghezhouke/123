@@ -9,7 +9,7 @@
         <nav aria-label="breadcrumb">
             <ol class="breadcrumb">
                 <li class="breadcrumb-item">
-                    <a href="{{ url_for('index') }}"><i class="fas fa-home"></i> 根目录</a>
+                    <a href="{{ url_for('main.index') }}"><i class="fas fa-home"></i> 根目录</a>
                 </li>
                 {% if parent_id != 0 %}
                 <li class="breadcrumb-item active" aria-current="page">文件夹 ID: {{ parent_id }}</li>
@@ -56,11 +56,11 @@
                             <div class="file-info flex-grow-1">
                                 <h6 class="card-title mb-1">
                                     {% if file.is_folder %}
-                                        <a href="{{ url_for('index', parent_id=file.fileId) }}" class="text-decoration-none">
+                                        <a href="{{ url_for('main.index', parent_id=file.fileId) }}" class="text-decoration-none">
                                             {{ file.filename }}
                                         </a>
                                     {% else %}
-                                        <a href="{{ url_for('file_detail', file_id=file.fileId) }}" class="text-decoration-none">
+                                        <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" class="text-decoration-none">
                                             {{ file.filename }}
                                         </a>
                                     {% endif %}
@@ -81,7 +81,7 @@
                             <!-- 操作按钮 -->
                             <div class="file-actions">
                                 <div class="btn-group btn-group-sm">
-                                    <a href="{{ url_for('file_detail', file_id=file.fileId) }}" 
+                                    <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" 
                                        class="btn btn-ghost" title="查看详情">
                                         <i class="fas fa-info-circle"></i>
                                     </a>
@@ -103,7 +103,7 @@
         <!-- 分页 -->
         {% if next_last_file_id and next_last_file_id != -1 %}
         <div class="d-flex justify-content-center mt-4">
-            <a href="{{ url_for('index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}" 
+            <a href="{{ url_for('main.index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}" 
                class="btn btn-glow px-4">
                 <i class="fas fa-chevron-right"></i> 加载更多
             </a>
@@ -119,49 +119,20 @@
         {% endif %}
     </div>
 </div>
-
-<!-- 下载链接模态框 -->
-<div class="modal fade" id="downloadModal" tabindex="-1">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">下载链接</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-            </div>
-            <div class="modal-body">
-                <div class="mb-3">
-                    <label class="form-label">下载链接：</label>
-                    <div class="input-group">
-                        <input type="text" class="form-control" id="downloadUrl" readonly>
-                        <button class="btn btn-outline-secondary" type="button" onclick="copyDownloadLink()">
-                            <i class="fas fa-copy"></i> 复制
-                        </button>
-                    </div>
-                </div>
-                <div class="alert alert-info">
-                    <i class="fas fa-info-circle"></i> 
-                    下载链接有时效性，请及时使用。
-                </div>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">关闭</button>
-                <a href="#" id="downloadButton" class="btn btn-primary" target="_blank">
-                    <i class="fas fa-download"></i> 立即下载
-                </a>
-            </div>
-        </div>
-    </div>
-</div>
 {% endblock %}
 
 {% block extra_scripts %}
 <script>
+// 刷新文件列表
 function refreshFiles() {
     window.location.reload();
 }
 
+// 切换视图模式
 function toggleView() {
     const container = document.getElementById('fileContainer');
+    if (!container) return;
+
     container.classList.toggle('row');
     const items = container.querySelectorAll('.file-item');
     items.forEach(item => {
@@ -171,42 +142,84 @@ function toggleView() {
     });
 }
 
+// 获取下载链接（使用全局下载模态框）
 function getDownloadLink(fileId) {
-    fetch(`/api/download/${fileId}`)
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                document.getElementById('downloadUrl').value = data.download_url;
-                document.getElementById('downloadButton').href = data.download_url;
-                const modal = new bootstrap.Modal(document.getElementById('downloadModal'));
-                modal.show();
-            } else {
-                alert('获取下载链接失败: ' + (data.error || '未知错误'));
-            }
-        })
-        .catch(error => {
-            console.error('Error:', error);
-            alert('获取下载链接时发生错误');
-        });
+    if (typeof downloadFile === 'function') {
+        downloadFile(fileId, '文件');
+    } else {
+        // 降级处理：如果全局函数未加载，使用内联实现
+        const modal = new bootstrap.Modal(document.getElementById('downloadModal'));
+        modal.show();
+
+        const modalBody = document.getElementById('downloadModalBody');
+        const downloadLink = document.getElementById('downloadLink');
+        const copyBtn = document.getElementById('copyDownloadLinkBtn');
+
+        if (modalBody) {
+            modalBody.innerHTML = `
+                <p>正在获取下载链接...</p>
+                <div class="text-center">
+                    <div class="spinner-border text-amber" role="status"></div>
+                </div>
+            `;
+        }
+        if (downloadLink) downloadLink.style.display = 'none';
+        if (copyBtn) copyBtn.style.display = 'none';
+
+        fetch(`/api/download/${fileId}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.download_url) {
+                    if (modalBody) {
+                        modalBody.innerHTML = `
+                            <div class="alert alert-success"><i class="fas fa-check-circle"></i> 下载链接获取成功！</div>
+                            <p class="text-muted small">点击下方按钮开始下载，链接可能有时效性。</p>
+                        `;
+                    }
+                    if (downloadLink) {
+                        downloadLink.href = data.download_url;
+                        downloadLink.style.display = 'inline-block';
+                    }
+                    if (copyBtn) {
+                        copyBtn.style.display = 'inline-block';
+                        copyBtn.dataset.url = data.download_url;
+                    }
+                } else {
+                    if (modalBody) {
+                        modalBody.innerHTML = `<div class="alert alert-danger">获取下载链接失败</div>`;
+                    }
+                    if (typeof showToast === 'function') {
+                        showToast('获取下载链接失败: ' + (data.error || '未知错误'), 'error');
+                    }
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                if (modalBody) {
+                    modalBody.innerHTML = `<div class="alert alert-danger">获取下载链接时发生错误</div>`;
+                }
+                if (typeof showToast === 'function') {
+                    showToast('获取下载链接时发生错误', 'error');
+                }
+            });
+    }
 }
 
+// 复制下载链接
 function copyDownloadLink() {
-    const urlInput = document.getElementById('downloadUrl');
-    urlInput.select();
-    document.execCommand('copy');
-    
-    // 显示复制成功提示
-    const btn = event.target.closest('button');
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-check"></i> 已复制';
-    btn.classList.remove('btn-outline-secondary');
-    btn.classList.add('btn-success');
-    
-    setTimeout(() => {
-        btn.innerHTML = originalText;
-        btn.classList.remove('btn-success');
-        btn.classList.add('btn-outline-secondary');
-    }, 2000);
+    const copyBtn = document.getElementById('copyDownloadLinkBtn');
+    const url = copyBtn?.dataset?.url;
+
+    if (url && typeof copyToClipboard === 'function') {
+        copyToClipboard(url);
+    } else if (url) {
+        // 降级方案
+        navigator.clipboard?.writeText(url).then(() => {
+            if (typeof showToast === 'function') {
+                showToast('已复制到剪贴板', 'success');
+            }
+        });
+    }
 }
 </script>
 {% endblock %}
