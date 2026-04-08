@@ -2,11 +2,14 @@
 认证和令牌管理
 """
 import json
+import logging
+import os
 import time
 from datetime import datetime
-from typing import Optional, Tuple
 import requests
 from .exceptions import AuthenticationError, NetworkError
+
+logger = logging.getLogger(__name__)
 
 
 class TokenManager:
@@ -66,7 +69,7 @@ class TokenManager:
             with open(self.TOKEN_CACHE_FILE, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f)
         except IOError as e:
-            print(f"警告: 无法保存令牌到缓存: {e}")
+            logger.warning("无法保存令牌到缓存: %s", e)
 
     def _fetch_new_token(self) -> None:
         """从API获取新令牌"""
@@ -120,7 +123,7 @@ class TokenManager:
                 dt_object = datetime.fromisoformat(expired_at_str)
                 return dt_object.timestamp()
             except ValueError:
-                print(f"警告: 无法解析过期时间格式: {expired_at_str}")
+                logger.warning("无法解析过期时间格式: %s", expired_at_str)
 
         # 回退到使用 expiresIn
         expires_in = token_data.get("expiresIn", 3600)
@@ -129,11 +132,10 @@ class TokenManager:
     def clear_cache(self) -> None:
         """清除令牌缓存"""
         try:
-            import os
             if os.path.exists(self.TOKEN_CACHE_FILE):
                 os.remove(self.TOKEN_CACHE_FILE)
         except Exception as e:
-            print(f"清除令牌缓存失败: {e}")
+            logger.warning("清除令牌缓存失败: %s", e)
 
     def is_token_valid(self) -> bool:
         """检查当前令牌是否有效"""

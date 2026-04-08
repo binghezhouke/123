@@ -1,27 +1,11 @@
 """
 Main routes blueprint - Page routes (index, search, file_detail, demo_webdav)
 """
-from flask import Blueprint, render_template, request, flash, redirect, url_for, current_app, g
+from flask import Blueprint, render_template, request, flash, redirect, url_for, current_app
 from api import Pan123APIError
+from .utils import get_client
 
 main_bp = Blueprint('main', __name__)
-
-
-def get_client():
-    """Get the Pan123Client instance from the application context"""
-    if 'client' not in g:
-        from api import Pan123Client
-        config = current_app.config['PAN123_CONFIG']
-        redis_config = config.get('REDIS', {})
-
-        g.client = Pan123Client(
-            redis_host=redis_config.get('HOST', 'localhost'),
-            redis_port=redis_config.get('PORT', 6379),
-            redis_db=redis_config.get('DB', 0),
-            redis_password=redis_config.get('PASSWORD', None),
-            enable_cache=redis_config.get('ENABLED', True)
-        )
-    return g.client
 
 
 @main_bp.route('/')

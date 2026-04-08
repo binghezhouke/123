@@ -1,27 +1,11 @@
 """
 API routes blueprint - REST API endpoints (/api/*)
 """
-from flask import Blueprint, jsonify, request, current_app, g
+from flask import Blueprint, jsonify, request
 from api import Pan123APIError
+from .utils import get_client
 
 api_bp = Blueprint('api', __name__, url_prefix='/api')
-
-
-def get_client():
-    """Get the Pan123Client instance from the application context"""
-    if 'client' not in g:
-        from api import Pan123Client
-        config = current_app.config['PAN123_CONFIG']
-        redis_config = config.get('REDIS', {})
-
-        g.client = Pan123Client(
-            redis_host=redis_config.get('HOST', 'localhost'),
-            redis_port=redis_config.get('PORT', 6379),
-            redis_db=redis_config.get('DB', 0),
-            redis_password=redis_config.get('PASSWORD', None),
-            enable_cache=redis_config.get('ENABLED', True)
-        )
-    return g.client
 
 
 @api_bp.route('/download/<int:file_id>')
@@ -107,12 +91,11 @@ def api_final_download(file_id):
         prefer_webdav = request.args.get(
             'prefer_webdav', 'true').lower() == 'true'
 
-        final_url = client.get_final_download_url(
+        result = client.get_final_download_url(
             file_id, prefer_webdav=prefer_webdav)
 
-        if final_url:
-            url_type = 'webdav' if 'webdav' in final_url or 'pd1' in final_url else 'api'
-
+        if result:
+            final_url, url_type = result
             return jsonify({
                 'success': True,
                 'download_url': final_url,

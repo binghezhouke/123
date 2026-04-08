@@ -2,13 +2,14 @@ import argparse
 import json
 import os
 import re
-from api.client import Pan123Client
+from api import Pan123Client
 import tqdm
 
 
 def file2json(json_file_path):
-    data = open(json_file_path).read()
-    cnts = data = data.strip().split("$")
+    with open(json_file_path, encoding='utf-8') as f:
+        data = f.read()
+    cnts = data.strip().split("$")
     out = {}
     out["usesBase62EtagsInExport"] = True,
     files = []
@@ -84,7 +85,7 @@ def _decode_hash(raw_value: str, uses_base62: bool = False) -> tuple:
     return "", ""
 
 
-def upload_from_json(json_file_path, remote_dir):
+def upload_from_json(client: Pan123Client, json_file_path: str, remote_dir: str):
     """
     从 JSON 文件读取文件列表并上传到指定的远程目录。
     """
@@ -95,10 +96,8 @@ def upload_from_json(json_file_path, remote_dir):
     with open(json_file_path, 'r', encoding='utf-8') as f:
         try:
             data = json.load(f)
-        except:
+        except json.JSONDecodeError:
             data = file2json(json_file_path)
-
-    client = Pan123Client()
     usesBase62EtagsInExport = data.get('usesBase62EtagsInExport', False)
 
     # 创建文件夹路径到ID的映射字典，避免重复创建
@@ -213,4 +212,5 @@ if __name__ == '__main__':
                         help='要上传到的远程根目录路径 (可选, 如果未提供则使用JSON中的commonPath)')
     args = parser.parse_args()
 
-    upload_from_json(args.json_file, args.directory)
+    with Pan123Client() as client:
+        upload_from_json(client, args.json_file, args.directory)

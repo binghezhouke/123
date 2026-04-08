@@ -67,8 +67,7 @@ def create_app(config_path='config.json'):
         client = g.pop('client', None)
         if client is not None:
             try:
-                if hasattr(client, 'http_client') and hasattr(client.http_client, 'session'):
-                    client.http_client.session.close()
+                client.__exit__(None, None, None)
             except Exception as e:
                 app.logger.warning(f"关闭client session时出错: {e}")
 

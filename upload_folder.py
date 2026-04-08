@@ -139,7 +139,6 @@ def upload_folder(local_path: str, remote_path: str, client: Pan123Client, dry_r
                     continue
 
                 try:
-                    # print(f"上传: {local_file} -> 远程目录ID {parent_id}")
                     result = client.file_service.upload_file(
                         local_path=local_file,
                         parent_id=parent_id,

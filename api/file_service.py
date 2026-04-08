@@ -219,7 +219,7 @@ class FileService:
         # 如果不包含目录，则严格禁止任何路径分隔符或非法字符
         if not contain_dir:
             if re.search(r'[\\/:*?"<>|]', filename):
-                raise ValidationError('文件名包含非法字符: \\\/:*?"<>|')
+                raise ValidationError(r'文件名包含非法字符: \/:*?"<>|')
         else:
             # contain_dir == True 时，允许正斜杠 '/' 作为目录分隔符，
             # 但仍禁止反斜杠和其他非法字符。
@@ -914,33 +914,30 @@ class FileService:
             logger.error(f"获取WebDAV跳转URL时发生未知错误: {e}")
             return None
 
-    def get_final_download_url(self, file_id: int, prefer_webdav: bool = True, use_cache: bool = True) -> Optional[str]:
+    def get_final_download_url(self, file_id: int, prefer_webdav: bool = True, use_cache: bool = True) -> Optional[tuple[str, str]]:
         """
         获取文件的最终可下载URL，优先使用WebDAV或API下载链接
 
         :param file_id: 文件ID
         :param prefer_webdav: 是否优先使用WebDAV，默认为True
         :param use_cache: 是否使用缓存，默认为True
-        :return: 最终的下载URL，如果获取失败则返回None
+        :return: (url, url_type) 元组，url_type 为 'webdav' 或 'api'；获取失败则返回 None
         """
         if prefer_webdav:
-            # 优先尝试WebDAV
-            webdav_url = self.get_webdav_redirect_url(
-                file_id, use_cache=use_cache)
+            webdav_url = self.get_webdav_redirect_url(file_id, use_cache=use_cache)
             if webdav_url:
                 logger.info(f"成功获取WebDAV下载URL，文件ID: {file_id}")
-                return webdav_url
+                return webdav_url, "webdav"
 
             logger.warning(f"WebDAV获取失败，尝试使用API下载链接，文件ID: {file_id}")
 
-        # 尝试使用API获取下载链接
         try:
             download_info = self.get_download_info(file_id)
             if download_info and 'data' in download_info:
                 download_url = download_info['data'].get('downloadUrl')
                 if download_url:
                     logger.info(f"成功获取API下载URL，文件ID: {file_id}")
-                    return download_url
+                    return download_url, "api"
         except Exception as e:
             logger.error(f"获取API下载链接时发生错误: {e}")
 

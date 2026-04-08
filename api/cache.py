@@ -1,10 +1,13 @@
 """
 文件缓存管理器
 """
+import logging
 import pickle
 import redis
 from datetime import datetime
 from typing import Optional, Tuple, Any
+
+logger = logging.getLogger(__name__)
 
 
 class FileCacheManager:
@@ -65,7 +68,7 @@ class FileCacheManager:
             return False, None
 
         except Exception as e:
-            print(f"缓存检查失败: {e}")
+            logger.warning("缓存检查失败: %s", e)
             return False, None
 
     def _parse_update_time(self, time_str: str) -> Optional[datetime]:
@@ -113,7 +116,7 @@ class FileCacheManager:
             self.redis_client.setex(fetch_time_key, ttl, fetch_time)
 
         except Exception as e:
-            print(f"设置缓存失败: {e}")
+            logger.warning("设置缓存失败: %s", e)
 
     def delete_cache(self, file_id: int) -> None:
         """删除指定文件的缓存"""
@@ -128,7 +131,7 @@ class FileCacheManager:
             self.redis_client.delete(fetch_time_key)
 
         except Exception as e:
-            print(f"删除缓存失败: {e}")
+            logger.warning("删除缓存失败: %s", e)
 
     def clear_all_cache(self) -> None:
         """清空所有文件缓存"""
@@ -146,7 +149,7 @@ class FileCacheManager:
                 self.redis_client.delete(*all_keys)
 
         except Exception as e:
-            print(f"清空缓存失败: {e}")
+            logger.warning("清空缓存失败: %s", e)
 
     def get_cache_stats(self) -> dict:
         """获取缓存统计信息"""

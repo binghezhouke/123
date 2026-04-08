@@ -1,6 +1,7 @@
 """
 重构后的Pan123客户端主类
 """
+import logging
 import redis
 from typing import Optional
 from .config import ConfigManager
@@ -9,6 +10,8 @@ from .http_client import RequestHandler
 from .cache import FileCacheManager
 from .file_service import FileService
 from .exceptions import ConfigurationError
+
+logger = logging.getLogger(__name__)
 
 
 class Pan123Client:
@@ -68,6 +71,18 @@ class Pan123Client:
         # 确保token有效
         self.token_manager.ensure_valid_token()
 
+    @classmethod
+    def from_app_config(cls, config: dict) -> "Pan123Client":
+        """从 Flask app.config['PAN123_CONFIG'] 字典创建客户端实例。"""
+        redis_config = config.get("REDIS", {})
+        return cls(
+            redis_host=redis_config.get("HOST", "localhost"),
+            redis_port=redis_config.get("PORT", 6379),
+            redis_db=redis_config.get("DB", 0),
+            redis_password=redis_config.get("PASSWORD", None),
+            enable_cache=redis_config.get("ENABLED", True),
+        )
+
     def _init_cache(self, host: str, port: int, db: int, password: str) -> Optional[FileCacheManager]:
         """初始化缓存管理器"""
         try:
@@ -78,12 +93,11 @@ class Pan123Client:
                 password=password,
                 decode_responses=False
             )
-            # 测试连接
             redis_client.ping()
-            print("✓ Redis缓存初始化成功")
+            logger.info("Redis缓存初始化成功")
             return FileCacheManager(redis_client)
         except Exception as e:
-            print(f"✗ Redis缓存初始化失败: {e}")
+            logger.warning("Redis缓存初始化失败: %s", e)
             return None
 
     # 文件操作方法（委托给file_service）
@@ -139,7 +153,7 @@ class Pan123Client:
         URL 格式包含认证信息: https://user:password@host/webdav/path
         """
         if not self.is_webdav_available():
-            print("WebDAV未启用或配置不完整。")
+            logger.warning("WebDAV未启用或配置不完整")
             return None
         return self.file_service.get_webdav_url(file_id, use_cache)
 
@@ -152,7 +166,7 @@ class Pan123Client:
         :return: 一个字典，键是文件ID，值是对应的WebDAV URL或None
         """
         if not self.is_webdav_available():
-            print("WebDAV未启用或配置不完整。")
+            logger.warning("WebDAV未启用或配置不完整")
             return {file_id: None for file_id in file_ids}
 
         results = {}
@@ -171,18 +185,15 @@ class Pan123Client:
         :return: 跳转后的最终下载URL，如果文件不存在或配置错误则返回None
         """
         if not self.is_webdav_available():
-            print("WebDAV未启用或配置不完整。")
+            logger.warning("WebDAV未启用或配置不完整")
             return None
         return self.file_service.get_webdav_redirect_url(file_id, use_cache, max_redirects)
 
-    def get_final_download_url(self, file_id: int, prefer_webdav: bool = True, use_cache: bool = True) -> Optional[str]:
+    def get_final_download_url(self, file_id: int, prefer_webdav: bool = True, use_cache: bool = True) -> Optional[tuple[str, str]]:
         """
         获取文件的最终可下载URL，优先使用WebDAV或API下载链接
 
-        :param file_id: 文件ID
-        :param prefer_webdav: 是否优先使用WebDAV，默认为True
-        :param use_cache: 是否使用缓存，默认为True
-        :return: 最终的下载URL，如果获取失败则返回None
+        :return: (url, url_type) 元组，url_type 为 'webdav' 或 'api'；获取失败则返回 None
         """
         return self.file_service.get_final_download_url(file_id, prefer_webdav, use_cache)
 
@@ -234,5 +245,7 @@ class Pan123Client:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """清理资源"""
-        if hasattr(self.http_client.session, 'close'):
+        if (hasattr(self, 'http_client') and
+                hasattr(self.http_client, 'session') and
+                hasattr(self.http_client.session, 'close')):
             self.http_client.session.close()
