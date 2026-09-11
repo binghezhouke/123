@@ -11,7 +11,7 @@ def file2json(json_file_path):
         data = f.read()
     cnts = data.strip().split("$")
     out = {}
-    out["usesBase62EtagsInExport"] = True,
+    out["usesBase62EtagsInExport"] = True
     files = []
     out["files"] = files
 
