@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 class TokenManager:
     """令牌管理器"""
 
-    TOKEN_CACHE_FILE = ".pan123_api_token_cache.json"
+    # 固定到家目录缓存：同一台机器上无论从哪个目录运行，都共享同一个 token，
+    # 避免开放平台"同 clientID 最多 3 个 token"限制被自己挤爆
+    TOKEN_CACHE_FILE = os.path.join(
+        os.path.expanduser("~"), ".cache", "pan123_api", "token.json")
     TOKEN_ENDPOINT = "/api/v1/access_token"
 
     def __init__(self, base_url: str, client_id: str, client_secret: str):
@@ -62,6 +65,7 @@ class TokenManager:
     def _save_to_cache(self, access_token: str, expires_at: float) -> None:
         """保存令牌到缓存"""
         try:
+            os.makedirs(os.path.dirname(self.TOKEN_CACHE_FILE), exist_ok=True)
             cache_data = {
                 "accessToken": access_token,
                 "tokenExpiresAt": expires_at
