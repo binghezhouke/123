@@ -43,6 +43,11 @@ def main():
         help="已完成记录文件路径 (默认: <json_dir>/batch_done.log)",
         default=None,
     )
+    parser.add_argument(
+        "-w", "--workers",
+        type=int, default=8,
+        help="每个 JSON 并发秒传线程数 (默认: 8)",
+    )
     args = parser.parse_args()
 
     json_dir = os.path.abspath(args.json_dir)
@@ -65,6 +70,8 @@ def main():
 
     success = 0
     failed = 0
+    totals = {'hit': 0, 'miss': 0, 'fail': 0, 'skip': 0}
+    shared_dirs = {}
 
     with Pan123Client() as client:
         for idx, fname in enumerate(json_files, 1):
@@ -88,11 +95,16 @@ def main():
                     if common_path:
                         remote_dir = os.path.join(remote_dir, common_path)
 
-                upload_from_json(client, json_path, remote_dir)
+                counts = upload_from_json(
+                    client, json_path, remote_dir,
+                    shared_dir_map=shared_dirs, max_workers=args.workers)
+                for k in totals:
+                    totals[k] += counts[k]
                 append_done(log_path, fname)
                 success += 1
                 elapsed = time.time() - t0
-                print(f"  ✅ 完成 ({elapsed:.1f}s)")
+                print(f"  ✅ 完成 ({elapsed:.1f}s, 命中 {counts['hit']}, "
+                      f"未命中 {counts['miss']}, 失败 {counts['fail']}, 跳过 {counts['skip']})")
             except KeyboardInterrupt:
                 print("\n\n用户中断，已安全退出。")
                 break
@@ -102,6 +114,8 @@ def main():
 
     print(f"\n===== 汇总 =====")
     print(f"成功: {success + skipped}, 失败: {failed}, 总计: {total}")
+    print(f"秒传命中: {totals['hit']}, 未命中: {totals['miss']}, "
+          f"失败: {totals['fail']}, 跳过: {totals['skip']}")
 
 
 if __name__ == "__main__":

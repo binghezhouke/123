@@ -5,6 +5,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote  # 添加导入
@@ -24,6 +25,8 @@ class FileService:
         self.cache_manager = cache_manager
         self.config = config or {}
         self._dir_cache: Dict[int, Tuple[FileList, Optional[int]]] = {}
+        self._mkdir_cache: Dict[Tuple[int, str], int] = {}
+        self._mkdir_cache_lock = threading.Lock()
 
     def list_files(self,
                    parent_id: int = 0,
@@ -32,7 +35,7 @@ class FileService:
                    search_mode: int = None,
                    last_file_id: int = None,
                    auto_fetch_all: bool = False,
-                   qps_limit: float = 1.0,
+                   qps_limit: float = 5.0,
                    max_pages: int = 100,
                    use_cache: bool = True) -> Tuple[FileList, Optional[int]]:
         """
@@ -44,7 +47,7 @@ class FileService:
         :param search_mode: 搜索模式
         :param last_file_id: 分页参数
         :param auto_fetch_all: 是否自动获取所有分页，默认False
-        :param qps_limit: QPS限制（每秒请求数），默认1.0
+        :param qps_limit: QPS限制（每秒请求数），默认5.0（官方限额 list 10/v2 15）
         :param max_pages: 最大页数限制，默认100页
         :return: (FileList对象, next_last_file_id)
         """
@@ -121,7 +124,7 @@ class FileService:
                          limit: int = 100,
                          search_data: str = None,
                          search_mode: int = None,
-                         qps_limit: float = 1.0,
+                         qps_limit: float = 5.0,
                          max_pages: int = 100) -> Tuple[FileList, Optional[int]]:
         """
         自动获取所有分页数据，带QPS限制
@@ -946,40 +949,39 @@ class FileService:
 
     def mkdir(self, name: str, parent_id: int) -> int:
         """
-        创建目录
+        创建目录（带进程内缓存，同一父目录下的同名目录只请求一次）
         :param name: 目录名(注:不能重名)
         :param parent_id: 父目录id，上传到根目录时填写 0
         :return: 创建的目录ID
         """
+        cache_key = (parent_id, name)
+        with self._mkdir_cache_lock:
+            if cache_key in self._mkdir_cache:
+                return self._mkdir_cache[cache_key]
+
         try:
             endpoint = "/upload/v1/file/mkdir"
             json_data = {"name": name, "parentID": parent_id}
             result = self.http_client.post(endpoint, json_data=json_data)
             if result and 'data' in result:
-                return result['data'].get('dirID')
+                dir_id = result['data'].get('dirID')
+                with self._mkdir_cache_lock:
+                    self._mkdir_cache[cache_key] = dir_id
+                return dir_id
             raise Exception("mkdir API 未返回 dirID")
         except Exception as e:
-            # logger.warning(f"创建目录失败: {e}, 尝试检查目录是否已存在...")
-
-            # 获取父目录下的文件列表
+            # 目录已存在时 mkdir 会失败（接口不能重名），从文件列表中查找同名目录
             try:
-                file_list, _ = self.list_files(
-                    parent_id=parent_id, limit=100, auto_fetch_all=True, use_cache=True)
-
-                # 查找同名的文件夹
-                for file_item in file_list.files:
-                    if file_item.filename == name and file_item.is_folder:
-                        logger.info(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
-                        return file_item.file_id
-
-                file_list, _ = self.list_files(
-                    parent_id=parent_id, limit=100, auto_fetch_all=True, use_cache=False)
-
-                # 查找同名的文件夹
-                for file_item in file_list.files:
-                    if file_item.filename == name and file_item.is_folder:
-                        logger.info(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
-                        return file_item.file_id
+                for use_cache in (True, False):
+                    file_list, _ = self.list_files(
+                        parent_id=parent_id, limit=100,
+                        auto_fetch_all=True, use_cache=use_cache)
+                    for file_item in file_list.files:
+                        if file_item.filename == name and file_item.is_folder:
+                            logger.info(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
+                            with self._mkdir_cache_lock:
+                                self._mkdir_cache[cache_key] = file_item.file_id
+                            return file_item.file_id
                 # 如果没有找到同名目录，重新抛出原始异常
                 logger.warning(f"未找到同名目录: {name}")
                 raise e

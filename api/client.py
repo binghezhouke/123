@@ -104,7 +104,7 @@ class Pan123Client:
     def list_files(self, parent_id: int = 0, limit: int = 100,
                    search_data: str = None, search_mode: int = None,
                    last_file_id: int = None, auto_fetch_all: bool = False,
-                   qps_limit: float = 1.0, max_pages: int = 100):
+                   qps_limit: float = 5.0, max_pages: int = 100):
         """列出文件"""
         return self.file_service.list_files(
             parent_id, limit, search_data, search_mode, last_file_id,

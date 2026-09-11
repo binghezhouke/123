@@ -2,6 +2,8 @@ import argparse
 import json
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from api import Pan123Client
 import tqdm
 
@@ -85,124 +87,128 @@ def _decode_hash(raw_value: str, uses_base62: bool = False) -> tuple:
     return "", ""
 
 
-def upload_from_json(client: Pan123Client, json_file_path: str, remote_dir: str):
+def upload_from_json(client: Pan123Client, json_file_path: str, remote_dir: str,
+                     shared_dir_map: dict = None, max_workers: int = 8) -> dict:
     """
-    从 JSON 文件读取文件列表并上传到指定的远程目录。
+    从 JSON 文件读取文件列表并并发秒传到指定的远程目录。
+
+    秒传接口（sha1_reuse/create）不在官方限流表内，可以并发；
+    目录创建（mkdir 限流 20 QPS）保持串行，目录ID通过 shared_dir_map 跨调用复用。
+
+    :param shared_dir_map: 跨调用共享的 {目录路径: 目录ID} 映射，batch 场景传入以复用目录树
+    :param max_workers: 并发秒传线程数
+    :return: {'hit': 秒传命中, 'miss': 未命中, 'fail': 失败, 'skip': 跳过}
     """
+    counts = {'hit': 0, 'miss': 0, 'fail': 0, 'skip': 0}
+
     if not os.path.exists(json_file_path):
         print(f"错误: JSON 文件不存在: {json_file_path}")
-        return
+        return counts
 
     with open(json_file_path, 'r', encoding='utf-8') as f:
         try:
             data = json.load(f)
         except json.JSONDecodeError:
             data = file2json(json_file_path)
-    usesBase62EtagsInExport = data.get('usesBase62EtagsInExport', False)
+    uses_base62 = data.get('usesBase62EtagsInExport', False)
 
-    # 创建文件夹路径到ID的映射字典，避免重复创建
-    dir_path_to_id_map = {}
-
-    # 确定根目录
     base_path = remote_dir if remote_dir else data.get('commonPath', '')
     if not base_path:
         print("错误: 未在JSON中找到 commonPath，并且未提供远程目录。")
-        return
+        return counts
+
+    dir_map = shared_dir_map if shared_dir_map is not None else {}
 
     print(f"将在远程路径 '{base_path}' 中创建文件结构...")
 
-    # 创建根目录
     try:
-        root_id = client.file_service.mkdir_recursive(base_path)
-        dir_path_to_id_map[base_path] = root_id
-        print(f"成功创建或找到根目录 '{base_path}', ID: {root_id}")
+        root_id = dir_map.get(base_path)
+        if root_id is None:
+            root_id = client.file_service.mkdir_recursive(base_path)
+            dir_map[base_path] = root_id
     except Exception as e:
         print(f"创建根目录 '{base_path}' 失败: {e}")
-        return
+        return counts
 
-    # 遍历并秒传文件
     files_to_upload = data.get('files', [])
-    for file_info in tqdm.tqdm(files_to_upload, desc="上传文件"):
 
+    # 阶段1：串行建目录树
+    for file_info in files_to_upload:
+        dir_path = os.path.split(file_info.get('path') or '')[0]
+        if not dir_path:
+            continue
+        full_dir_path = os.path.join(base_path, dir_path)
+        if full_dir_path in dir_map:
+            continue
+        try:
+            dir_map[full_dir_path] = client.file_service.mkdir_recursive(full_dir_path)
+        except Exception as e:
+            tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
+
+    # 阶段2：线程池并发秒传
+    def reuse_one(file_info):
         file_path = file_info.get('path')
         size = file_info.get('size')
-        # 兼容 sha1 和 etag 两种字段名
         etag = file_info.get('sha1') or file_info.get('etag')
-
         if not all([file_path, size, etag]):
-            print(f"跳过不完整的文件记录: {file_info}")
-            continue
+            return 'skip', str(file_info), '记录不完整'
 
-        # 提取文件名和相对目录
         dir_path, filename = os.path.split(file_path)
-        current_parent_id = root_id
+        display_path = os.path.join(dir_path, filename)
 
-        # 解析哈希值（支持SHA1、MD5/etag、base62编码）
-        hash_hex, hash_type = _decode_hash(etag, usesBase62EtagsInExport)
-        size_int = int(size)
-
+        hash_hex, hash_type = _decode_hash(etag, uses_base62)
         if not hash_hex:
-            tqdm.tqdm.write(f"跳过 '{filename}': 缺少有效的哈希值 (原始值: {etag})")
-            continue
+            return 'skip', display_path, f'缺少有效的哈希值 (原始值: {etag})'
+
+        if dir_path:
+            parent_id = dir_map.get(os.path.join(base_path, dir_path))
+            if parent_id is None:
+                return 'skip', display_path, '目录创建失败'
+        else:
+            parent_id = root_id
 
         try:
-            # 确保目录存在
-            if dir_path:
-                full_dir_path = os.path.join(base_path, dir_path)
-
-                if full_dir_path in dir_path_to_id_map:
-                    current_parent_id = dir_path_to_id_map[full_dir_path]
-                else:
-                    try:
-                        current_parent_id = client.file_service.mkdir_recursive(
-                            full_dir_path)
-                        dir_path_to_id_map[full_dir_path] = current_parent_id
-                    except Exception as e:
-                        tqdm.tqdm.write(f"创建子目录 '{dir_path}' 失败: {e}")
-                        continue
-
-            reuse_result = None
-            display_path = os.path.join(dir_path, filename)
-
             if hash_type == 'sha1':
-                # SHA1秒传
-                reuse_result = client.file_service.try_sha1_reuse(
-                    local_path=None,
-                    filename=filename,
-                    parent_id=current_parent_id,
-                    duplicate=1,
-                    sha1=hash_hex,
-                    size=size_int
-                )
+                result = client.file_service.try_sha1_reuse(
+                    local_path=None, filename=filename, parent_id=parent_id,
+                    duplicate=1, sha1=hash_hex, size=int(size))
+                if result and result.get('reuse'):
+                    return 'hit', display_path, f"SHA1秒传成功 (fileID={result.get('fileID')})"
+                return 'miss', display_path, 'SHA1未命中 (云端无此文件)'
 
-                if reuse_result and reuse_result.get('reuse'):
-                    file_id = reuse_result.get('fileID')
-                    tqdm.tqdm.write(
-                        f"  ✓ SHA1秒传成功: {display_path} (fileID={file_id})")
-                else:
-                    tqdm.tqdm.write(
-                        f"  ⚠️ SHA1秒传未命中: {display_path} (云端无此文件)")
+            if hash_type == 'md5':
+                result = client.file_service.create_file(
+                    parent_id=parent_id, filename=filename, etag=hash_hex,
+                    size=int(size), duplicate=1)
+                if result and result.get('reuse'):
+                    return 'hit', display_path, f"MD5秒传成功 (fileID={result.get('fileID')})"
+                return 'miss', display_path, 'MD5未命中 (云端无此文件)'
 
-            elif hash_type == 'md5':
-                # MD5/etag秒传（通过预上传接口）
-                reuse_result = client.file_service.create_file(
-                    parent_id=current_parent_id,
-                    filename=filename,
-                    etag=hash_hex,
-                    size=size_int,
-                    duplicate=1
-                )
-
-                if reuse_result and reuse_result.get('reuse'):
-                    file_id = reuse_result.get('fileID')
-                    tqdm.tqdm.write(
-                        f"  ✓ MD5秒传成功: {display_path} (fileID={file_id})")
-                else:
-                    tqdm.tqdm.write(
-                        f"  ⚠️ MD5秒传未命中: {display_path} (云端无此文件)")
-
+            return 'skip', display_path, f'未知哈希类型: {hash_type}'
         except Exception as e:
-            tqdm.tqdm.write(f"处理 '{filename}' 失败: {e}")
+            return 'fail', display_path, str(e)
+
+    icons = {'hit': '✓', 'miss': '⚠', 'fail': '❌', 'skip': '⏭'}
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        futures = [executor.submit(reuse_one, fi) for fi in files_to_upload]
+        with tqdm.tqdm(total=len(futures), desc="并发秒传") as bar:
+            for fut in as_completed(futures):
+                try:
+                    status, display_path, detail = fut.result()
+                except Exception as e:
+                    counts['fail'] += 1
+                    tqdm.tqdm.write(f"  ❌ 任务异常: {e}")
+                else:
+                    counts[status] += 1
+                    tqdm.tqdm.write(f"  {icons[status]} {display_path}: {detail}")
+                bar.update(1)
+    except KeyboardInterrupt:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
+
+    return counts
 
 
 if __name__ == '__main__':
@@ -210,7 +216,13 @@ if __name__ == '__main__':
     parser.add_argument('json_file', help='包含文件信息的JSON文件路径')
     parser.add_argument('-d', '--directory',
                         help='要上传到的远程根目录路径 (可选, 如果未提供则使用JSON中的commonPath)')
+    parser.add_argument('-w', '--workers', type=int, default=8,
+                        help='并发秒传线程数 (默认: 8)')
     args = parser.parse_args()
 
     with Pan123Client() as client:
-        upload_from_json(client, args.json_file, args.directory)
+        counts = upload_from_json(client, args.json_file, args.directory,
+                                  max_workers=args.workers)
+    print("\n===== 汇总 =====")
+    print(f"秒传成功: {counts['hit']}, 未命中: {counts['miss']}, "
+          f"失败: {counts['fail']}, 跳过: {counts['skip']}")
