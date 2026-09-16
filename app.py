@@ -88,8 +88,16 @@ if __name__ == '__main__':
         print(f"✗ 应用初始化失败: {e}")
         exit(1)
 
-    print("启动Flask服务器...")
-    print("访问地址: http://localhost:8080")
+    # 监听地址/端口/调试开关都可以用环境变量覆盖
+    debug = os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
+    host = os.environ.get('FLASK_HOST', '0.0.0.0')
+    port = int(os.environ.get('FLASK_PORT', '8080'))
 
-    # 启动Flask应用
-    app.run(debug=True, host='0.0.0.0', port=8080)
+    print("启动Flask服务器...")
+    print(f"访问地址: http://{'localhost' if host == '0.0.0.0' else host}:{port}")
+    if debug:
+        print("⚠ 调试模式已开启，Werkzeug 调试器可以执行任意代码，只能在本机临时使用")
+
+    # 注意：本应用没有任何登录鉴权，监听 0.0.0.0 等于把云盘内容开放给同网段所有人。
+    # 需要长期运行时请放在反向代理后面并加上认证，或把 FLASK_HOST 设为 127.0.0.1。
+    app.run(debug=debug, host=host, port=port)

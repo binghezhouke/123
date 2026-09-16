@@ -73,10 +73,10 @@ result = client.upload_file(
 python upload_folder.py /path/to/folder remote/path
 ```
 
-上传日志会显示每个文件的上传方式：
-- `(SHA1秒传)` - 通过 SHA1 秒传
-- `(秒传)` - 通过预上传 MD5 秒传
-- 无标记 - 常规分片上传
+上传日志会显示每个文件的处理方式：
+- `✓ 秒传成功` - SHA1 秒传命中
+- `✓ 上传成功` - 走常规分片上传
+- `⏭ 跳过已存在文件` - 同名同大小，未重复上传
 
 ## 工作流程
 
@@ -103,30 +103,6 @@ python upload_folder.py /path/to/folder remote/path
 3. **节省时间**：大文件秒传效果尤其明显
 4. **智能回退**：秒传失败自动使用常规上传
 
-## 示例脚本
-
-### demo_sha1.py
-
-演示 SHA1 秒传功能的完整示例：
-
-```bash
-python demo_sha1.py
-```
-
-该脚本会：
-1. 创建测试文件
-2. 首次上传（可能是常规上传）
-3. 上传相同内容的文件（触发SHA1秒传）
-4. 对比启用/禁用秒传的区别
-
-### test_sha1_reuse.py
-
-完整的功能测试脚本：
-
-```bash
-python test_sha1_reuse.py
-```
-
 ## 注意事项
 
 1. **文件名限制**：文件名必须小于 255 个字符，不能包含特殊字符 `"\/:*?|><`
@@ -139,13 +115,19 @@ python test_sha1_reuse.py
 核心实现在 `api/file_service.py` 中：
 
 ```python
-def try_sha1_reuse(self, local_path, filename, parent_id, duplicate=1):
-    """尝试使用SHA1秒传"""
-    # 1. 计算文件SHA1和大小
-    file_size = os.path.getsize(local_path)
-    sha1_hash = self._calculate_sha1(local_path)
-    
-    # 2. 调用秒传API
+def try_sha1_reuse(self, local_path, filename, parent_id, duplicate=1,
+                   sha1=None, size=None):
+    """尝试使用SHA1秒传
+
+    返回含 reuse=True 的数据表示成功；
+    返回 None 表示接口正常响应但云端没有该文件；
+    调用本身失败会抛出异常，调用方据此和"未命中"区分开。
+    """
+    # 1. 没给 sha1/size 时从本地文件计算
+    sha1_hash = sha1 or self._calculate_sha1(local_path)
+    file_size = size or os.path.getsize(local_path)
+
+    # 2. 调用秒传API（网络/业务错误会抛 Pan123APIError）
     result = self.http_client.post("/upload/v2/file/sha1_reuse", {
         "parentFileID": parent_id,
         "filename": filename,
@@ -153,21 +135,19 @@ def try_sha1_reuse(self, local_path, filename, parent_id, duplicate=1):
         "size": file_size,
         "duplicate": duplicate
     })
-    
-    # 3. 检查是否秒传成功
-    if result and result.get('data', {}).get('reuse'):
-        return result['data']
-    
-    return None
+
+    # 3. 只有 reuse=true 算成功
+    data = result.get('data') or {}
+    return data if data.get('reuse') else None
 ```
 
 ## 相关文件
 
 - `api/file_service.py` - SHA1 秒传核心实现
 - `api/client.py` - 客户端接口封装
+- `upload_core.py` - 清单/目录上传，秒传结果统计口径
 - `upload_folder.py` - 文件夹上传（已集成秒传）
-- `demo_sha1.py` - 功能演示脚本
-- `test_sha1_reuse.py` - 完整测试脚本
+- `tests/test_file_service.py` - 秒传语义与分页的回归测试
 
 ## 更新日志
 

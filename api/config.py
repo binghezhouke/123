@@ -53,19 +53,48 @@ class ConfigManager:
         config = self.load_config()
         return config['CLIENT_ID'], config['CLIENT_SECRET']
 
+    def get_redis_config(self) -> Dict[str, Any]:
+        """
+        获取 Redis 配置。
+
+        没配置 REDIS 段时给出与旧代码一致的默认值（本机 6379、启用缓存），
+        这样从 config.json 读配置的调用方（命令行脚本）也能用上缓存。
+        """
+        config = self.load_config()
+        redis_config = config.get('REDIS') or {}
+
+        def as_int(value, default):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        return {
+            'host': redis_config.get('HOST', 'localhost'),
+            'port': as_int(redis_config.get('PORT'), 6379),
+            'db': as_int(redis_config.get('DB'), 0),
+            'password': redis_config.get('PASSWORD'),
+            'enabled': redis_config.get('ENABLED', True),
+        }
+
     def get_webdav_config(self) -> Dict[str, Any]:
         """
         获取WebDAV配置
+
+        键名以 USERNAME / BASE_URL / PATH_PREFIX 为准；
+        USER / HOST 是 config.json.template 早期版本用过的名字，这里继续兼容。
 
         :return: 包含WebDAV配置的字典
         """
         config = self.load_config()
         webdav_config = config.get('WEBDAV', {})
 
-        # 提取基本配置
-        webdav_user = webdav_config.get('USERNAME')
+        # 提取基本配置（兼容旧键名）
+        webdav_user = webdav_config.get('USERNAME', webdav_config.get('USER'))
         webdav_password = webdav_config.get('PASSWORD')
-        webdav_host = webdav_config.get('BASE_URL', 'webdav-1836076489.pd1.123pan.cn')
+        webdav_host = webdav_config.get(
+            'BASE_URL', webdav_config.get('HOST', ''))
+        webdav_path_prefix = webdav_config.get('PATH_PREFIX', '/webdav')
 
         # 如果BASE_URL包含了完整URL，则提取主机部分
         if webdav_host and webdav_host.startswith('http'):
@@ -73,10 +102,17 @@ class ConfigManager:
             parsed_url = urlparse(webdav_host)
             webdav_host = parsed_url.netloc
 
+        if not webdav_host:
+            # 未启用 WebDAV 时允许留空；启用了却配不全则直接报错，避免静默不可用
+            if webdav_config.get('ENABLED', False):
+                raise ConfigurationError(
+                    "WebDAV 已启用但缺少 BASE_URL（或旧键名 HOST）")
+
         # 返回格式化的配置
         return {
             'webdav_user': webdav_user,
             'webdav_password': webdav_password,
             'webdav_host': webdav_host,
+            'webdav_path_prefix': webdav_path_prefix,
             'webdav_enabled': webdav_config.get('ENABLED', False)
         }

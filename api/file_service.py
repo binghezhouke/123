@@ -16,6 +16,22 @@ from .models import File, FileList
 
 logger = logging.getLogger(__name__)
 
+WEBDAV_DEFAULT_PATH = "/webdav"
+
+
+def _mask_credentials(url: str) -> str:
+    """把 URL 里的 user:password@ 替换为 ***@，避免凭据写进日志。"""
+    return re.sub(r'//[^/@\s]+@', '//***@', url)
+
+
+def _is_trashed(file_data: Dict[str, Any]) -> bool:
+    """判断文件是否已移入回收站（trashed 可能是 int/bool/字符串）。"""
+    value = file_data.get('trashed', 0)
+    try:
+        return int(value) == 1
+    except (TypeError, ValueError):
+        return value is True
+
 
 class FileService:
     """文件操作服务"""
@@ -24,9 +40,20 @@ class FileService:
         self.http_client = http_client
         self.cache_manager = cache_manager
         self.config = config or {}
-        self._dir_cache: Dict[int, Tuple[FileList, Optional[int]]] = {}
+        # 目录列表缓存：key 为 (parent_id, limit, max_pages)，内容变化时按 parent_id 失效
+        self._dir_cache: Dict[Tuple[int, int, int], Tuple[FileList, Optional[int]]] = {}
         self._mkdir_cache: Dict[Tuple[int, str], int] = {}
-        self._mkdir_cache_lock = threading.Lock()
+        self._cache_lock = threading.Lock()
+
+    def _dir_cache_key(self, parent_id: int, limit: int, max_pages: int) -> Tuple[int, int, int]:
+        """目录缓存键：limit/max_pages 会影响结果，必须参与键，否则被截断的结果会被复用。"""
+        return (parent_id, limit, max_pages)
+
+    def _invalidate_dir_cache(self, parent_id: int) -> None:
+        """目录内容变化（新建目录/文件）后，作废该目录缓存的所有参数组合。"""
+        with self._cache_lock:
+            for key in [k for k in self._dir_cache if k[0] == parent_id]:
+                del self._dir_cache[key]
 
     def list_files(self,
                    parent_id: int = 0,
@@ -37,7 +64,8 @@ class FileService:
                    auto_fetch_all: bool = False,
                    qps_limit: float = 5.0,
                    max_pages: int = 100,
-                   use_cache: bool = True) -> Tuple[FileList, Optional[int]]:
+                   use_cache: bool = True,
+                   on_page=None) -> Tuple[FileList, Optional[int]]:
         """
         列出文件并返回FileList对象
 
@@ -49,13 +77,16 @@ class FileService:
         :param auto_fetch_all: 是否自动获取所有分页，默认False
         :param qps_limit: QPS限制（每秒请求数），默认5.0（官方限额 list 10/v2 15）
         :param max_pages: 最大页数限制，默认100页
+        :param on_page: 每取完一页回调一次 on_page(页码, 本页条数, 累计条数)，
+                        用于在拉取大目录时显示进度
         :return: (FileList对象, next_last_file_id)
         """
         # 仅在获取所有页面且不搜索时使用缓存
         use_dir_cache = auto_fetch_all and not search_data and use_cache
-        if use_dir_cache and parent_id in self._dir_cache:
+        dir_cache_key = self._dir_cache_key(parent_id, limit, max_pages)
+        if use_dir_cache and dir_cache_key in self._dir_cache:
             logger.info(f"使用目录缓存: parent_id={parent_id}")
-            return self._dir_cache[parent_id]
+            return self._dir_cache[dir_cache_key]
 
         if auto_fetch_all:
             result = self._fetch_all_pages(
@@ -64,11 +95,13 @@ class FileService:
                 search_data=search_data,
                 search_mode=search_mode,
                 qps_limit=qps_limit,
-                max_pages=max_pages
+                max_pages=max_pages,
+                on_page=on_page
             )
             if use_dir_cache:
                 logger.info(f"缓存目录列表: parent_id={parent_id}")
-                self._dir_cache[parent_id] = result
+                with self._cache_lock:
+                    self._dir_cache[dir_cache_key] = result
             return result
         else:
             return self._fetch_single_page(
@@ -85,7 +118,28 @@ class FileService:
                            search_data: str = None,
                            search_mode: int = None,
                            last_file_id: int = None) -> Tuple[FileList, Optional[int]]:
-        """获取单页数据"""
+        """获取单页数据（已过滤回收站记录）"""
+        file_list, next_last_file_id, _ = self._fetch_page(
+            parent_id=parent_id,
+            limit=limit,
+            search_data=search_data,
+            search_mode=search_mode,
+            last_file_id=last_file_id
+        )
+        return file_list, next_last_file_id
+
+    def _fetch_page(self,
+                    parent_id: int = 0,
+                    limit: int = 100,
+                    search_data: str = None,
+                    search_mode: int = None,
+                    last_file_id: int = None) -> Tuple[FileList, Optional[int], int]:
+        """
+        获取单页数据，返回 (过滤后的FileList, next_last_file_id, 服务端返回的原始条数)。
+
+        原始条数用于分页结束判断：过滤掉回收站记录后某页可能为空，
+        但这并不代表没有下一页。
+        """
         endpoint = "/api/v2/file/list"
         params = {
             "limit": limit,
@@ -103,21 +157,15 @@ class FileService:
         result = self.http_client.get(endpoint, params=params)
 
         if not result or 'data' not in result:
-            return FileList([]), None
+            return FileList([]), None, 0
 
-        raw_file_list = result['data'].get('fileList', [])
+        raw_file_list = result['data'].get('fileList') or []
         # 过滤掉已被移入垃圾桶的文件（trashed == 1）
-        try:
-            file_list = [f for f in raw_file_list if int(
-                f.get('trashed', 0)) != 1]
-        except Exception:
-            # 如果数据格式异常，回退到不抛出错误的原始列表
-            file_list = [f for f in raw_file_list if not (isinstance(
-                f.get('trashed', None), int) and f.get('trashed') == 1)]
+        file_list = [f for f in raw_file_list if not _is_trashed(f)]
 
         next_last_file_id = result['data'].get('lastFileId')
 
-        return FileList(file_list), next_last_file_id
+        return FileList(file_list), next_last_file_id, len(raw_file_list)
 
     def _fetch_all_pages(self,
                          parent_id: int = 0,
@@ -125,7 +173,8 @@ class FileService:
                          search_data: str = None,
                          search_mode: int = None,
                          qps_limit: float = 5.0,
-                         max_pages: int = 100) -> Tuple[FileList, Optional[int]]:
+                         max_pages: int = 100,
+                         on_page=None) -> Tuple[FileList, Optional[int]]:
         """
         自动获取所有分页数据，带QPS限制
 
@@ -135,6 +184,7 @@ class FileService:
         :param search_mode: 搜索模式
         :param qps_limit: QPS限制（每秒请求数）
         :param max_pages: 最大页数限制，默认100页
+        :param on_page: 每页回调 on_page(页码, 本页条数, 累计条数)
         :return: (合并的FileList对象, None)
         """
         all_files = []
@@ -159,7 +209,7 @@ class FileService:
             last_request_time = time.time()
 
             # 获取当前页数据
-            file_list, next_last_file_id = self._fetch_single_page(
+            file_list, next_last_file_id, raw_count = self._fetch_page(
                 parent_id=parent_id,
                 limit=limit,
                 search_data=search_data,
@@ -169,14 +219,20 @@ class FileService:
 
             page_count += 1
             current_page_count = len(file_list.files)
+            trashed_count = raw_count - current_page_count
             all_files.extend(file_list.files)
 
+            trashed_note = f"（其中 {trashed_count} 条在回收站，已跳过）" if trashed_count else ""
             logger.info(
-                f"第 {page_count} 页: 获取 {current_page_count} 个文件，累计 {len(all_files)} 个")
+                f"第 {page_count} 页: 原始 {raw_count} 条，可用 {current_page_count} 条{trashed_note}，累计 {len(all_files)} 个")
 
-            # 检查是否还有更多页
-            # next_last_file_id 为 None、-1 或者当前页没有文件时停止分页
-            if next_last_file_id is None or next_last_file_id == -1 or current_page_count == 0:
+            if on_page is not None:
+                on_page(page_count, current_page_count, len(all_files))
+
+            # 检查是否还有更多页。
+            # 结束判断只看服务端返回的原始条数：整页都是回收站记录时过滤后为空，
+            # 但这不代表没有下一页，用过滤后的条数判断会提前截断结果。
+            if next_last_file_id is None or next_last_file_id == -1 or raw_count == 0:
                 if next_last_file_id == -1:
                     logger.info(
                         f"已到达最后一页（next_file_id = -1），共 {page_count} 页，总计 {len(all_files)} 个文件")
@@ -251,24 +307,28 @@ class FileService:
             return {}
         except Exception as e:
             logger.warning(f"预上传失败: {e}, 尝试检查文件是否已存在...")
+            if duplicate != 1:
+                # duplicate=2 是覆盖上传，不能把"已存在的同名文件"当成完成
+                raise
             try:
                 remote_files_list, _ = self.list_files(
-                    parent_id=parent_id, auto_fetch_all=True)
-                existing_file = remote_files_list.find_by_name(filename)
-                if existing_file and not existing_file.is_folder and existing_file.size == size:
-                    logger.info(
-                        f"  ✓ 找到已存在的文件 '{filename}' 且大小相同，返回现有文件信息。")
-                    return {
-                        "fileID": existing_file.file_id,
-                        "filename": filename,
-                        "size": size,
-                        "skipped": True,
-                        "reuse": True  # 模拟秒传成功
-                    }
-                raise e
+                    parent_id=parent_id, auto_fetch_all=True, use_cache=False)
             except Exception as list_error:
                 logger.error(f"检查已存在文件时出错: {list_error}")
                 raise e
+
+            existing_file = remote_files_list.find_by_name(filename)
+            if existing_file and not existing_file.is_folder and existing_file.size == size:
+                logger.info(
+                    f"  ✓ 找到已存在的文件 '{filename}' 且大小相同，按跳过处理。")
+                return {
+                    "fileID": existing_file.file_id,
+                    "filename": filename,
+                    "size": size,
+                    "skipped": True,
+                    "existing": True,
+                }
+            raise
 
     def upload_file(self,
                     local_path: str,
@@ -320,10 +380,16 @@ class FileService:
         # 2.2. 如果启用SHA1秒传，先尝试秒传
         if try_sha1_reuse:
             logger.info(f"尝试SHA1秒传文件: '{filename}'...")
-            sha1_result = self.try_sha1_reuse(
-                local_path, filename, parent_id, duplicate)
+            try:
+                sha1_result = self.try_sha1_reuse(
+                    local_path, filename, parent_id, duplicate)
+            except Pan123APIError as e:
+                # 秒传接口本身出错不应该阻断常规上传流程
+                logger.warning(f"SHA1秒传调用失败，回退到常规上传: {e}")
+                sha1_result = None
             if sha1_result and sha1_result.get('reuse'):
                 logger.info(f"✓ SHA1秒传成功！文件ID: {sha1_result.get('fileID')}")
+                self._invalidate_dir_cache(parent_id)
                 return {
                     "fileID": sha1_result.get('fileID'),
                     "filename": filename,
@@ -354,11 +420,23 @@ class FileService:
         # 5. 检查是否秒传
         if pre_upload_info.get("reuse"):
             logger.info("文件秒传成功")
+            self._invalidate_dir_cache(parent_id)
             return {
                 "fileID": pre_upload_info.get("fileID"),
                 "filename": filename,
                 "size": size,
                 "reuse": True
+            }
+
+        # 5.1. 预上传失败但云端已有同名同大小文件（create_file 的兜底分支），按跳过处理
+        if pre_upload_info.get("skipped"):
+            logger.info(f"云端已存在同名同大小文件，跳过: '{filename}'")
+            return {
+                "fileID": pre_upload_info.get("fileID"),
+                "filename": filename,
+                "size": size,
+                "skipped": True,
+                "existing": True,
             }
 
         # 6. 如果不是秒传，准备分片上传
@@ -395,6 +473,7 @@ class FileService:
 
         if complete_info:
             logger.info("文件上传成功")
+            self._invalidate_dir_cache(parent_id)
             return complete_info
         else:
             logger.error("完成上传步骤失败")
@@ -426,57 +505,56 @@ class FileService:
         """
         尝试使用SHA1秒传文件，可接受本地文件或预先提供的sha1/size元数据。
 
+        返回值语义（调用方据此区分"没命中"和"调用失败"）：
+        - 返回含 ``reuse=True`` 的数据：秒传成功
+        - 返回 None：接口正常响应，但云端没有这个文件（需要走常规上传）
+        - 抛出 Pan123APIError / FileNotFoundError：这次调用本身失败，不代表云端没有该文件
+
         :param local_path: 本地文件路径；如果提供了 sha1 和 size，则可以为 None
         :param filename: 文件名
         :param parent_id: 父目录ID
         :param duplicate: 文件名冲突处理策略（1保留两者，2覆盖原文件）
         :param sha1: 预先计算好的SHA1（40位hex）
         :param size: 预先提供的文件大小（bytes）
-        :return: 如果秒传成功返回响应数据，否则返回None
+        :return: 秒传成功时返回响应数据，未命中时返回None
         """
-        try:
-            sha1_hash = sha1
-            file_size = size
+        sha1_hash = sha1
+        file_size = size
 
-            # 如未提供sha1/size，则基于本地文件计算
-            if sha1_hash is None or file_size is None:
-                if not local_path or not os.path.isfile(local_path):
-                    raise FileNotFoundError("需要本地文件来计算SHA1，但未提供有效路径")
-                file_size = file_size or os.path.getsize(local_path)
-                sha1_hash = sha1_hash or self._calculate_sha1(local_path)
+        # 如未提供sha1/size，则基于本地文件计算
+        if sha1_hash is None or file_size is None:
+            if not local_path or not os.path.isfile(local_path):
+                raise FileNotFoundError("需要本地文件来计算SHA1，但未提供有效路径")
+            file_size = file_size or os.path.getsize(local_path)
+            sha1_hash = sha1_hash or self._calculate_sha1(local_path)
 
-            # 标准化sha1
-            sha1_hash = sha1_hash.lower() if sha1_hash else sha1_hash
+        # 标准化sha1
+        sha1_hash = sha1_hash.lower() if sha1_hash else sha1_hash
 
-            logger.info(f"  计算/使用SHA1: {sha1_hash}, 大小: {file_size} bytes")
+        logger.info(f"  计算/使用SHA1: {sha1_hash}, 大小: {file_size} bytes")
 
-            endpoint = "/upload/v2/file/sha1_reuse"
-            json_data = {
-                "parentFileID": parent_id,
-                "filename": filename,
-                "sha1": sha1_hash,
-                "size": file_size,
-                "duplicate": duplicate
-            }
+        endpoint = "/upload/v2/file/sha1_reuse"
+        json_data = {
+            "parentFileID": parent_id,
+            "filename": filename,
+            "sha1": sha1_hash,
+            "size": file_size,
+            "duplicate": duplicate
+        }
 
-            result = self.http_client.post(endpoint, json_data=json_data)
+        result = self.http_client.post(endpoint, json_data=json_data)
 
-            if result and result.get('code') == 0:
-                data = result.get('data', {})
-                if data.get('reuse'):
-                    file_id = data.get('fileID')
-                    logger.info(f"  ✓ 文件秒传成功！文件ID: {file_id}")
-                    return data
-                else:
-                    logger.info("  SHA1未命中，需要常规上传")
-                    return None
-            else:
-                logger.warning(f"  秒传API调用失败: {result.get('message', '未知错误')}")
-                return None
+        if not result:
+            raise Pan123APIError("sha1_reuse 接口返回空响应")
 
-        except Exception as e:
-            logger.error(f"  SHA1秒传尝试失败: {e}")
+        data = result.get('data') or {}
+        if not data.get('reuse'):
+            logger.info("  SHA1未命中，需要常规上传")
             return None
+
+        file_id = data.get('fileID')
+        logger.info(f"  ✓ 文件秒传成功！文件ID: {file_id}")
+        return data
 
     def _upload_chunks(self, local_path: str, preupload_id: str, slice_size: int, servers: List[str]) -> bool:
         """
@@ -845,8 +923,17 @@ class FileService:
         # 对文件路径进行URL编码
         encoded_file_path = quote(file_path)
 
-        webdav_url = f"https://{webdav_user}:{webdav_password}@{webdav_host}/webdav/{encoded_file_path}"
-        logger.info(f"已生成WebDAV URL，文件ID: {file_id}")
+        # 路径前缀来自配置，默认 /webdav
+        path_prefix = (self.config.get('webdav_path_prefix')
+                       or WEBDAV_DEFAULT_PATH).strip('/')
+        path = f"/{path_prefix}/{encoded_file_path}" if path_prefix else f"/{encoded_file_path}"
+
+        # 用户名/密码需要转义，否则密码里的 @ : / 会破坏 URL 结构
+        credentials = f"{quote(webdav_user, safe='')}:{quote(webdav_password, safe='')}"
+
+        webdav_url = f"https://{credentials}@{webdav_host}{path}"
+        logger.info(
+            f"已生成WebDAV URL，文件ID: {file_id}, URL: {_mask_credentials(webdav_url)}")
 
         return webdav_url
 
@@ -873,41 +960,46 @@ class FileService:
 
         try:
             while redirect_count < max_redirects:
-                logger.info(f"发送HEAD请求到URL (跳转次数: {redirect_count}): {current_url}")
+                logger.info(
+                    f"探测WebDAV跳转 (跳转次数: {redirect_count}): {_mask_credentials(current_url)}")
 
-                # 发送HEAD请求，不允许自动跳转
-                response = requests.get(
-                    current_url, allow_redirects=False, timeout=30)
+                # 不允许自动跳转；stream=True 保证不把响应体读进内存
+                # （文件较大且服务端直接返回 200 时，否则会整份缓冲到内存里）
+                with requests.get(
+                        current_url, allow_redirects=False, timeout=30, stream=True) as response:
 
-                logger.info(f"响应状态码: {response.status_code}")
+                    logger.info(f"响应状态码: {response.status_code}")
 
-                # 检查是否是跳转响应
-                if response.status_code in [301, 302, 303, 307, 308]:
-                    redirect_url = response.headers.get('Location')
-                    if not redirect_url:
-                        logger.warning(f"{response.status_code}响应中没有找到Location头")
+                    # 检查是否是跳转响应
+                    if response.status_code in [301, 302, 303, 307, 308]:
+                        redirect_url = response.headers.get('Location')
+                        if not redirect_url:
+                            logger.warning(f"{response.status_code}响应中没有找到Location头")
+                            return None
+
+                        logger.info(f"获取到{response.status_code}跳转URL: {_mask_credentials(redirect_url)}")
+                        return redirect_url
+
+                    elif response.status_code == 200:
+                        # 如果返回200，说明到达最终URL
+                        logger.info(f"到达最终URL，状态码: {response.status_code}")
+                        return current_url
+
+                    elif response.status_code == 404:
+                        logger.warning(f"文件未找到，状态码: {response.status_code}")
                         return None
 
-                    logger.info(f"获取到{response.status_code}跳转URL: {redirect_url}")
-                    return redirect_url
+                    else:
+                        logger.error(f"WebDAV请求返回错误状态码: {response.status_code}")
+                        # 对于其他状态码，尝试返回响应内容以便调试
+                        if hasattr(response, 'text'):
+                            logger.error(f"响应内容: {response.text[:500]}...")
+                        return None
 
-                elif response.status_code == 200:
-                    # 如果返回200，说明到达最终URL
-                    logger.info(f"到达最终URL，状态码: {response.status_code}")
-                    return current_url
+                redirect_count += 1
 
-                elif response.status_code == 404:
-                    logger.warning(f"文件未找到，状态码: {response.status_code}")
-                    return None
-
-                else:
-                    logger.error(f"WebDAV请求返回错误状态码: {response.status_code}")
-                    # 对于其他状态码，尝试返回响应内容以便调试
-                    if hasattr(response, 'text'):
-                        logger.error(f"响应内容: {response.text[:500]}...")
-                    return None
-
-            logger.warning(f"达到最大跳转次数限制({max_redirects})，最终URL: {current_url}")
+            logger.warning(
+                f"达到最大跳转次数限制({max_redirects})，最终URL: {_mask_credentials(current_url)}")
             return current_url
 
         except RequestException as e:
@@ -955,7 +1047,7 @@ class FileService:
         :return: 创建的目录ID
         """
         cache_key = (parent_id, name)
-        with self._mkdir_cache_lock:
+        with self._cache_lock:
             if cache_key in self._mkdir_cache:
                 return self._mkdir_cache[cache_key]
 
@@ -965,13 +1057,16 @@ class FileService:
             result = self.http_client.post(endpoint, json_data=json_data)
             if result and 'data' in result:
                 dir_id = result['data'].get('dirID')
-                with self._mkdir_cache_lock:
+                with self._cache_lock:
                     self._mkdir_cache[cache_key] = dir_id
+                self._invalidate_dir_cache(parent_id)
                 return dir_id
             raise Exception("mkdir API 未返回 dirID")
         except Exception as e:
             # 目录已存在时 mkdir 会失败（接口不能重名），从文件列表中查找同名目录
             try:
+                # 先读缓存（刚建过目录时可能已经在别的调用里命中过），
+                # 命中不了再用一次不读缓存的完整查询
                 for use_cache in (True, False):
                     file_list, _ = self.list_files(
                         parent_id=parent_id, limit=100,
@@ -979,7 +1074,7 @@ class FileService:
                     for file_item in file_list.files:
                         if file_item.filename == name and file_item.is_folder:
                             logger.info(f"找到已存在的目录: {name}, ID: {file_item.file_id}")
-                            with self._mkdir_cache_lock:
+                            with self._cache_lock:
                                 self._mkdir_cache[cache_key] = file_item.file_id
                             return file_item.file_id
                 # 如果没有找到同名目录，重新抛出原始异常

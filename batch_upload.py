@@ -1,52 +1,88 @@
-"""批量从 JSON 文件秒传到 123 云盘。
+"""批量从清单文件秒传到 123 云盘。
 
-遍历指定目录下的所有 .json 文件，逐个调用 upload_from_json 秒传。
-支持断点续传：已成功的 JSON 会记录在日志文件中，重跑时自动跳过。
+遍历指定目录下的所有 .json / .txt 清单文件，逐个调用 upload_core 秒传。
+判重完全以云端为准：传 --tree 时所有清单共用它先按文件名零请求预筛
+（口径与 upload_from_json 一致），没传时列目标目录核对；不依赖任何
+本地"已完成"记录（batch_done.log / journal.jsonl 那套已移除）。
+
+用法：
+    python batch_upload.py /path/to/json_dir
+    python batch_upload.py /path/to/json_dir -d 远程前缀目录 -w 16
 """
 
 import argparse
-import json
 import os
 import sys
 import time
 
 from api import Pan123Client
-from upload_from_json import upload_from_json, file2json
+from upload_core import (
+    DEFAULT_RATE,
+    RemoteDirTree,
+    RemoteIndex,
+    load_manifest,
+    load_tree_index,
+    normalize_remote_path,
+    upload_manifest,
+)
+
+MANIFEST_SUFFIXES = (".json", ".txt")
 
 
-def load_done_set(log_path: str) -> set:
-    """从日志文件加载已完成的 JSON 文件名集合。"""
-    if not os.path.exists(log_path):
-        return set()
-    with open(log_path, "r", encoding="utf-8") as f:
-        return {line.strip() for line in f if line.strip()}
+def collect_manifests(json_dir: str):
+    return sorted(f for f in os.listdir(json_dir)
+                  if f.lower().endswith(MANIFEST_SUFFIXES))
 
 
-def append_done(log_path: str, filename: str):
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(filename + "\n")
+def manifest_remote_dir(json_path: str, base_dir: str) -> str:
+    """把 -d 前缀目录和清单里的 commonPath 拼成最终的远程目录。"""
+    common_path = normalize_remote_path(load_manifest(json_path).get('commonPath', ''))
+    if base_dir and common_path:
+        return f"{normalize_remote_path(base_dir)}/{common_path}"
+    return base_dir or common_path
 
 
 def main():
-    parser = argparse.ArgumentParser(description="批量从 JSON 文件秒传到 123 云盘")
+    parser = argparse.ArgumentParser(description="批量从清单文件秒传到 123 云盘")
     parser.add_argument(
         "json_dir",
-        help="包含 JSON 文件的目录路径",
+        help="包含清单文件的目录路径",
     )
     parser.add_argument(
         "-d", "--directory",
-        help="远程前缀目录路径 (可选, 每个 JSON 的 commonPath 会放在此目录下)",
-        default=None,
-    )
-    parser.add_argument(
-        "--log",
-        help="已完成记录文件路径 (默认: <json_dir>/batch_done.log)",
+        help="远程前缀目录路径 (可选, 每个清单的 commonPath 会放在此目录下)",
         default=None,
     )
     parser.add_argument(
         "-w", "--workers",
         type=int, default=8,
-        help="每个 JSON 并发秒传线程数 (默认: 8)",
+        help="每个清单并发秒传线程数 (默认: 8, 实际速率受 --rate 限制)",
+    )
+    parser.add_argument(
+        "--rate",
+        type=float, default=DEFAULT_RATE,
+        help=f"每秒请求数上限 (默认: {DEFAULT_RATE:g}，账号级限流约 8/s；0 表示不限速)",
+    )
+    parser.add_argument(
+        "--tree",
+        help="目录树导出文件（网页端\"导出目录树\"的 txt），"
+             "所有清单共用，先按文件名零请求地筛掉已上传的文件",
+    )
+    parser.add_argument(
+        "--tree-root",
+        help="目录树根对应的远程路径（默认：树文件首行，\"我的文件\" 视为网盘根）",
+    )
+    parser.add_argument(
+        "--tree-verify", action="store_true",
+        help="目录树按名字命中后仍列目录核实大小/MD5（默认直接跳过，不校验内容）",
+    )
+    parser.add_argument(
+        "--no-dedup", action="store_true",
+        help="不列目标目录做判重（目标目录非常大时可能更划算）",
+    )
+    parser.add_argument(
+        "-v", "--verbose", action="store_true",
+        help="逐条打印每个文件的结果（默认只打印失败项）",
     )
     args = parser.parse_args()
 
@@ -55,67 +91,68 @@ def main():
         print(f"错误: 目录不存在: {json_dir}")
         sys.exit(1)
 
-    log_path = args.log or os.path.join(json_dir, "batch_done.log")
-
-    # 收集所有 JSON 文件并排序
-    json_files = sorted(f for f in os.listdir(json_dir) if f.lower().endswith(".json"))
-    total = len(json_files)
+    manifests = collect_manifests(json_dir)
+    total = len(manifests)
     if total == 0:
-        print("目录中没有找到 .json 文件。")
+        print("目录中没有找到清单文件。")
         sys.exit(0)
 
-    done_set = load_done_set(log_path)
-    skipped = len(done_set & set(json_files))
-    print(f"共 {total} 个 JSON 文件, 已完成 {skipped} 个, 待处理 {total - skipped} 个\n")
+    print(f"共 {total} 个清单文件")
 
-    success = 0
+    tree_index = None
+    if args.tree:
+        # 目录树跨清单共用：读一次就够，判重口径和 upload_from_json 完全一致
+        tree_index = load_tree_index(args.tree, args.tree_root)
+        print(f"📁 目录树: {tree_index.file_count:,} 个文件 / "
+              f"{tree_index.dir_count:,} 个目录，先按它判重")
+    print()
+
+    succeeded = 0
     failed = 0
-    totals = {'hit': 0, 'miss': 0, 'fail': 0, 'skip': 0}
-    shared_dirs = {}
+    totals = None
 
     with Pan123Client() as client:
-        for idx, fname in enumerate(json_files, 1):
-            if fname in done_set:
-                continue
+        # 目录树缓存与目录快照跨清单共享：同一棵树只建一次、同一个目录只列一次；
+        # 有目录树时即使 --no-dedup 也要快照（待传条目要靠它解析目录ID）
+        index = None if (args.no_dedup and tree_index is None) else RemoteIndex(client)
+        dir_tree = RemoteDirTree(client, args.directory or '', index)
+        rate = None if args.rate <= 0 else args.rate
 
+        for idx, fname in enumerate(manifests, 1):
             json_path = os.path.join(json_dir, fname)
             print(f"\n[{idx}/{total}] 处理: {fname}")
             t0 = time.time()
 
             try:
-                # 如果指定了前缀目录，拼接 commonPath
-                remote_dir = args.directory
-                if remote_dir:
-                    try:
-                        with open(json_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                    except json.JSONDecodeError:
-                        data = file2json(json_path)
-                    common_path = data.get('commonPath', '').strip('/')
-                    if common_path:
-                        remote_dir = os.path.join(remote_dir, common_path)
-
-                counts = upload_from_json(
+                remote_dir = manifest_remote_dir(json_path, args.directory)
+                stats = upload_manifest(
                     client, json_path, remote_dir,
-                    shared_dir_map=shared_dirs, max_workers=args.workers)
-                for k in totals:
-                    totals[k] += counts[k]
-                append_done(log_path, fname)
-                success += 1
-                elapsed = time.time() - t0
-                print(f"  ✅ 完成 ({elapsed:.1f}s, 命中 {counts['hit']}, "
-                      f"未命中 {counts['miss']}, 失败 {counts['fail']}, 跳过 {counts['skip']})")
+                    dir_tree=dir_tree, max_workers=args.workers, rate=rate,
+                    index=index, dedup=not args.no_dedup,
+                    tree_index=tree_index, tree_verify=args.tree_verify,
+                    verbose=args.verbose)
             except KeyboardInterrupt:
                 print("\n\n用户中断，已安全退出。")
                 break
             except Exception as e:
                 failed += 1
                 print(f"  ❌ 失败: {e}")
+                continue
 
-    print(f"\n===== 汇总 =====")
-    print(f"成功: {success + skipped}, 失败: {failed}, 总计: {total}")
-    print(f"秒传命中: {totals['hit']}, 未命中: {totals['miss']}, "
-          f"失败: {totals['fail']}, 跳过: {totals['skip']}")
+            if totals is None:
+                totals = stats
+            else:
+                totals.merge(stats)
+
+            succeeded += 1
+            elapsed = time.time() - t0
+            print(f"  ✅ 完成 ({elapsed:.1f}s) {stats.breakdown_line()}")
+
+    print("\n===== 汇总 =====")
+    print(f"清单成功: {succeeded}, 清单失败: {failed}, 总计: {total}")
+    if totals is not None:
+        for line in totals.summary_lines():
+            print(line)
 
 
 if __name__ == "__main__":

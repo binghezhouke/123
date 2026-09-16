@@ -1,13 +1,21 @@
 """
 文件缓存管理器
+
+缓存内容用 JSON 序列化：Redis 里的数据一旦被第三方写入，pickle 反序列化
+就等于在本进程里执行任意代码，这里不值得冒这个风险。
 """
+import json
 import logging
-import pickle
 import redis
 from datetime import datetime
 from typing import Optional, Tuple, Any
 
 logger = logging.getLogger(__name__)
+
+
+def _to_text(value) -> str:
+    """兼容 decode_responses=True/False 两种 Redis 客户端配置。"""
+    return value.decode('utf-8') if isinstance(value, (bytes, bytearray)) else value
 
 
 class FileCacheManager:
@@ -52,9 +60,10 @@ class FileCacheManager:
             if not cached_data or not fetch_time_str:
                 return False, None
 
-            # 反序列化缓存数据
-            cached_file_info = pickle.loads(cached_data)
-            fetch_time = datetime.fromisoformat(fetch_time_str.decode('utf-8'))
+            # 反序列化缓存数据（旧版本写入的 pickle 数据会解析失败，
+            # 被下面的 except 兜住当成缓存未命中，不影响正确性）
+            cached_file_info = json.loads(_to_text(cached_data))
+            fetch_time = datetime.fromisoformat(_to_text(fetch_time_str))
 
             # 如果没有文件更新时间，直接使用缓存
             if not file_update_time:
@@ -106,7 +115,7 @@ class FileCacheManager:
             fetch_time_key = self._get_fetch_time_key(file_id)
 
             # 序列化文件信息
-            cached_data = pickle.dumps(file_info)
+            cached_data = json.dumps(file_info, ensure_ascii=False).encode('utf-8')
             fetch_time = datetime.now().isoformat()
 
             ttl = ttl or self.default_ttl
@@ -133,6 +142,13 @@ class FileCacheManager:
         except Exception as e:
             logger.warning("删除缓存失败: %s", e)
 
+    def _scan_keys(self, pattern: str):
+        """用 SCAN 迭代匹配的键（KEYS 会阻塞整个 Redis 实例）。"""
+        keys = []
+        for key in self.redis_client.scan_iter(match=pattern, count=500):
+            keys.append(key)
+        return keys
+
     def clear_all_cache(self) -> None:
         """清空所有文件缓存"""
         if not self.redis_client:
@@ -140,11 +156,8 @@ class FileCacheManager:
 
         try:
             # 获取所有相关的键
-            cache_keys = self.redis_client.keys(f"{self.cache_prefix}*")
-            fetch_time_keys = self.redis_client.keys(
-                f"{self.fetch_time_prefix}*")
-
-            all_keys = cache_keys + fetch_time_keys
+            all_keys = self._scan_keys(f"{self.cache_prefix}*") + \
+                self._scan_keys(f"{self.fetch_time_prefix}*")
             if all_keys:
                 self.redis_client.delete(*all_keys)
 
@@ -157,7 +170,7 @@ class FileCacheManager:
             return {"enabled": False}
 
         try:
-            cache_keys = self.redis_client.keys(f"{self.cache_prefix}*")
+            cache_keys = self._scan_keys(f"{self.cache_prefix}*")
             return {
                 "enabled": True,
                 "total_cached_files": len(cache_keys),

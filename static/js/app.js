@@ -112,7 +112,7 @@ function downloadFile(fileId, fileName = '文件') {
                         <i class="fas fa-exclamation-triangle"></i> 获取下载链接失败
                     </div>
                     <p style="font-size: 13px; color: var(--text-secondary);">无法获取文件 "${escapeHtml(fileName)}" 的下载链接</p>
-                    <p style="font-size: 12px; color: var(--text-secondary);">${data.error || '未知错误'}</p>
+                    <p style="font-size: 12px; color: var(--text-secondary);">${escapeHtml(data.error || '未知错误')}</p>
                 `;
                 showToast('获取下载链接失败', 'error');
             }

@@ -22,21 +22,21 @@ class Pan123Client:
     def __init__(self,
                  base_url: str = None,
                  config_file: str = None,
-                 redis_host: str = 'localhost',
-                 redis_port: int = 6379,
-                 redis_db: int = 0,
+                 redis_host: str = None,
+                 redis_port: int = None,
+                 redis_db: int = None,
                  redis_password: str = None,
-                 enable_cache: bool = True):
+                 enable_cache: bool = None):
         """
         初始化Pan123客户端
 
         :param base_url: API基础URL
         :param config_file: 配置文件路径
-        :param redis_host: Redis主机
-        :param redis_port: Redis端口
-        :param redis_db: Redis数据库
-        :param redis_password: Redis密码
-        :param enable_cache: 是否启用缓存
+        :param redis_host: Redis主机，None 表示用 config.json 里 REDIS.HOST
+        :param redis_port: Redis端口，None 表示用 config.json 里 REDIS.PORT
+        :param redis_db: Redis数据库，None 表示用 config.json 里 REDIS.DB
+        :param redis_password: Redis密码，None 表示用 config.json 里 REDIS.PASSWORD
+        :param enable_cache: 是否启用缓存，None 表示用 config.json 里 REDIS.ENABLED
         """
         self.base_url = base_url or self.BASE_URL
 
@@ -47,6 +47,19 @@ class Pan123Client:
             client_id, client_secret = self.config_manager.get_client_credentials()
         except Exception as e:
             raise ConfigurationError(f"配置初始化失败: {e}")
+
+        # Redis 参数没显式传就用配置文件里的，避免命令行脚本连默认的 localhost
+        redis_config = self.config_manager.get_redis_config()
+        if redis_host is None:
+            redis_host = redis_config['host']
+        if redis_port is None:
+            redis_port = redis_config['port']
+        if redis_db is None:
+            redis_db = redis_config['db']
+        if redis_password is None:
+            redis_password = redis_config['password']
+        if enable_cache is None:
+            enable_cache = redis_config['enabled']
 
         # 初始化认证管理器
         self.token_manager = TokenManager(
@@ -104,11 +117,12 @@ class Pan123Client:
     def list_files(self, parent_id: int = 0, limit: int = 100,
                    search_data: str = None, search_mode: int = None,
                    last_file_id: int = None, auto_fetch_all: bool = False,
-                   qps_limit: float = 5.0, max_pages: int = 100):
-        """列出文件"""
+                   qps_limit: float = 5.0, max_pages: int = 100,
+                   use_cache: bool = True, on_page=None):
+        """列出文件（on_page 用于在自动翻页时回报进度）"""
         return self.file_service.list_files(
             parent_id, limit, search_data, search_mode, last_file_id,
-            auto_fetch_all, qps_limit, max_pages)
+            auto_fetch_all, qps_limit, max_pages, use_cache, on_page)
 
     def get_files_info(self, file_ids: list, use_cache: bool = True):
         """获取多个文件信息"""

@@ -149,14 +149,14 @@ def test_pagination(client: Pan123Client):
         end_time = time.time()
         elapsed = end_time - start_time
 
-        print(f"✓ 自动分页完成:")
+        print("✓ 自动分页完成:")
         print(f"  - 总文件数: {len(all_files)}")
         print(f"  - 总耗时: {elapsed:.2f} 秒")
         if elapsed > 0:
             print(f"  - 实际QPS: {len(all_files) / elapsed:.2f}")
 
         # 显示前几个文件
-        print(f"\n📋 前5个文件:")
+        print("\n📋 前5个文件:")
         for i, file_obj in enumerate(all_files.files[:5]):
             file_type = "📁" if file_obj.is_folder else "📄"
             print(
@@ -209,7 +209,7 @@ def test_file_details(client: Pan123Client, file_list):
             print(f"   父目录ID: {file_obj.parent_file_id}")
 
         # 测试单个文件获取
-        print(f"\n🔍 测试单个文件获取...")
+        print("\n🔍 测试单个文件获取...")
         single_file = client.get_file_info_single(file_ids[0])
         if single_file:
             print(f"✓ 单个文件获取成功: {single_file.filename}")
@@ -255,7 +255,7 @@ def test_download_info(client: Pan123Client, file_list):
             download_url = download_data.get('downloadUrl')
 
             if download_url:
-                print(f"✓ 下载链接获取成功")
+                print("✓ 下载链接获取成功")
                 print(f"   下载URL: {download_url[:100]}...")
 
                 # 显示其他下载信息
@@ -377,7 +377,7 @@ def test_file_path(client: Pan123Client):
                 print("   ✗ 获取详细路径失败")
 
         # 测试根目录文件的路径
-        print(f"\n🏠 测试根目录文件路径...")
+        print("\n🏠 测试根目录文件路径...")
         if test_files:
             root_file = test_files[0]
             if root_file.parent_file_id == 0:
@@ -542,11 +542,11 @@ def main():
             search_results = test_search_files(client)
 
             # 4. 测试分页功能
-            paginated_files = test_pagination(client)
+            test_pagination(client)
 
             # 5. 测试文件详情（使用列表结果）
             test_files = search_results
-            detailed_files = test_file_details(client, test_files)
+            test_file_details(client, test_files)
             file_list = test_files
 
             # 6. 测试下载链接
@@ -593,7 +593,7 @@ def test_upload_file(client: Pan123Client):
         print(f"✓ 创建了临时测试文件: {local_file_path}")
 
         # 测试上传
-        print(f"\n🚀 开始上传文件到根目录 (parent_id=0)...")
+        print("\n🚀 开始上传文件到根目录 (parent_id=0)...")
         upload_result = client.file_service.upload_file(
             local_path=local_file_path,
             parent_id=0,  # 上传到根目录

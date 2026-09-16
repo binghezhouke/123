@@ -5,12 +5,29 @@
 """
 
 import os
-from datetime import datetime
-from typing import Optional, Union
+from typing import Optional
 
 
 class File:
     """文件信息类"""
+
+    # API 原始字段 -> 对象属性名
+    _ATTR_MAP = {
+        'fileId': 'file_id',
+        'filename': 'filename',
+        'size': 'size',
+        'type': 'type',
+        'category': 'category',
+        'createAt': 'create_at',
+        'updateAt': 'update_at',
+        'parentFileId': 'parent_file_id',
+        'etag': 'etag',
+        'storageNode': 'storage_node',
+        'status': 'status',
+        'hidden': 'hidden',
+        'starred': 'starred',
+        'trashed': 'trashed',
+    }
 
     def __init__(self, data: dict):
         """
@@ -152,16 +169,24 @@ class File:
         return self.get(key)
 
     def __setitem__(self, key: str, value):
-        """支持字典式设置（兼容性）"""
+        """支持字典式设置（兼容性）
+
+        同时更新原始数据和对应的对象属性，否则 f['size'] = x 之后 f.size 仍是旧值。
+        """
         self._data[key] = value
-        # 清除缓存的计算属性
-        if key in ['size']:
-            self._size_formatted = None
-        elif key in ['category']:
-            self._category_name = None
-        elif key in ['type', 'filename', 'category']:
-            self._icon = None
-            self._is_folder = None
+
+        # 只映射已知字段，避免误覆盖 get/to_dict 等方法
+        attr_name = self._ATTR_MAP.get(key)
+        if attr_name is None and key in self._ATTR_MAP.values():
+            attr_name = key
+        if attr_name is not None:
+            setattr(self, attr_name, value)
+
+        # 清除缓存的计算属性，下次访问时按新值重算
+        self._size_formatted = None
+        self._category_name = None
+        self._icon = None
+        self._is_folder = None
 
     def __contains__(self, key: str) -> bool:
         """支持 'in' 操作符"""

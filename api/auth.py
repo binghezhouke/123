@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 import requests
@@ -27,6 +28,7 @@ class TokenManager:
         self.client_secret = client_secret
         self._access_token = None
         self._token_expires_at = 0
+        self._lock = threading.Lock()
 
     @property
     def access_token(self) -> str:
@@ -35,13 +37,23 @@ class TokenManager:
         return self._access_token
 
     def ensure_valid_token(self) -> None:
-        """确保令牌有效，如果无效则刷新"""
-        # 首先尝试从缓存加载
-        if self._try_load_from_cache():
+        """
+        确保令牌有效。
+
+        内存里已经有效就直接返回：既省掉每个请求读一次缓存文件，
+        也避免并发时多个线程同时去申请新 token —— 同一个 clientID
+        同时最多只能有 3 个 token，申请多了会互相挤掉。
+        """
+        if self.is_token_valid():
             return
 
-        # 缓存无效，从API获取新令牌
-        self._fetch_new_token()
+        with self._lock:
+            # 双重检查：等锁期间可能已经有别的线程刷新好了
+            if self.is_token_valid():
+                return
+
+            if not self._try_load_from_cache():
+                self._fetch_new_token()
 
     def _try_load_from_cache(self) -> bool:
         """尝试从缓存加载令牌"""
@@ -63,15 +75,23 @@ class TokenManager:
         return False
 
     def _save_to_cache(self, access_token: str, expires_at: float) -> None:
-        """保存令牌到缓存"""
+        """保存令牌到缓存（文件权限 0600，避免同机其他用户读取令牌）"""
         try:
-            os.makedirs(os.path.dirname(self.TOKEN_CACHE_FILE), exist_ok=True)
+            cache_dir = os.path.dirname(self.TOKEN_CACHE_FILE)
+            os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+            # makedirs 的 mode 只在创建时生效，已存在的目录需要显式收紧
+            os.chmod(cache_dir, 0o700)
+
             cache_data = {
                 "accessToken": access_token,
                 "tokenExpiresAt": expires_at
             }
-            with open(self.TOKEN_CACHE_FILE, 'w', encoding='utf-8') as f:
+            # 直接以 0600 打开写入，避免出现"先 0644 再 chmod"的窗口期
+            fd = os.open(self.TOKEN_CACHE_FILE,
+                         os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(cache_data, f)
+            os.chmod(self.TOKEN_CACHE_FILE, 0o600)
         except IOError as e:
             logger.warning("无法保存令牌到缓存: %s", e)
 
@@ -134,12 +154,15 @@ class TokenManager:
         return time.time() + expires_in
 
     def clear_cache(self) -> None:
-        """清除令牌缓存"""
-        try:
-            if os.path.exists(self.TOKEN_CACHE_FILE):
-                os.remove(self.TOKEN_CACHE_FILE)
-        except Exception as e:
-            logger.warning("清除令牌缓存失败: %s", e)
+        """清除令牌缓存（文件和内存里的都清掉，下次调用会重新申请）"""
+        with self._lock:
+            self._access_token = None
+            self._token_expires_at = 0
+            try:
+                if os.path.exists(self.TOKEN_CACHE_FILE):
+                    os.remove(self.TOKEN_CACHE_FILE)
+            except Exception as e:
+                logger.warning("清除令牌缓存失败: %s", e)
 
     def is_token_valid(self) -> bool:
         """检查当前令牌是否有效"""

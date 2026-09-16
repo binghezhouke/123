@@ -10,8 +10,10 @@
     "ENABLED": true
   },
   "WEBDAV": {
-    "USER": "your_webdav_username",
+    "ENABLED": false,
+    "USERNAME": "your_webdav_username",
     "PASSWORD": "your_webdav_password",
-    "HOST": "webdav-1836076489.pd1.123pan.cn"
+    "BASE_URL": "https://webdav-1836076489.pd1.123pan.cn",
+    "PATH_PREFIX": "/webdav"
   }
 }

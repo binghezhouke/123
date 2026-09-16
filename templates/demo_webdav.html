@@ -1,0 +1,188 @@
+{% extends "base.html" %}
+
+{% block title %}WebDAV 演示 - {{ file.filename }}{% endblock %}
+
+{% block content %}
+<!-- File Info Card -->
+<div class="card mb-4">
+    <div class="card-header" style="display: flex; align-items: center; gap: 16px;">
+        <div class="file-icon {{ 'folder' if file.is_folder else file.category|lower }}" style="width: 48px; height: 48px; font-size: 24px;">
+            <i class="{{ file.icon }}"></i>
+        </div>
+        <div>
+            <h4 style="margin: 0; font-weight: 600; font-size: 18px;">{{ file.filename }}</h4>
+            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;">
+                WebDAV 演示
+                {% if not file.is_folder %} · {{ file.size_formatted }}{% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-header">
+        <h6 style="margin: 0; font-weight: 600;">
+            <i class="fas fa-plug" style="margin-right: 8px; color: var(--accent-blue);"></i>WebDAV 直链
+        </h6>
+    </div>
+    <div class="card-body">
+        <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+            WebDAV 直链可以直接交给播放器、下载器或 <code>curl</code>/<code>aria2</code> 使用，
+            不经过开放平台接口，也不消耗接口配额。
+        </p>
+
+        {% if webdav_url %}
+            <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                <input type="text" id="webdavUrlInput" class="form-control" value="{{ webdav_url }}" readonly
+                       style="flex: 1 1 320px; font-family: monospace; font-size: 12px;">
+                <button class="btn btn-secondary" id="copyWebdavBtn" type="button">
+                    <i class="fas fa-copy" style="margin-right: 6px;"></i>复制
+                </button>
+            </div>
+            <div class="alert alert-warning" style="margin-top: 12px; font-size: 12px; padding: 10px 14px;">
+                <i class="fas fa-exclamation-triangle" style="margin-right: 6px;"></i>
+                链接里包含账号和密码，只在本机使用，不要转发或截图外发。
+            </div>
+        {% else %}
+            <div class="alert alert-danger" style="font-size: 13px;">
+                <i class="fas fa-times-circle" style="margin-right: 6px;"></i>
+                无法生成 WebDAV 链接：请检查 config.json 里的 WEBDAV 配置（ENABLED / USERNAME / PASSWORD / BASE_URL）。
+            </div>
+        {% endif %}
+    </div>
+</div>
+
+{% if webdav_url %}
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-header">
+        <h6 style="margin: 0; font-weight: 600;">
+            <i class="fas fa-play-circle" style="margin-right: 8px; color: var(--accent-red);"></i>在线播放 / 预览
+        </h6>
+    </div>
+    <div class="card-body">
+        {% set file_ext = file.filename.lower().split('.')[-1] if '.' in file.filename else '' %}
+        {% if file_ext in ['mp4', 'webm', 'mkv', 'mov', 'm4v'] %}
+            <video controls preload="metadata" style="width: 100%; border-radius: var(--radius-md); background: #000;"
+                   src="{{ webdav_url }}"></video>
+        {% elif file_ext in ['mp3', 'flac', 'wav', 'm4a', 'aac', 'ogg'] %}
+            <audio controls preload="metadata" style="width: 100%;" src="{{ webdav_url }}"></audio>
+        {% elif file_ext in ['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg'] %}
+            <img src="{{ webdav_url }}" alt="{{ file.filename }}"
+                 style="max-width: 100%; display: block; margin: 0 auto; border-radius: var(--radius-md);">
+        {% else %}
+            <div style="text-align: center; padding: 24px; background: rgba(0,0,0,0.02); border-radius: var(--radius-md);">
+                <i class="{{ file.icon }}" style="font-size: 40px; color: var(--text-tertiary);"></i>
+                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 12px;">
+                    该类型不支持浏览器内预览，可以把直链交给本地播放器
+                </div>
+            </div>
+        {% endif %}
+        <p style="font-size: 12px; color: var(--text-secondary); margin: 12px 0 0;">
+            预览是否能播放取决于服务端返回的内容类型与播放器支持情况。
+        </p>
+    </div>
+</div>
+
+<div class="card" style="margin-bottom: 20px;">
+    <div class="card-header">
+        <h6 style="margin: 0; font-weight: 600;">
+            <i class="fas fa-exchange-alt" style="margin-right: 8px; color: var(--accent-teal);"></i>探测 302 跳转后的真实地址
+        </h6>
+    </div>
+    <div class="card-body">
+        <p style="font-size: 13px; color: var(--text-secondary); margin-bottom: 12px;">
+            WebDAV 直链通常会 302 到 CDN 地址。这里把最终地址取出来，方便直接喂给下载工具。
+        </p>
+        <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+            <input type="text" id="redirectUrlInput" class="form-control" readonly
+                   placeholder="点击右侧按钮获取"
+                   style="flex: 1 1 320px; font-family: monospace; font-size: 12px;">
+            <button class="btn btn-primary" id="getRedirectBtn" type="button" data-file-id="{{ file.fileId }}">
+                <i class="fas fa-bolt" style="margin-right: 6px;"></i>获取
+            </button>
+            <button class="btn btn-secondary" id="copyRedirectBtn" type="button" style="display: none;">
+                <i class="fas fa-copy" style="margin-right: 6px;"></i>复制
+            </button>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<div style="display: flex; gap: 12px;">
+    <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" class="btn btn-secondary">
+        <i class="fas fa-info-circle" style="margin-right: 6px;"></i>文件详情
+    </a>
+    <a href="{{ url_for('main.index') }}" class="btn btn-ghost">
+        <i class="fas fa-home" style="margin-right: 6px;"></i>首页
+    </a>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+(function () {
+    // 复制 WebDAV 直链
+    const copyWebdavBtn = document.getElementById('copyWebdavBtn');
+    if (copyWebdavBtn) {
+        copyWebdavBtn.addEventListener('click', function () {
+            const input = document.getElementById('webdavUrlInput');
+            copyToClipboard(input.value, 'WebDAV 直链已复制');
+        });
+    }
+
+    const getRedirectBtn = document.getElementById('getRedirectBtn');
+    if (!getRedirectBtn) {
+        return;
+    }
+
+    const fileId = parseInt(getRedirectBtn.getAttribute('data-file-id'), 10);
+    const redirectInput = document.getElementById('redirectUrlInput');
+    const copyRedirectBtn = document.getElementById('copyRedirectBtn');
+
+    copyRedirectBtn.addEventListener('click', function () {
+        copyToClipboard(redirectInput.value, '下载地址已复制');
+    });
+
+    getRedirectBtn.addEventListener('click', function () {
+        if (!fileId || isNaN(fileId)) {
+            showToast('文件ID无效', 'error');
+            return;
+        }
+
+        const original = getRedirectBtn.innerHTML;
+        getRedirectBtn.disabled = true;
+        getRedirectBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 获取中...';
+        redirectInput.value = '';
+
+        fetch('/api/webdav/redirect/' + fileId)
+            .then(response => response.json())
+            .then(data => {
+                if (data.success && data.redirect_url) {
+                    redirectInput.value = data.redirect_url;
+                    copyRedirectBtn.style.display = 'inline-block';
+                    showToast('已获取跳转地址', 'success');
+                } else {
+                    redirectInput.value = '';
+                    showToast(data.error || '获取跳转地址失败', 'error');
+                }
+            })
+            .catch(error => {
+                showToast('请求失败: ' + error.message, 'error');
+            })
+            .finally(() => {
+                getRedirectBtn.disabled = false;
+                getRedirectBtn.innerHTML = original;
+            });
+    });
+
+    function copyToClipboard(text, okMessage) {
+        if (!text) {
+            return;
+        }
+        navigator.clipboard.writeText(text)
+            .then(() => showToast(okMessage, 'success'))
+            .catch(() => showToast('复制失败，请手动选择文本', 'error'));
+    }
+})();
+</script>
+{% endblock %}

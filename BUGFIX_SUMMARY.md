@@ -45,7 +45,7 @@
 ```json
 {
   "file_id": 7941880,
-  "redirect_url": "https://18600890002:14uiusl1000d9xhn8s4ozokygfeeyl7d@webdav-1836076489.pd1.123pan.cn/webdav/%E6%9D%A5%E8%87%AA%EF%BC%9ABT%E7%A3%81%E5%8A%9B%E9%93%BE%E4%B8%8B%E8%BD%BD",
+  "redirect_url": "https://***:***@webdav-1836076489.pd1.123pan.cn/webdav/%E6%9D%A5%E8%87%AA%EF%BC%9ABT%E7%A3%81%E5%8A%9B%E9%93%BE%E4%B8%8B%E8%BD%BD",
   "success": true
 }
 ```
@@ -54,7 +54,7 @@
 
 ```json
 {
-  "download_url": "https://18600890002:14uiusl1000d9xhn8s4ozokygfeeyl7d@webdav-1836076489.pd1.123pan.cn/webdav/%E6%9D%A5%E8%87%AA%EF%BC%9ABT%E7%A3%81%E5%8A%9B%E9%93%BE%E4%B8%8B%E8%BD%BD",
+  "download_url": "https://***:***@webdav-1836076489.pd1.123pan.cn/webdav/%E6%9D%A5%E8%87%AA%EF%BC%9ABT%E7%A3%81%E5%8A%9B%E9%93%BE%E4%B8%8B%E8%BD%BD",
   "file_id": 7941880,
   "success": true,
   "url_type": "webdav"

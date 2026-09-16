@@ -1,67 +1,47 @@
-# 123 云盘文件浏览器 AI 指导
+# 123 云盘工具箱 AI 指导
 
-欢迎！本文档旨在帮助你快速理解此代码库并高效地做出贡献。
+本文档帮助你快速理解此代码库并高效地做出贡献。面向用户的使用说明见根目录 `README.md`。
 
 ## 1. 项目概述
 
-这是一个基于 Flask 的 Web 应用，作为第三方“123 云盘”的图形化文件浏览器。它通过调用官方的 `open-api.123pan.com` API 来实现文件列表、搜索、详情查看和下载链接获取等功能。
+三部分：
 
-项目核心分为两大部分：
-
-1.  **Flask 前端** (`app.py`, `templates/`, `static/`): 处理用户请求，渲染页面。
-2.  **123 云盘 API 客户端库** (`api/`): 封装了与云盘 API 交互的所有逻辑，是一个独立的、可重用的组件。
+1. **客户端库** (`api/`)：封装 `open-api.123pan.com`，是独立可复用的组件。唯一公共入口是 `api.client.Pan123Client`。
+2. **Flask 前端** (`app.py`, `routes/`, `templates/`, `static/`)：只与 `Pan123Client` 通信。
+3. **上传脚本** (`upload_core.py` + `upload_folder.py` / `upload_from_json.py` / `batch_upload.py`)：命令行批量上传。
 
 ## 2. 关键架构和数据流
 
-理解 `api/` 目录的结构至关重要。所有与外部 API 的交互都由这个库处理。
-
-- **主入口点**: `api.client.Pan123Client` 是与 API 交互的唯一公共接口。Flask 应用 (`app.py`) 只与这个类通信。
-- **关注点分离**: `Pan123Client` 将具体任务委托给专门的模块：
-  - `api.file_service.FileService`: 实现所有文件相关的业务逻辑（如列出文件、获取信息、生成 WebDAV URL）。
-  - `api.http_client.RequestHandler`: 负责构造和发送所有 HTTP 请求，并处理标准的 API 响应和错误。
-  - `api.auth.TokenManager`: 自动管理 API 的 `access_token`，包括获取、缓存和刷新。
-  - `api.cache.FileCacheManager`: 使用 Redis 缓存文件元数据（如文件详情、路径），以减少不必要的 API 调用。
-  - `api.config.ConfigManager`: 从 `config.json` 文件中安全地读取配置信息（如客户端凭据、WebDAV 设置）。
-  - `api.models.py`: 定义了核心数据结构，如 `File` 和 `File`，用于封装 API 返回的数据，提供了类型安全和便捷的方法。
-
-**典型数据流 (例如：列出文件):**
-
-1.  浏览器请求 `app.py` 中的 `/` 路由。
-2.  路由调用 `client.list_files()` (`client` 是 `Pan123Client` 的实例)。
-3.  `Pan123Client` 将调用委托给 `file_service.list_files()`。
-4.  `FileService` 调用 `http_client.get()` 来请求云盘 API。
-5.  `RequestHandler` 在发送请求前，会向 `token_manager.ensure_valid_token()` 请求一个有效的令牌。
-6.  `FileService` 收到响应后，可能会将结果存入 `cache_manager`。
-7.  数据被包装成 `FileList` 对象并返回给 `app.py`。
-8.  `app.py` 将 `FileList` 对象传递给 Jinja2 模板进行渲染。
+- `Pan123Client` 把任务委托给专门模块：
+  - `api/file_service.FileService`：文件列表/搜索、路径、下载地址、WebDAV、分钟目录创建、上传与秒传。
+  - `api/http_client.RequestHandler`：构造和发送 HTTP 请求，统一处理重试（5xx、业务码 429 / 20103）。
+  - `api/auth.TokenManager`：token 获取/缓存/刷新。缓存固定在 `~/.cache/pan123_api/token.json`（0600 权限）。
+  - `api/cache.FileCacheManager`：Redis 缓存文件元数据，JSON 序列化（不要改回 pickle）。
+  - `api/config.ConfigManager`：读取 `config.json`（WebDAV 键名 `USERNAME` / `BASE_URL` / `PATH_PREFIX`，兼容旧名 `USER` / `HOST`）。
+  - `api/models.py`：`File` / `FileList` 数据模型，模板里用的就是这些对象。
+- **典型数据流（列出文件）**：路由 `routes/main.py` → `Pan123Client.list_files()` → `FileService.list_files()` → `RequestHandler.get()`（发请求前经 `TokenManager` 取有效 token）→ 结果包装成 `FileList` 交给 Jinja2 模板。
+- **上传链路**：`upload_core.py` 负责清单解析、哈希归一化、`RemoteDirTree` 目录缓存、`RemoteIndex` 目录快照判重、`ExportTreeIndex` 目录树导出索引（`--tree`）、限速、秒传执行和 `UploadStats` 统计；三个 CLI 只做参数解析和输出。判重只看云端现状，不依赖任何本地"已完成"记录。改动上传行为请改 `upload_core.py`，不要在脚本里各写一份。
 
 ## 3. 开发工作流
 
-### 设置
-
-1.  **安装依赖**: 项目使用 `uv` 进行包管理。运行 `uv pip install -r requirements.txt` 来安装依赖。
-2.  **配置**:
-    - 复制 `config.json.template` 到 `config.json`。
-    - 在 `config.json` 中填入你的 `clientID` 和 `clientSecret`。
-    - 确保 Redis 服务正在运行，并根据需要更新 `app.py` 中 `init_client` 函数的 Redis 连接参数。
-
-### 运行应用
-
-直接运行主应用文件即可启动开发服务器：
-
 ```bash
-python app.py
+uv sync --group dev      # 安装依赖（含 pytest / ruff）
+uv run python app.py     # 启动 Web 应用，http://localhost:8080
+uv run pytest -q         # 跑测试
+uv run ruff check .      # 静态检查
 ```
 
-服务器将运行在 `http://localhost:8080`。
+CI 见 `.github/workflows/ci.yml`，push / PR 时执行上面两条命令。
+
+配置：`cp config.json.template config.json`，填入 `CLIENT_ID` / `CLIENT_SECRET`。Redis 可选，连不上会自动降级。测试不需要网络、Redis 或真实配置。
 
 ## 4. 项目约定
 
-- **模型优先**: API 的原始 JSON 响应会被立即转换成 `api/models.py` 中定义的 `File` 或 `FileList` 对象。在整个应用中（包括模板）都应传递和使用这些对象，而不是原始字典，以确保代码的清晰和可维护性。
-- **缓存策略**: `FileService` 和 `FileCacheManager` 负责缓存逻辑。默认情况下，获取文件详情会优先从 Redis 缓存中读取。在修改了可能影响缓存数据的逻辑时，请考虑缓存的更新或失效策略。
-- **错误处理**: API 相关的错误应在 `api/` 库中被捕获，并重新抛出为自定义的 `Pan123APIError` 异常。Flask 应用层 (`app.py`) 负责捕获此异常并向用户显示友好的错误消息。
-- **配置管理**: 严禁在代码中硬编码任何敏感信息（如密钥、密码）。所有配置都应通过 `ConfigManager` 从 `config.json` 加载。
-
----
-
-这份文档是否清晰？有没有哪些部分你觉得不够详细或者有疑问，我可以为你进一步说明。
+- **模型优先**：API 原始 JSON 立即转成 `File` / `FileList` 对象再往下传，模板里也用这些对象。
+- **秒传口径**：秒传接口只有 `reuse=true` 算成功；返回 `None` 表示"云端没有该文件"；调用失败必须抛异常。统计时不能把失败算作"未命中"。见 `upload_core.STATUS_*`。
+- **分页**：结束判断只能看服务端返回的原始条数或 `lastFileId == -1`。`_fetch_page` 会过滤回收站记录，用过滤后的条数判断会提前截断结果。
+- **错误处理**：API 错误在 `api/` 内统一抛 `Pan123APIError` 及子类，Flask 层负责转成友好提示。
+- **重试**：只在 `api/http_client.py` 里做，业务层不要再加一套。
+- **敏感信息**：不要硬编码任何密钥、密码、token；不要把这些内容写进 md 文档（历史上有过一次明文密码进仓库的事故）。WebDAV 密码会拼进 URL，日志输出必须走 `_mask_credentials`。
+- **限流**：同一 `client_id` 最多 3 个 token（`TokenManager` 里有锁 + 内存缓存，避免并发刷新把 token 挤掉）；限流是账号级的，超过约 8 请求/秒会返回业务码 1「请慢一点」，`RequestHandler` 已把它加入重试白名单并带抖动退避，批量上传通过 `api/ratelimit.TokenBucket` 主动限速；目录创建保持串行。
+- **判重**：目标目录快照（`RemoteIndex`）里文件记录带 32 位 MD5 etag、目录记录带目录ID，所以判重和"免建目录"都靠列目录实现。清单只有 SHA1 时按同名同大小弱判等，MD5 冲突要单独报出来而不是静默跳过。

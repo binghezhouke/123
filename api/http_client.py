@@ -1,6 +1,7 @@
 """
 HTTP请求处理器（带集中重试逻辑）
 """
+import random
 import requests
 import time
 from typing import Dict, Any, Optional, Set
@@ -11,8 +12,11 @@ class RequestHandler:
     """HTTP请求处理器，网络层统一负责重试逻辑"""
 
     PLATFORM_HEADER = "open_platform"
+    # 业务码 1 是"请慢一点"（账号级限流），429 是"全站请求过于频繁"，
+    # 20103 是"文件校验中"。这三种都是可重试的临时状态。
+    DEFAULT_RETRY_API_CODES = {1, 429, 20103}
 
-    def __init__(self, base_url: str, token_manager, *, max_retries: int = 5, retry_delay: float = 0.5, backoff_factor: float = 2.0, retry_api_codes: Optional[Set[int]] = None):
+    def __init__(self, base_url: str, token_manager, *, max_retries: int = 5, retry_delay: float = 0.5, backoff_factor: float = 2.0, retry_api_codes: Optional[Set[int]] = None, rate_limiter=None):
         self.base_url = base_url
         self.token_manager = token_manager
         self.session = requests.Session()
@@ -22,9 +26,23 @@ class RequestHandler:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.backoff_factor = backoff_factor
-        # 默认重试业务码：429 (Too Many Requests) 与 20103 (文件校验中)
         self.retry_api_codes = set(
-            retry_api_codes) if retry_api_codes is not None else {429, 20103}
+            retry_api_codes) if retry_api_codes is not None else set(self.DEFAULT_RETRY_API_CODES)
+        # 可选限速器（见 api/ratelimit.py），批量上传时由 upload_core 安装
+        self.rate_limiter = rate_limiter
+
+    def set_rate_limiter(self, rate_limiter) -> None:
+        """安装/替换限速器；传 None 表示不限速。"""
+        self.rate_limiter = rate_limiter
+
+    def _backoff_sleep(self, attempt: int) -> None:
+        """指数退避 + 抖动。
+
+        抖动是必要的：并发场景下所有线程会在同一时刻失败，
+        固定退避会让它们同时重试、再次撞上限流。
+        """
+        base = self.retry_delay * (self.backoff_factor ** (attempt - 1))
+        time.sleep(base * random.uniform(0.6, 1.6))
 
     def _update_auth_header(self) -> None:
         """更新认证头"""
@@ -45,6 +63,8 @@ class RequestHandler:
 
         attempt = 0
         while True:
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire()
             try:
                 response = self.session.request(
                     method, url, timeout=30, **kwargs)
@@ -53,9 +73,7 @@ class RequestHandler:
                 if 500 <= response.status_code < 600:
                     if attempt < self.max_retries:
                         attempt += 1
-                        sleep_time = self.retry_delay * \
-                            (self.backoff_factor ** (attempt - 1))
-                        time.sleep(sleep_time)
+                        self._backoff_sleep(attempt)
                         continue
                     response.raise_for_status()
 
@@ -67,9 +85,7 @@ class RequestHandler:
                         if code is not None and code in self.retry_api_codes:
                             if attempt < self.max_retries:
                                 attempt += 1
-                                sleep_time = self.retry_delay * \
-                                    (self.backoff_factor ** (attempt - 1))
-                                time.sleep(sleep_time)
+                                self._backoff_sleep(attempt)
                                 continue
                 except ValueError:
                     # 非 JSON 响应则按普通流程继续
@@ -88,9 +104,7 @@ class RequestHandler:
                 # 网络级错误（连接、超时等），尝试重试，超出则抛出 NetworkError
                 if attempt < self.max_retries:
                     attempt += 1
-                    sleep_time = self.retry_delay * \
-                        (self.backoff_factor ** (attempt - 1))
-                    time.sleep(sleep_time)
+                    self._backoff_sleep(attempt)
                     continue
                 raise NetworkError(f"网络请求失败: {e}")
 
