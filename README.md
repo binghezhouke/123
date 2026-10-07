@@ -145,6 +145,15 @@ uv run python batch_upload.py /path/to/manifest_dir -d 远程前缀目录 -w 16
   ✅ 完成 (83.2s) 合计 123,456 条：已有 122,000（目录树 121,000，MD5 一致 1,000），秒传 1,450，未命中 5，失败 1
 ```
 
+### 核对备份清单
+
+```bash
+uv run python reconcile_backups.py manifest.json report.json
+```
+
+将包含 `files` 数组的本地清单与远程 `/backups` 按相对路径、大小和 MD5/etag 比较，
+报告输出已匹配、缺失和不一致的文件；不会修改云端文件。
+
 ### 结果口径
 
 | 结果 | 含义 |
