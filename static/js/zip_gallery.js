@@ -9,10 +9,11 @@
     const MAX_CACHE_IMAGES = 30;
     const MAX_CACHE_BYTES = 256 * 1024 * 1024;
     let selected = 0;
+    let direction = 1;
     let generation = 0;
     const pending = new Map();
     let touchStart;
-    const PREFETCH_AHEAD = 9;
+    const PREFETCH_COUNT = 9;
     const PREFETCH_CONCURRENCY = 2;
     const attempted = new Set();
     let prefetchReady = false;
@@ -26,7 +27,8 @@
     }
     function prune() {
         for (const [index, task] of pending) {
-            if (index < selected - 1 || index > selected + PREFETCH_AHEAD) {
+            const distance = (index - selected) * direction;
+            if (distance < -1 || distance > PREFETCH_COUNT) {
                 task.controller.abort();
                 pending.delete(index);
             }
@@ -75,8 +77,9 @@
     }
     function pumpPrefetch() {
         if (!dialog.open || !prefetchReady) return;
-        const end = Math.min(buttons.length - 1, selected + PREFETCH_AHEAD);
-        for (let index = selected + 1; index <= end; index++) {
+        for (let step = 1; step <= PREFETCH_COUNT; step++) {
+            const index = selected + step * direction;
+            if (index < 0 || index >= buttons.length) break;
             if (pending.size >= PREFETCH_CONCURRENCY) break;
             if (cache.has(index) || pending.has(index) || attempted.has(index)) continue;
             // Attempt each image once per selection, even when the byte budget evicts it.
@@ -86,6 +89,7 @@
     }
     async function show(index) {
         if (index < 0 || index >= buttons.length) return;
+        if (index !== selected) direction = Math.sign(index - selected);
         selected = index;
         prefetchReady = false;
         attempted.clear();
@@ -124,6 +128,10 @@
         }
     }
     buttons.forEach((button, index) => button.addEventListener('click', () => {
+        if (!dialog.open) {
+            direction = 1;
+            selected = index;
+        }
         dialog.showModal();
         show(index);
     }));

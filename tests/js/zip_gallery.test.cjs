@@ -162,3 +162,69 @@ test('byte-budget eviction does not cause endless prefetch refetching', async ()
     assert.equal(requests.filter(r => !r.done).length, 0);
     assert.equal(get('zip-gallery-stage').children[0].alt, '0.jpg');
 });
+
+async function drainPrefetch(requests) {
+    for (let round = 0; round < 12; round++) {
+        const active = requests.filter(r => !r.done && !r.signal.aborted);
+        if (!active.length) return;
+        assert.ok(active.length <= 2);
+        for (const request of active) { request.done = true; request.resolve(); }
+        await tick();
+    }
+    assert.fail('prefetch must stop after filling the directional window');
+}
+
+test('reverse navigation prefetches nine previous images nearest first and rolls backward', async () => {
+    const {buttons, get, requests} = setup({count: 20});
+    await loadImage(buttons, get, requests, 19);
+    get('zip-gallery').handlers.keydown({key: 'ArrowLeft', preventDefault() {}});
+    requests.at(-1).done = true;
+    requests.at(-1).resolve();
+    await tick();
+    get('zip-gallery-stage').children[0].onload();
+    await drainPrefetch(requests);
+    assert.deepEqual(requests.map(r => r.url), Array.from({length: 11}, (_, i) => `/member/${19 - i}`));
+    get('zip-gallery-prev').onclick();
+    await tick();
+    get('zip-gallery-stage').children[0].onload();
+    assert.equal(requests.at(-1).url, '/member/8');
+    assert.equal(requests.filter(r => r.url === '/member/17').length, 1);
+});
+
+test('reversing cancels obsolete forward requests and changing back cancels backward requests', async () => {
+    const {buttons, get, requests} = setup({count: 30});
+    await loadImage(buttons, get, requests, 10);
+    const ahead = requests.filter(r => !r.done);
+    assert.deepEqual(ahead.map(r => r.url), ['/member/11', '/member/12']);
+    get('zip-gallery-prev').onclick();
+    assert.ok(ahead.every(r => r.signal.aborted));
+    requests.at(-1).done = true;
+    requests.at(-1).resolve();
+    await tick();
+    get('zip-gallery-stage').children[0].onload();
+    const behind = requests.filter(r => !r.done && !r.signal.aborted);
+    assert.deepEqual(behind.map(r => r.url), ['/member/8', '/member/7']);
+    get('zip-gallery-next').onclick();
+    await tick();
+    get('zip-gallery-stage').children[0].onload();
+    assert.ok(behind.every(r => r.signal.aborted));
+    assert.deepEqual(requests.filter(r => !r.done && !r.signal.aborted).map(r => r.url), ['/member/11', '/member/12']);
+});
+
+test('retry preserves backward direction and a fresh open starts forward again', async () => {
+    const {buttons, get, requests} = setup({count: 20});
+    await loadImage(buttons, get, requests, 19);
+    await loadImage(buttons, get, requests, 18);
+    const behind = requests.filter(r => !r.done && !r.signal.aborted);
+    assert.deepEqual(behind.map(r => r.url), ['/member/17', '/member/16']);
+    get('zip-gallery-retry').onclick();
+    assert.ok(behind.every(r => !r.signal.aborted));
+    requests.at(-1).done = true;
+    requests.at(-1).resolve();
+    await tick();
+    get('zip-gallery-stage').children[0].onload();
+    assert.equal(requests.filter(r => r.url === '/member/19').length, 1);
+    get('zip-gallery-close').onclick();
+    await loadImage(buttons, get, requests, 10);
+    assert.deepEqual(requests.filter(r => !r.done && !r.signal.aborted).map(r => r.url), ['/member/11', '/member/12']);
+});
