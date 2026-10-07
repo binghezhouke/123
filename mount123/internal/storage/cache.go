@@ -173,6 +173,14 @@ func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(c
 				return nil, ctx.Err()
 			case <-done:
 				if f.err != nil {
+					// A fill belongs to its initiating caller. If that caller
+					// cancels, live waiters should get a chance to own a retry.
+					if errors.Is(f.err, context.Canceled) || errors.Is(f.err, context.DeadlineExceeded) {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						continue
+					}
 					return nil, f.err
 				}
 				continue

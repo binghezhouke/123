@@ -21,7 +21,7 @@ const remoteRequestTimeout = 45 * time.Second
 type ResolveURL func(context.Context) (string, error)
 
 type Remote struct {
-	ctx            context.Context
+	lifetimeCtx    context.Context
 	cache          *Cache
 	size           int64
 	key            string
@@ -36,13 +36,21 @@ type Remote struct {
 // NewRemote probes byte zero to establish the remote entity validator and
 // confirms that the endpoint supports exact HTTP ranges.
 func NewRemote(ctx context.Context, cache *Cache, key string, size int64, resolve ResolveURL) (*Remote, error) {
+	return NewRemoteContext(ctx, ctx, cache, key, size, resolve)
+}
+
+// NewRemoteContext probes the remote using both the mount lifetime and the
+// operation context. Only lifetimeCtx is retained for subsequent ReadAt calls.
+func NewRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, key string, size int64, resolve ResolveURL) (*Remote, error) {
 	if cache == nil || resolve == nil || size < 0 {
 		return nil, errors.New("invalid remote reader configuration")
 	}
-	if ctx == nil {
-		ctx = context.Background()
+	if lifetimeCtx == nil {
+		lifetimeCtx = context.Background()
 	}
-	r := &Remote{ctx: ctx, cache: cache, size: size, key: key, resolve: resolve, client: http.DefaultClient}
+	ctx, cancel := combineContexts(lifetimeCtx, operationCtx)
+	defer cancel()
+	r := &Remote{lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: key, resolve: resolve, client: http.DefaultClient}
 	if size == 0 {
 		r.key = namespaceWithoutValidator(key)
 		return r, nil
@@ -59,7 +67,10 @@ func NewRemote(ctx context.Context, cache *Cache, key string, size int64, resolv
 		return nil, err
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 2))
-	if err != nil || len(body) != 1 {
+	if err != nil {
+		return nil, contextError(ctx, err, "remote range probe returned an invalid body")
+	}
+	if len(body) != 1 {
 		return nil, errors.New("remote range probe returned an invalid body")
 	}
 	r.etag = resp.Header.Get("ETag")
@@ -77,6 +88,34 @@ func NewRemote(ctx context.Context, cache *Cache, key string, size int64, resolv
 	return r, nil
 }
 
+func combineContexts(lifetimeCtx, operationCtx context.Context) (context.Context, context.CancelFunc) {
+	if lifetimeCtx == nil {
+		lifetimeCtx = context.Background()
+	}
+	if operationCtx == nil {
+		operationCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(operationCtx)
+	stop := context.AfterFunc(lifetimeCtx, cancel)
+	if lifetimeCtx.Err() != nil {
+		cancel()
+	}
+	return ctx, func() { stop(); cancel() }
+}
+
+func contextError(ctx context.Context, err error, fallback string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return context.DeadlineExceeded
+	}
+	return errors.New(fallback)
+}
+
 func namespaceWithoutValidator(key string) string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -92,7 +131,7 @@ func (r *Remote) refresh(ctx context.Context) error {
 	defer cancel()
 	u, err := r.resolve(cctx)
 	if err != nil || u == "" {
-		return errors.New("could not resolve remote download URL")
+		return contextError(ctx, err, "could not resolve remote download URL")
 	}
 	r.mu.Lock()
 	r.url = u
@@ -133,7 +172,7 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 		resp, err := r.client.Do(req)
 		if err != nil {
 			cancel()
-			return nil, errors.New("remote range request failed")
+			return nil, contextError(ctx, err, "remote range request failed")
 		}
 		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
 		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) && attempt == 0 {
@@ -178,6 +217,17 @@ func checkRangeResponse(resp *http.Response, start, end, total int64) error {
 }
 
 func (r *Remote) ReadAt(p []byte, off int64) (int, error) {
+	return r.ReadAtContext(r.lifetimeCtx, p, off)
+}
+
+// ReadAtContext reads from the remote while observing both ctx and the
+// lifetime context supplied when the Remote was constructed.
+func (r *Remote) ReadAtContext(operationCtx context.Context, p []byte, off int64) (int, error) {
+	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if off < 0 {
 		return 0, errors.New("negative offset")
 	}
@@ -193,6 +243,9 @@ func (r *Remote) ReadAt(p []byte, off int64) (int, error) {
 	}
 	read := 0
 	for read < want {
+		if err := ctx.Err(); err != nil {
+			return read, err
+		}
 		pos := off + int64(read)
 		block := pos / remoteBlockSize
 		start := block * remoteBlockSize
@@ -202,7 +255,7 @@ func (r *Remote) ReadAt(p []byte, off int64) (int, error) {
 		}
 		nblock := end - start + 1
 		cacheKey := fmt.Sprintf("remote:%s:%d:%d", r.key, block, nblock)
-		h, err := r.cache.Acquire(r.ctx, cacheKey, nblock, func(ctx context.Context, w io.Writer) error { return r.fetchBlock(ctx, start, end, w) })
+		h, err := r.cache.Acquire(ctx, cacheKey, nblock, func(ctx context.Context, w io.Writer) error { return r.fetchBlock(ctx, start, end, w) })
 		if err != nil {
 			if read > 0 {
 				return read, err
@@ -253,7 +306,7 @@ func (r *Remote) fetchBlock(ctx context.Context, start, end int64, w io.Writer) 
 	}
 	n, err := io.Copy(w, io.LimitReader(resp.Body, end-start+2))
 	if err != nil {
-		return errors.New("could not read remote range")
+		return contextError(ctx, err, "could not read remote range")
 	}
 	if n != end-start+1 {
 		return errors.New("remote range body length mismatch")

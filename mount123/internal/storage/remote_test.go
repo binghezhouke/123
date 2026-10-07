@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRemoteRangeReadsAndCachesBlocks(t *testing.T) {
@@ -68,6 +70,178 @@ func TestRemoteRangeReadsAndCachesBlocks(t *testing.T) {
 	}
 	if _, err = r.ReadAt(make([]byte, 8), int64(len(data))-4); err != io.EOF {
 		t.Fatalf("short read error = %v", err)
+	}
+}
+
+func TestRemoteReadAtContextCancelsHTTPAndBody(t *testing.T) {
+	for _, phase := range []string{"request", "body"} {
+		t.Run(phase, func(t *testing.T) {
+			started := make(chan struct{})
+			var calls atomic.Int32
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if calls.Add(1) == 1 {
+					w.Header().Set("ETag", `"v1"`)
+					w.Header().Set("Content-Range", "bytes 0-0/1")
+					w.WriteHeader(206)
+					_, _ = w.Write([]byte("x"))
+					return
+				}
+				close(started)
+				if phase == "body" {
+					w.Header().Set("ETag", `"v1"`)
+					w.Header().Set("Content-Range", "bytes 0-0/1")
+					w.WriteHeader(206)
+					w.(http.Flusher).Flush()
+				}
+				<-req.Context().Done()
+			}))
+			defer s.Close()
+			c, err := NewCache(t.TempDir(), 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			r, err := NewRemote(context.Background(), c, "cancel-"+phase, 1, func(context.Context) (string, error) { return s.URL, nil })
+			if err != nil {
+				t.Fatal(err)
+			}
+			readCtx, cancel := context.WithCancel(context.Background())
+			result := make(chan error, 1)
+			go func() { _, readErr := r.ReadAtContext(readCtx, make([]byte, 1), 0); result <- readErr }()
+			<-started
+			cancel()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("read error = %v, want context.Canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled read did not return promptly")
+			}
+		})
+	}
+}
+
+func TestNewRemoteContextProbeCancellationAndOperationLifetime(t *testing.T) {
+	for _, phase := range []string{"request", "body"} {
+		t.Run("canceled-"+phase, func(t *testing.T) {
+			started := make(chan struct{})
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				close(started)
+				if phase == "body" {
+					w.Header().Set("Content-Range", "bytes 0-0/1")
+					w.WriteHeader(http.StatusPartialContent)
+					w.(http.Flusher).Flush()
+				}
+				<-req.Context().Done()
+			}))
+			defer s.Close()
+			c, err := NewCache(t.TempDir(), 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			lifetime := context.Background()
+			operation, cancel := context.WithCancel(context.Background())
+			result := make(chan error, 1)
+			go func() {
+				_, e := NewRemoteContext(lifetime, operation, c, "probe-"+phase, 1, func(context.Context) (string, error) { return s.URL, nil })
+				result <- e
+			}()
+			<-started
+			cancel()
+			select {
+			case err := <-result:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("probe error = %v, want context.Canceled", err)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("canceled probe did not return promptly")
+			}
+		})
+	}
+	t.Run("operation-context-is-not-retained", func(t *testing.T) {
+		var calls atomic.Int32
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			calls.Add(1)
+			w.Header().Set("ETag", `"v1"`)
+			w.Header().Set("Content-Range", "bytes 0-0/1")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("x"))
+		}))
+		defer s.Close()
+		c, err := NewCache(t.TempDir(), 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer c.Close()
+		operation, cancel := context.WithCancel(context.Background())
+		r, err := NewRemoteContext(context.Background(), operation, c, "detached", 1, func(context.Context) (string, error) { return s.URL, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		cancel()
+		if _, err = r.ReadAt(make([]byte, 1), 0); err != nil {
+			t.Fatalf("read retained constructor context: %v", err)
+		}
+		if calls.Load() != 2 {
+			t.Fatalf("server calls = %d, want probe plus read", calls.Load())
+		}
+	})
+}
+
+func TestRemoteReadAtContextOperationsAreIndependent(t *testing.T) {
+	started := make(chan struct{}, 2)
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		call := calls.Add(1)
+		if call == 1 {
+			w.Header().Set("ETag", `"v1"`)
+			w.Header().Set("Content-Range", "bytes 0-0/1")
+			w.WriteHeader(206)
+			_, _ = w.Write([]byte("x"))
+			return
+		}
+		started <- struct{}{}
+		if call == 2 {
+			<-req.Context().Done()
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Content-Range", "bytes 0-0/1")
+		w.WriteHeader(206)
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "independent", 1, func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	defer cancel1()
+	ctx2 := context.Background()
+	first := make(chan error, 1)
+	second := make(chan error, 1)
+	go func() { _, e := r.ReadAtContext(ctx1, make([]byte, 1), 0); first <- e }()
+	<-started
+	go func() { _, e := r.ReadAtContext(ctx2, make([]byte, 1), 0); second <- e }()
+	time.Sleep(20 * time.Millisecond) // let the second read join the first fill
+	cancel1()
+	if err = <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first read error = %v", err)
+	}
+	select {
+	case <-started: // the live waiter took over and retried the canceled fill
+	case <-time.After(time.Second):
+		t.Fatal("live waiter did not retry canceled fill")
+	}
+	if err = <-second; err != nil {
+		t.Fatalf("independent read failed: %v", err)
 	}
 }
 
@@ -165,8 +339,8 @@ func TestRemoteReadsUseMountLifetimeContext(t *testing.T) {
 	<-started
 	cancel()
 	close(release)
-	if err = <-result; err == nil {
-		t.Fatal("expected canceled range read")
+	if err = <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("range read error = %v, want context.Canceled", err)
 	}
 }
 
