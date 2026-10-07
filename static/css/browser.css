@@ -219,3 +219,20 @@ button:disabled { opacity: .4; cursor: default; }
 }
 .archive-browser tbody td:first-child:not([colspan])::before,
 .archive-browser thead th:first-child::before { margin-right: 12px; }
+
+/* Column boundaries are also keyboard- and touch-operable. */
+[data-column-layout] .file-list-header > div,
+[data-column-layout] thead th { position: relative; }
+.column-resizer { position: absolute; top: 0; bottom: 0; right: -7px; width: 14px; z-index: 2; cursor: col-resize; touch-action: none; }
+thead .column-resizer { right: 0; }
+.column-resizer::after { content: ''; position: absolute; top: 22%; bottom: 22%; left: 6px; width: 2px; background: #cdd5e0; border-radius: 1px; }
+.column-resizer:hover::after, .column-resizer:focus-visible::after { background: #508bd9; }
+.column-resizer:focus-visible { outline: 2px solid #508bd9; outline-offset: -2px; }
+.resizing-columns, .resizing-columns * { cursor: col-resize !important; user-select: none !important; }
+.file-list[data-column-layout] { overflow-x: auto; }
+.file-list[data-column-layout] .file-list-header { padding-right: 44px; }
+.file-list.columns-sized > .file-list-header,
+.file-list.columns-sized > .file-list-row { grid-template-columns: var(--list-columns); width: var(--list-width); min-width: 100%; box-sizing: border-box; }
+.archive-browser .table-responsive { overflow-x: auto; max-width: 100%; }
+table.columns-sized { table-layout: fixed; min-width: 0; }
+table.columns-sized th, table.columns-sized td { overflow-wrap: anywhere; min-width: 0 !important; }

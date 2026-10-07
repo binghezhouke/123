@@ -40,7 +40,7 @@
         {% endif %}
         {% if not password_required %}
         <div class="table-responsive">
-            <table class="table">
+            <table class="table" data-column-layout="archive">
                 <thead><tr><th>名称</th><th>解压后大小</th><th>操作</th></tr></thead>
                 <tbody>
                 {% for folder in folders %}
