@@ -8,7 +8,7 @@ import time
 import uuid
 import logging
 import json
-from concurrent.futures import ThreadPoolExecutor
+from queue import Queue
 from pathlib import Path
 from .zip_preview import ZipPreviewError
 
@@ -41,7 +41,9 @@ class ArchivePreparationJobs:
         except OSError:
             pass
         self.max_bytes, self.ttl, self.max_jobs = max_bytes, ttl, max_jobs
-        self.executor = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="archive-prepare")
+        self.queue = Queue()
+        self.worker_count = max(1, workers)
+        self.threads = []
         self.lock = threading.RLock()
         self.jobs = {}
         self.cache = {}
@@ -127,8 +129,30 @@ class ArchivePreparationJobs:
             job_id = uuid.uuid4().hex
             record = {"id": job_id, "owner": owner, "cache_key": cache_key, "state": "queued", "phase": "排队中", "processed": 0, "total": None, "error": None, "cancel": threading.Event(), "path": None, "created": time.time()}
             self.jobs[job_id] = record
-            self.executor.submit(self._run, record, worker)
+            if not self.threads:
+                for index in range(self.worker_count):
+                    thread = threading.Thread(target=self._consume, name=f"archive-prepare-{index}", daemon=True)
+                    self.threads.append(thread)
+                    thread.start()
+            self.queue.put((record, worker))
             return {"id": job_id, "cached": False}
+
+    def _consume(self):
+        # Daemon workers allow the registered shutdown hook to cancel before joining.
+        while True:
+            item = self.queue.get()
+            try:
+                if item is None:
+                    return
+                record, worker = item
+                try:
+                    self._run(record, worker)
+                except Exception as exc:
+                    logger.warning("archive worker failed (%s)", type(exc).__name__)
+                    with self.lock:
+                        record.update(state="failed", phase="准备失败", error="后台准备失败，请稍后重试")
+            finally:
+                self.queue.task_done()
 
     def set_phase(self, record, phase, processed=None, total=None):
         with self.lock:
@@ -145,7 +169,12 @@ class ArchivePreparationJobs:
                 record["state"] = "cancelled"
                 return
             record["state"] = "running"
-        staging = Path(tempfile.mkdtemp(prefix="job-", dir=self.root))
+        try:
+            staging = Path(tempfile.mkdtemp(prefix="job-", dir=self.root))
+        except OSError:
+            with self.lock:
+                record.update(state="failed", phase="准备失败", error="无法创建暂存文件，请检查磁盘空间")
+            return
         final_path = self.root / f"cache-{record['id']}"
         try:
             path = worker(staging, record)
@@ -200,7 +229,10 @@ class ArchivePreparationJobs:
             record = self.jobs.get(job_id)
             if record is None or record["owner"] != owner:
                 return False
-            if record["state"] in ("queued", "running"):
+            if record["state"] == "queued":
+                record["cancel"].set()
+                record.update(state="cancelled", phase="已取消")
+            elif record["state"] == "running":
                 record["cancel"].set()
                 record["phase"] = "正在取消"
             return True
@@ -226,5 +258,8 @@ class ArchivePreparationJobs:
             for record in self.jobs.values():
                 if record["state"] in ("queued", "running"):
                     record["cancel"].set()
-        self.executor.shutdown(wait=True, cancel_futures=True)
+        for _ in self.threads:
+            self.queue.put(None)
+        for thread in self.threads:
+            thread.join()
         shutil.rmtree(self.root, ignore_errors=True)

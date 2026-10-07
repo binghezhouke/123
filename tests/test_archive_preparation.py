@@ -339,3 +339,41 @@ def test_nested_prepare_from_split_7z_outer(tmp_path, monkeypatch):
         assert client.get(f"/archive-jobs/{job_id}/member/message.txt").data == b"split works"
     finally:
         app.extensions["archive_preparation_jobs"].close()
+
+
+def test_process_shutdown_cancels_pending_archive_preparation(tmp_path):
+    """Normal interpreter exit reaches cancellation instead of joining a stuck worker first."""
+    import subprocess
+    import sys
+    script = '''
+import atexit, sys, threading
+from api.archive_jobs import ArchivePreparationJobs
+jobs = ArchivePreparationJobs(root=sys.argv[1])
+atexit.register(jobs.close)
+entered = threading.Event()
+def prepare(staging, record):
+    entered.set()
+    record['cancel'].wait(60)
+    raise InterruptedError('cancelled')
+jobs.start(('archive', 1), 'session', prepare)
+assert entered.wait(2)
+'''
+    completed = subprocess.run([sys.executable, '-c', script, str(tmp_path / 'cache')],
+                               timeout=5, capture_output=True, text=True)
+    assert completed.returncode == 0, completed.stderr
+    assert not list((tmp_path / 'cache').glob('123-archive-cache-*'))
+
+
+def test_staging_disk_failure_becomes_visible_failed_job(nested_browser, remote, monkeypatch):
+    remote.data = test_zip_preview.make_zip([('inner.zip', test_zip_preview.make_zip([('one.txt', b'one')]))])
+    import tempfile
+    original = tempfile.mkdtemp
+    def create_directory(*args, **kwargs):
+        if kwargs.get('prefix') == 'job-':
+            raise OSError(28, 'disk full')
+        return original(*args, **kwargs)
+    monkeypatch.setattr('api.archive_jobs.tempfile.mkdtemp', create_directory)
+    job_id = _start_nested(nested_browser)
+    state = _wait_job(nested_browser, job_id)
+    assert state['state'] == 'failed'
+    assert '磁盘空间' in state['error']

@@ -28,6 +28,35 @@ def _safe_name(raw):
     return path
 
 
+def _copy_member(src, target, record, jobs, *, processed_base, total, expected_size, max_size=None, format_name):
+    """Copy one already-open archive member with shared cancellation and progress checks."""
+    written = 0
+    try:
+        with open(target, "xb") as dst:
+            while True:
+                if record["cancel"].is_set():
+                    raise InterruptedError("已取消")
+                if time.monotonic() > record.get("deadline", float("inf")):
+                    raise ArchiveJobError(f"内层 {format_name} 准备超过时间上限")
+                chunk = src.read(64 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > expected_size or (max_size is not None and written > max_size):
+                    raise ArchiveJobError(f"内层 {format_name} 解压数据异常")
+                dst.write(chunk)
+                jobs.set_phase(record, "正在校验并解压", processed_base + written, total)
+    except BaseException:
+        try:
+            target.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+    if written != expected_size:
+        raise ArchiveJobError(f"内层 {format_name} 文件数据不完整")
+    return written
+
+
 def extract_nested_zip(archive_path, output_dir, password, record, jobs):
     """Fully validate and extract a nested ZIP within explicit disk limits."""
     try:
@@ -70,30 +99,20 @@ def extract_nested_zip(archive_path, output_dir, password, record, jobs):
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            written = 0
             try:
-                with archive.open(info, "r", pwd=password.encode("utf-8") if password is not None else None) as src, open(target, "xb") as dst:
-                    while True:
-                        if record["cancel"].is_set():
-                            raise InterruptedError("已取消")
-                        if time.monotonic() > record.get("deadline", float("inf")):
-                            raise ArchiveJobError("内层 ZIP 准备超过时间上限")
-                        chunk = src.read(64 * 1024)
-                        if not chunk:
-                            break
-                        written += len(chunk)
-                        if written > info.file_size or written > MAX_NESTED_BYTES:
-                            raise ArchiveJobError("内层 ZIP 解压数据异常")
-                        dst.write(chunk)
-                        jobs.set_phase(record, "正在校验并解压", processed=total - info.file_size + written, total=uncompressed_total)
+                with archive.open(info, "r", pwd=password.encode("utf-8") if password is not None else None) as src:
+                    _copy_member(
+                        src, target, record, jobs,
+                        processed_base=total - info.file_size, total=uncompressed_total,
+                        expected_size=info.file_size, max_size=MAX_NESTED_BYTES, format_name="ZIP",
+                    )
             except BaseException:
+                # ZIP readers can report CRC errors while closing, after the copy helper returns.
                 try:
                     target.unlink()
                 except FileNotFoundError:
                     pass
                 raise
-            if written != info.file_size:
-                raise ArchiveJobError("内层 ZIP 文件数据不完整")
         return output
     except (pyzipper.zipfile.BadZipFile, zipfile.BadZipFile, RuntimeError, EOFError) as exc:
         if password is not None:
@@ -260,23 +279,12 @@ def extract_nested_rar(archive_path, output_dir, password, record, jobs):
                 target.mkdir(parents=True, exist_ok=True)
                 continue
             target.parent.mkdir(parents=True, exist_ok=True)
-            written = 0
-            with archive.open(info) as src, open(target, "xb") as dst:
-                while True:
-                    if record["cancel"].is_set():
-                        raise InterruptedError("已取消")
-                    if time.monotonic() > record.get("deadline", float("inf")):
-                        raise ArchiveJobError("内层 RAR 准备超过时间上限")
-                    chunk = src.read(64 * 1024)
-                    if not chunk:
-                        break
-                    written += len(chunk)
-                    if written > info.file_size:
-                        raise ArchiveJobError("内层 RAR 解压数据异常")
-                    dst.write(chunk)
-                    jobs.set_phase(record, "正在校验并解压", processed + written, total)
-            if written != info.file_size:
-                raise ArchiveJobError("内层 RAR 文件数据不完整")
+            with archive.open(info) as src:
+                written = _copy_member(
+                    src, target, record, jobs,
+                    processed_base=processed, total=total, expected_size=info.file_size,
+                    format_name="RAR",
+                )
             processed += written
         return output
     except rarfile.PasswordRequired as exc:
