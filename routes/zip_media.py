@@ -12,9 +12,9 @@ from api.zip_preview import RangeReader, RangeSnapshot
 STREAM_CHUNK = 256 * 1024
 
 
-def video_response(member, filename, mimetype, download=False):
+def video_response(member, filename, mimetype, download=False, allow_range=True):
     headers = {
-        "Accept-Ranges": "bytes",
+        "Accept-Ranges": "bytes" if allow_range else "none",
         "Content-Type": mimetype,
         "Content-Disposition": f"{'attachment' if download else 'inline'}; filename*=UTF-8''{quote(filename, safe='')}",
         "X-Content-Type-Options": "nosniff",
@@ -25,7 +25,9 @@ def video_response(member, filename, mimetype, download=False):
     # If-Range does not match a media validator: return the full representation.
     # Archive validators refer to the ZIP, not this virtual resource.
     range_header = (
-        request.headers.get("Range") if request.method == "GET" and not request.headers.get("If-Range") else None
+        request.headers.get("Range")
+        if allow_range and request.method == "GET" and not request.headers.get("If-Range")
+        else None
     )
     if range_header:
         parsed = parse_range_header(range_header)

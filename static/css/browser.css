@@ -87,6 +87,17 @@ button:disabled { opacity: .4; cursor: default; }
 #zip-gallery-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; overflow: auto; padding: 20px; }
 #zip-gallery-stage img { max-width: 100%; max-height: 100%; object-fit: contain; }
 #zip-gallery-status { margin: 0; min-height: 24px; text-align: center; color: #b2b8c3; font-size: 12px; padding: 0 16px; }
+#zip-client-video { border: 1px solid #35363a; border-radius: 16px; padding: 0; background: #17181b; color: #eceef2; width: min(94vw, 1000px); max-height: 92dvh; margin: auto; box-shadow: 0 24px 100px #0008; }
+#zip-client-video::backdrop { background: #151820c9; }
+#zip-client-video[open] { display: flex; flex-direction: column; }
+.zip-video-toolbar, .zip-video-actions { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 14px 18px; }
+.zip-video-toolbar { border-bottom: 1px solid #ffffff10; }
+#zip-client-video-title { flex: 1; min-width: 0; overflow-wrap: anywhere; margin: 0; font-size: 14px; font-weight: 500; }
+#zip-client-video .btn { background: #ffffff0b; color: #dce0e8; border: 1px solid #ffffff15; font-size: 12px; }
+#zip-client-video-player { display: block; width: 100%; max-height: 68dvh; background: #08090b; }
+#zip-client-video-progress { width: calc(100% - 36px); height: 8px; margin: 16px 18px 8px; accent-color: #75a7ff; }
+#zip-client-video-status { min-height: 22px; margin: 0; padding: 0 18px; color: #b2b8c3; font-size: 12px; text-align: center; }
+.zip-video-actions { padding-top: 12px; }
 .gallery-controls { justify-content: center; border: 0; padding: 14px 22px 20px; }
 .gallery-controls .btn { min-width: 104px; }
 @media (hover: hover) and (pointer: fine) {
@@ -126,6 +137,8 @@ button:disabled { opacity: .4; cursor: default; }
     .archive-browser .table td:last-child { white-space: normal; min-width: 150px; }
     .zip-video-frame, .zip-video-frame video { max-height: 58dvh; }
     #zip-gallery { width: 100vw; height: 100dvh; max-height: 100dvh; border: 0; border-radius: 0; }
+    #zip-client-video { width: 100vw; max-height: 100dvh; border: 0; border-radius: 0; }
+    .zip-video-toolbar, .zip-video-actions { padding: 12px; }
     .zip-gallery-toolbar { gap: 8px; padding: 12px; flex-wrap: wrap; }
     #zip-gallery-title { flex-basis: 60%; }
     #zip-gallery-stage { padding: 8px; }

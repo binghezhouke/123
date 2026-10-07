@@ -18,10 +18,11 @@ from flask import (
     redirect,
     url_for,
     make_response,
+    jsonify,
 )
 
 from api import Pan123APIError
-from api.zip_media import VIDEO_TYPES, can_stream, locate_member
+from api.zip_media import VIDEO_TYPES, can_stream, locate_member, can_inflate_in_browser, locate_deflate_member
 from .zip_media import video_response
 from api.archive_names import member_name, decode_archive_text
 from api.split_archive import SPLIT_7Z, discover_volumes
@@ -94,6 +95,23 @@ def browse(file_id, member_id=None):
                 filename = member_name(entry).rsplit("/", 1)[-1]
                 suffix = PurePosixPath(filename).suffix.lower()
                 download = request.args.get("download") == "1"
+                if request.args.get("client_video") == "1" or request.args.get("raw_deflate") == "1":
+                    if not request.args.get("v"):
+                        raise ChangedArchive("请从压缩包目录重新打开视频，以获取当前索引版本")
+                    location = locate_deflate_member(archive, source, entry, kind, suffix)
+                    if request.args.get("raw_deflate") == "1":
+                        return video_response(location, filename, "application/octet-stream", allow_range=False)
+                    return jsonify(
+                        key=f"{file_id}:{source.index_version}:{member_id}",
+                        raw_url=url_for(
+                            "zip.browse", file_id=file_id, member_id=member_id, raw_deflate=1, v=source.index_version
+                        ),
+                        filename=filename,
+                        size=entry.file_size,
+                        compressed_size=entry.compress_size,
+                        crc32=entry.CRC,
+                        mimetype="video/mp4",
+                    )
                 if suffix in VIDEO_TYPES and can_stream(entry, kind):
                     location = locate_member(archive, source, entry)
                     if request.args.get("stream") == "1" or download:
@@ -155,6 +173,7 @@ def browse(file_id, member_id=None):
                             "encrypted": bool(entry.flag_bits & 1),
                             "image": PREVIEW_TYPES.get(suffix, "").startswith("image/"),
                             "video": suffix in VIDEO_TYPES,
+                            "client_video": can_inflate_in_browser(entry, kind, suffix),
                             "streamable": suffix in VIDEO_TYPES and can_stream(entry, kind),
                             "preview": suffix in TEXT_EXTENSIONS or suffix in PREVIEW_TYPES,
                         }
