@@ -10,22 +10,23 @@
 </header>
 <div class="file-grid" id="fileContainer">
     {% for file in files %}
-    <a class="file-grid-item file-item" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
-        <div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}"><i class="{{ file.icon }}" aria-hidden="true"></i></div>
+    <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+        <a class="favorite-file-link" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}"><div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}"><i class="{{ file.icon }}" aria-hidden="true"></i></div>
         <div class="file-grid-name">{{ file.filename }}</div>
         <span class="file-grid-meta">{{ '文件夹' if file.is_folder else file.size_formatted }}</span>
-    </a>
+        </a>
+    </div>
     {% endfor %}
 </div>
 <div class="file-list" id="fileListView" style="display: none;">
     <div class="file-list-header"><div>名称</div><div>大小</div><div>类型</div><div>修改日期</div></div>
     {% for file in files %}
-    <a class="file-list-row file-item" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
-        <div class="file-list-name"><span class="file-list-icon"><i class="{{ file.icon }}" aria-hidden="true"></i></span>{{ file.filename }}</div>
+    <div class="file-list-row file-item" data-file-id="{{ file.fileId }}" data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+        <a class="file-list-name favorite-file-link" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}"><span class="file-list-icon"><i class="{{ file.icon }}" aria-hidden="true"></i></span>{{ file.filename }}</a>
         <div class="file-list-meta">{{ file.size_formatted if not file.is_folder else '—' }}</div>
         <div class="file-list-meta">{{ file.category_name }}</div>
         <div class="file-list-date">{{ file.get('updateAt') or file.get('createAt') or '—' }}</div>
-    </a>
+    </div>
     {% endfor %}
 </div>
 

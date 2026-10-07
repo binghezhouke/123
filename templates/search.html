@@ -70,7 +70,7 @@
         <!-- Results Grid -->
         <div class="file-grid" id="fileContainer">
             {% for file in files %}
-            <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+            <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
                 <div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}">
                     <i class="{{ file.icon }}"></i>
                 </div>
@@ -98,7 +98,7 @@
                 <div>操作</div>
             </div>
             {% for file in files %}
-            <div class="file-list-row file-item" data-file-id="{{ file.fileId }}">
+            <div class="file-list-row file-item" data-file-id="{{ file.fileId }}" data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}">
                 <div class="file-list-name">
                     <span class="file-list-icon {{ 'folder' if file.is_folder else file.category|lower }}">
                         <i class="{{ file.icon }}"></i>

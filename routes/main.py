@@ -169,3 +169,9 @@ def demo_webdav(file_id):
     except Exception as e:
         flash(f'加载演示页面时发生错误: {e}', 'error')
         return redirect(url_for('main.index'))
+
+
+@main_bp.route('/favorites')
+def favorites():
+    """Browser-local colored favorites; no cloud API request is necessary."""
+    return render_template('favorites.html')

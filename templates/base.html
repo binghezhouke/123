@@ -23,12 +23,16 @@
             <a class="browser-brand" href="{{ url_for('main.index') }}"><span class="brand-mark"><i class="fas fa-layer-group" aria-hidden="true"></i></span>CloudArchive</a>
             <div class="sidebar-section">
                 <div class="sidebar-header">资料库</div>
-                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint != 'main.search' %}active{% endif %}">
+                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint not in ['main.search', 'main.favorites'] %}active{% endif %}">
                     <span class="sidebar-icon"><i class="fas fa-hdd" aria-hidden="true"></i></span><span>我的文件</span>
                 </a>
                 <a href="{{ url_for('main.search') }}" class="sidebar-item {% if request.endpoint == 'main.search' %}active{% endif %}">
                     <span class="sidebar-icon"><i class="fas fa-search" aria-hidden="true"></i></span><span>搜索</span>
                 </a>
+            </div>
+            <div class="sidebar-section">
+                <div class="sidebar-header">收藏</div>
+                <a href="{{ url_for('main.favorites') }}" class="sidebar-item {% if request.endpoint == 'main.favorites' %}active{% endif %}"><span class="sidebar-icon" aria-hidden="true">☆</span><span>所有收藏</span></a>
             </div>
             <div class="sidebar-footer"><span class="connection-dot"></span>123 云盘</div>
         </aside>
@@ -68,6 +72,7 @@
                         <input type="search" placeholder="搜索文件…" aria-label="搜索文件" id="toolbarSearch" onkeypress="if(event.key==='Enter'){location.href='{{ url_for('main.search') }}?q='+encodeURIComponent(this.value);}">
                     </div>
 
+                    <a class="toolbar-btn" href="{{ url_for('main.favorites') }}" title="收藏" aria-label="打开收藏">☆</a>
                     <!-- Action Buttons -->
                     <button type="button" class="toolbar-btn" onclick="refreshFiles()" title="刷新" aria-label="刷新文件">
                         <i class="fas fa-sync-alt"></i>
@@ -238,6 +243,14 @@
         }
     </script>
 
+    <dialog id="favorite-picker" aria-labelledby="favorite-picker-title">
+        <form method="dialog"><button class="favorite-close" aria-label="关闭">×</button></form>
+        <p class="eyebrow">收藏标记</p><h2 id="favorite-picker-title"></h2>
+        <div id="favorite-colors" aria-label="选择收藏颜色"></div>
+        <button type="button" id="favorite-remove" class="btn btn-secondary">取消收藏</button>
+        <p id="favorite-message" role="status" aria-live="polite"></p>
+    </dialog>
+    <script src="{{ url_for('static', filename='js/favorites.js') }}" defer></script>
     {% block extra_scripts %}{% endblock %}
 </body>
 </html>

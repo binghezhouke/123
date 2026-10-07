@@ -47,7 +47,7 @@
                     <tr><td><a href="{{ url_for('zip.browse', file_id=file.fileId, path=prefix ~ folder ~ '/') }}"><i class="fas fa-folder" aria-hidden="true"></i> {{ folder }}/</a></td><td>—</td><td></td></tr>
                 {% endfor %}
                 {% for entry in files %}
-                    <tr>
+                    <tr id="archive-member-{{ entry.id }}" data-favorite-key="zip:{{ file.fileId }}:{{ archive_version }}:{{ entry.id }}" data-favorite-name="{{ entry.name }}" data-favorite-url="{{ url_for('zip.browse', file_id=file.fileId, path=prefix) }}#archive-member-{{ entry.id }}">
                         <td style="overflow-wrap: anywhere;">{{ entry.name }}{% if entry.encrypted %} <span class="badge bg-secondary">加密</span>{% endif %}{% if entry.video %} <span class="badge bg-secondary">视频</span>{% endif %}</td>
                         <td>{{ '{:,}'.format(entry.size) }} B</td>
                         <td>

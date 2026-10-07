@@ -187,7 +187,7 @@ function initSearchEnhancement() {
  */
 function initItemClick() {
     document.addEventListener('click', event => {
-        if (event.target.closest('.btn, a')) return;
+        if (event.target.closest('button, input, select, .btn, a')) return;
         const link = event.target.closest('.file-item')?.querySelector('a');
         if (link) window.location.href = link.href;
     });
