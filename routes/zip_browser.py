@@ -24,6 +24,7 @@ from flask import (
 from api import Pan123APIError
 from api.zip_media import VIDEO_TYPES, can_stream, locate_member, can_inflate_in_browser, locate_deflate_member
 from .zip_media import video_response
+from api.archive_probe import detected_kind
 from api.archive_names import member_name, decode_archive_text
 from api.split_archive import SPLIT_7Z, discover_volumes
 from api.zip_preview import ZipPreviewError, ChangedArchive, ArchivePasswordRequired
@@ -80,7 +81,7 @@ def browse(file_id, member_id=None):
         if not file:
             abort(404)
         split = SPLIT_7Z.fullmatch(file.filename)
-        kind = ".7z" if split else PurePosixPath(file.filename).suffix.lower()
+        kind = ".7z" if split else (detected_kind(session, file) or PurePosixPath(file.filename).suffix.lower())
         if file.is_folder or kind not in (".zip", ".7z", ".rar"):
             raise ZipPreviewError("请选择 ZIP、7z 或 RAR 文件")
 

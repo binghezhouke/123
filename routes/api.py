@@ -1,7 +1,7 @@
 """
 API routes blueprint - REST API endpoints (/api/*)
 """
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session, url_for, current_app
 from api import Pan123APIError
 from .utils import get_client
 
@@ -107,3 +107,38 @@ def api_final_download(file_id):
 
     except Exception as e:
         return jsonify({'error': f'服务器错误: {e}'}), 500
+
+
+@api_bp.route('/archive/probe/<int:file_id>', methods=['POST'])
+def probe_archive(file_id):
+    """Read only the signature, after an explicit same-origin JSON request."""
+    from api.archive_probe import detect_archive, remember_kind
+
+    if not request.is_json:
+        return jsonify(error='请通过探测按钮发起请求'), 415
+    try:
+        client = get_client()
+        file = client.get_file_info_single(file_id)
+        if not file or file.is_folder:
+            return jsonify(error='请选择一个文件'), 404
+        kind = None
+        if file.size:
+            result = client.get_final_download_url(file_id, prefer_webdav=False)
+            if not result:
+                return jsonify(error='无法获取下载链接，请重试'), 502
+            kind = detect_archive(result[0])
+        remember_kind(session, file, kind)
+        if kind:
+            current_app.extensions['archive_cache'].invalidate(
+                (file_id, kind, file.get('etag'), file.get('size'), file.get('updateAt')))
+        response = jsonify(
+            kind=kind,
+            browse_url=url_for('zip.browse', file_id=file_id) if kind else None,
+            message=(f'文件头识别为 {kind[1:].upper()}，可尝试浏览压缩包。'
+                     if kind else '未识别为 ZIP、7z 或 RAR；可能是其他格式或非首分卷。'),
+        )
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except Exception:
+        # Upstream exceptions may contain a signed download URL.
+        return jsonify(error='探测失败：无法按范围读取文件头，请稍后重试'), 502
