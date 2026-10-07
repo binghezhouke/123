@@ -200,25 +200,29 @@ def open_remote_zip(url, snapshot=None, record=False, password=None):
             raise zipfile.BadZipFile(str(exc)) from exc
 
 
-def read_member(archive, source, entry):
+def read_member(archive, source, entry, max_size=FILE_LIMIT):
     try:
-        return _read_member(archive, source, entry)
+        return _read_member(archive, source, entry, max_size)
     except pyzipper.zipfile.BadZipFile as exc:
         raise zipfile.BadZipFile(str(exc)) from exc
 
 
-def _read_member(archive, source, entry):
+def _read_member(archive, source, entry, max_size=FILE_LIMIT):
     if entry.is_dir():
         raise ZipPreviewError("请选择文件")
     if entry.flag_bits & 1 and not archive.pwd:
         raise ArchivePasswordRequired("文件已加密，请输入解压密码")
     if entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
         raise ZipPreviewError("暂不支持此 ZIP 压缩方式，仅支持 Store / Deflate")
-    if max(entry.file_size, entry.compress_size) > FILE_LIMIT:
+    if max_size is not None and max(entry.file_size, entry.compress_size) > max_size:
         raise ZipPreviewError("单文件预览和下载上限为 32 MiB，请下载原 ZIP")
-    source.remaining += FILE_LIMIT + 65536
+    output_limit = entry.file_size if max_size is None else max_size
+    source.remaining += (entry.compress_size + 2 * INDEX_LIMIT if max_size is None else FILE_LIMIT) + 65536
+    # Large images read compressed data in bounded windows, not a second full copy.
+    if max_size is None:
+        source.read_ahead = min(INDEX_LIMIT, max(65536, entry.compress_size + 65536))
     chunks, total = [], 0
-    if entry.flag_bits & 1:
+    if entry.flag_bits & 1 and max_size is not None:
         # Include the encryption header and authentication trailer in the range.
         source.seek(entry.header_offset)
         header = source.read(30)
@@ -227,14 +231,14 @@ def _read_member(archive, source, entry):
         name_size, extra_size = struct.unpack_from("<HH", header, 26)
         source.prefetch(entry.header_offset + 30 + name_size + extra_size, entry.compress_size)
     with archive.open(entry) as member:
-        if not entry.flag_bits & 1:
+        if not entry.flag_bits & 1 and max_size is not None:
             source.prefetch(source.tell(), entry.compress_size)
         while True:
             chunk = member.read(64 * 1024)
             if not chunk:
                 break
             total += len(chunk)
-            if total > FILE_LIMIT or time.monotonic() > source.deadline:
+            if total > output_limit or time.monotonic() > source.deadline:
                 raise ZipPreviewError("文件解压超过大小或时间限制")
             chunks.append(chunk)
     return b"".join(chunks)

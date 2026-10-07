@@ -19,6 +19,7 @@ from .split_archive import VolumeSet, SplitRangeReader
 from .zip_preview import (
     ENTRY_LIMIT,
     FILE_LIMIT,
+    INDEX_LIMIT,
     RangeReader,
     ZipPreviewError,
     ArchivePasswordRequired,
@@ -40,12 +41,13 @@ class Entry:
 
 
 class BoundedWriter(Py7zIO):
-    def __init__(self, deadline):
+    def __init__(self, deadline, max_size=FILE_LIMIT):
         self.data = io.BytesIO()
         self.deadline = deadline
+        self.max_size = max_size
 
     def write(self, data):
-        if self.data.tell() + len(data) > FILE_LIMIT or time.monotonic() > self.deadline:
+        if self.data.tell() + len(data) > self.max_size or time.monotonic() > self.deadline:
             raise ZipPreviewError("文件解压超过大小或时间限制")
         return self.data.write(data)
 
@@ -63,8 +65,8 @@ class BoundedWriter(Py7zIO):
 
 
 class Factory(WriterFactory):
-    def __init__(self, deadline):
-        self.writer = BoundedWriter(deadline)
+    def __init__(self, deadline, max_size=FILE_LIMIT):
+        self.writer = BoundedWriter(deadline, max_size)
         self.created = False
 
     def create(self, filename):
@@ -104,25 +106,33 @@ class ArchiveAdapter:
     def infolist(self):
         return self.entries
 
-    def read(self, entry):
+    def read(self, entry, max_size=FILE_LIMIT):
         if self.solid:
             raise ZipPreviewError("固实压缩包暂仅支持目录浏览，请下载原文件")
         if entry.directory:
             raise ZipPreviewError("请选择文件")
         if entry.flag_bits and self.password is None:
             raise ArchivePasswordRequired("文件已加密，请输入解压密码")
-        if entry.file_size > FILE_LIMIT:
+        if max_size is not None and entry.file_size > max_size:
             raise ZipPreviewError("单文件上限为 32 MiB")
-        self.source.remaining += FILE_LIMIT
+        output_limit = entry.file_size if max_size is None else max_size
+        compressed = (entry.original.compressed if self.kind == ".7z" else entry.original.compress_size)
+        if max_size is None:
+            self.source.read_ahead = min(INDEX_LIMIT, max(256 * 1024, compressed or 0))
+        self.source.remaining += (
+            (compressed if compressed is not None else self.source.size) + 2 * INDEX_LIMIT
+            if max_size is None else FILE_LIMIT
+        )
         if self.kind == ".7z":
             f = entry.original
-            if f.compressed is not None and f.compressed > FILE_LIMIT:
+            if max_size is not None and f.compressed is not None and f.compressed > max_size:
                 raise ZipPreviewError("单文件压缩数据上限为 32 MiB")
             if not f.is_file or f.is_symlink:
                 raise ZipPreviewError("暂不支持链接或特殊文件")
             if sum(e.filename == entry.filename for e in self.entries) != 1:
                 raise ZipPreviewError("暂不支持 7z 内的重复文件名")
-            factory = Factory(self.source.deadline)
+            factory = Factory(self.source.deadline, output_limit)
+            self.archive.max_extract_size = output_limit
             self.archive.extract(targets=[f.filename], factory=factory)
             data = factory.writer.data.getvalue()
         else:
@@ -133,7 +143,7 @@ class ArchiveAdapter:
                 or f.flags & (rarfile.RAR_FILE_SPLIT_BEFORE | rarfile.RAR_FILE_SPLIT_AFTER)
             ):
                 raise ZipPreviewError("暂不支持链接或分卷文件")
-            if f.compress_size > FILE_LIMIT:
+            if max_size is not None and f.compress_size > max_size:
                 raise ZipPreviewError("单文件压缩数据上限为 32 MiB")
             # rarfile builds a temporary, single-member RAR for compressed entries.
             # Reject archive features which force its whole-archive fallback.
@@ -169,11 +179,11 @@ class ArchiveAdapter:
                     timer.daemon = True
                     timer.start()
                 try:
-                    data = stream.read(FILE_LIMIT + 1)
+                    data = stream.read(output_limit + 1)
                 finally:
                     if timer:
                         timer.cancel()
-        if len(data) > FILE_LIMIT or time.monotonic() > self.source.deadline:
+        if len(data) > output_limit or time.monotonic() > self.source.deadline:
             raise ZipPreviewError("文件解压超过大小或时间限制")
         return data
 
@@ -232,7 +242,7 @@ def open_archive(url, kind, snapshot=None, record=False, resolve_part=None, pass
         raise ZipPreviewError("压缩包无法读取：格式损坏、分卷、算法不支持或缺少 RAR 解压工具") from exc
 
 
-def read_archive_member(archive, source, entry):
+def read_archive_member(archive, source, entry, max_size=FILE_LIMIT):
     if isinstance(archive, ArchiveAdapter):
-        return archive.read(entry)
-    return read_member(archive, source, entry)
+        return archive.read(entry, max_size=max_size)
+    return read_member(archive, source, entry, max_size=max_size)

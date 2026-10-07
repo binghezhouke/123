@@ -133,8 +133,11 @@ def browse(file_id, member_id=None):
                     )
                 if request.args.get("stream") == "1":
                     raise ZipPreviewError("当前仅支持 ZIP 中未加密、仅打包（Store）的视频直接播放")
-                data = read_archive_member(archive, source, entry)
                 mimetype = PREVIEW_TYPES.get(suffix)
+                if mimetype and mimetype.startswith("image/"):
+                    data = read_archive_member(archive, source, entry, max_size=None)
+                else:
+                    data = read_archive_member(archive, source, entry)
                 if suffix in TEXT_EXTENSIONS and not download:
                     data = decode_archive_text(data).encode("utf-8")
                     mimetype = "text/plain; charset=utf-8"
