@@ -51,7 +51,11 @@ func fixture(t *testing.T) (*Node, []byte) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	api := &fakeAPI{archive: b.Bytes()}
+	return fixtureArchive(t, b.Bytes()), content
+}
+func fixtureArchive(t *testing.T, data []byte) *Node {
+	t.Helper()
+	api := &fakeAPI{archive: data}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data := api.archive
 		if r.URL.Path == "/3" {
@@ -67,7 +71,7 @@ func fixture(t *testing.T) (*Node, []byte) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { cache.Close() })
-	return New(context.Background(), api, cache, 0, true), content
+	return New(context.Background(), api, cache, 0, true)
 }
 func lookup(t *testing.T, n *Node, name string) *Node {
 	t.Helper()
@@ -126,13 +130,14 @@ func TestUnsafeZIPPaths(t *testing.T) {
 				io.WriteString(m, "data")
 			}
 			w.Close()
-			z, err := zip.NewReader(bytes.NewReader(b.Bytes()), int64(b.Len()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, err = zipEntries(z, nil); err == nil {
+			root := fixtureArchive(t, b.Bytes())
+			fs.NewNodeFS(root, &fs.Options{})
+			archive := lookup(t, root, "photos.zip")
+			if stream, errno := archive.Readdir(context.Background()); errno == 0 {
+				stream.Close()
 				t.Fatal("unsafe ZIP accepted")
 			}
+
 		})
 	}
 }

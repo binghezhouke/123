@@ -39,13 +39,16 @@ func run() error {
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
 	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
+	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and ZIP index cache budget in MiB")
+	directoryTTL := flag.Duration("directory-ttl", 30*time.Second, "directory snapshot freshness interval")
+	sourceTTL := flag.Duration("source-ttl", 30*time.Second, "remote reader reuse interval across opens")
 	zipDirs := flag.Bool("zip-dirs", true, "expose .zip files as directories")
 	flag.Parse()
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
 	}
-	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *rootID < 0 {
-		return fmt.Errorf("invalid cache size or root ID")
+	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 {
+		return fmt.Errorf("invalid cache size, freshness interval or root ID")
 	}
 	mountAbs, err := filepath.Abs(*mountpoint)
 	if err != nil {
@@ -107,7 +110,7 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Fail authentication/list errors before installing a mount.
-	root := mountfs.New(ctx, api, cache, *rootID, *zipDirs)
+	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}

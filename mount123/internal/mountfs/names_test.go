@@ -30,17 +30,10 @@ func TestLegacyZIPNamesThroughLookup(t *testing.T) {
 			}
 			member.Write([]byte("image"))
 			writer.Close()
-			archive, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
-			if err != nil {
-				t.Fatal(err)
-			}
-			entries, err := zipEntries(archive, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			root := &Node{item: &entry{directory: true, children: entries}}
+			root := fixtureArchive(t, buf.Bytes())
 			fs.NewNodeFS(root, &fs.Options{})
-			if _, errno := root.Lookup(context.Background(), test.want, &fuse.EntryOut{}); errno != 0 {
+			archive := lookup(t, root, "photos.zip")
+			if _, errno := archive.Lookup(context.Background(), test.want, &fuse.EntryOut{}); errno != 0 {
 				t.Fatalf("decoded filename unavailable: %v", errno)
 			}
 		})
