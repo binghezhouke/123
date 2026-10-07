@@ -87,7 +87,14 @@
         <h2 id="zip-gallery-title">图片预览</h2>
         <span id="zip-gallery-counter"></span>
         <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
+        <button id="zip-gallery-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">全屏</button>
         <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
+    </div>
+    <div class="zip-gallery-zoom" role="group" aria-label="图片缩放">
+        <button id="zip-gallery-zoom-out" class="btn btn-secondary" type="button" aria-label="缩小图片" disabled>−</button>
+        <span id="zip-gallery-zoom-level" title="相对于适应窗口大小的缩放比例">100%</span>
+        <button id="zip-gallery-zoom-in" class="btn btn-secondary" type="button" aria-label="放大图片" disabled>＋</button>
+        <button id="zip-gallery-zoom-reset" class="btn btn-secondary" type="button" disabled>适应窗口</button>
     </div>
     <div id="zip-gallery-stage"></div>
     <p id="zip-gallery-status" role="status" aria-live="polite"></p>
@@ -97,6 +104,8 @@
         <button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
     </div>
 </dialog>
+<script src="{{ url_for('static', filename='js/vendor/panzoom/panzoom.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/image_viewport.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/zip_gallery.js') }}" defer></script>
 <dialog id="zip-client-video" aria-labelledby="zip-client-video-title" data-worker-url="{{ url_for('static', filename='js/zip_inflate_worker.js') }}">
     <div class="zip-video-toolbar">

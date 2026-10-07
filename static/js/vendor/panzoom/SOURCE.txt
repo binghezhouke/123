@@ -1,0 +1,4 @@
+Panzoom 4.6.2
+https://github.com/timmywil/panzoom
+https://registry.npmjs.org/@panzoom/panzoom/-/panzoom-4.6.2.tgz
+sha512-Zn3B5/hwa6eYIPRSKX0xf2clv8nviTX8AnAU5kU/EugiTDhG41ya2wlBqYrZJYCWQROr/5XkWObZhIkepi89qw==

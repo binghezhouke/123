@@ -4,6 +4,7 @@
     const dialog = document.getElementById('zip-gallery');
     if (!dialog || !buttons.length) return;
     const el = name => document.getElementById(`zip-gallery-${name}`);
+    const viewport = typeof createArchiveImageViewport === 'function' ? createArchiveImageViewport(dialog) : null;
     const cache = new Map();
     let cacheBytes = 0;
     const MAX_CACHE_IMAGES = 30;
@@ -95,6 +96,7 @@
         attempted.clear();
         const token = ++generation;
         prune();
+        viewport?.detach();
         el('stage').replaceChildren();
         el('title').textContent = buttons[index].dataset.name;
         el('counter').textContent = `${index + 1} / ${buttons.length}`;
@@ -110,7 +112,8 @@
             image.alt = buttons[index].dataset.name;
             image.onload = () => {
                 if (token !== generation) return;
-                el('status').textContent = '← → 切换图片，也可左右滑动';
+                viewport?.attach(image);
+                el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片';
                 prefetchReady = true;
                 pumpPrefetch();
             };
@@ -154,15 +157,19 @@
         }
     });
     el('stage').addEventListener('touchstart', event => {
-        touchStart = event.touches.length === 1 ? event.touches[0].clientX : undefined;
+        touchStart = !viewport?.isZoomed() && event.touches.length === 1 ? event.touches[0].clientX : undefined;
     }, {passive: true});
     el('stage').addEventListener('touchend', event => {
+        if (viewport?.isZoomed()) {touchStart = undefined; return;}
         if (touchStart === undefined) return;
         const delta = event.changedTouches[0].clientX - touchStart;
         touchStart = undefined;
         if (Math.abs(delta) > 60) show(selected + (delta < 0 ? 1 : -1));
     }, {passive: true});
+    el('stage').addEventListener('touchcancel', () => {touchStart = undefined;}, {passive: true});
     dialog.addEventListener('close', () => {
+        viewport?.close();
+        touchStart = undefined;
         ++generation;
         prefetchReady = false;
         attempted.clear();

@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 
-function setup({count = 5, blobSize = 1} = {}) {
+function setup({count = 5, blobSize = 1, viewport = null} = {}) {
     const element = () => ({dataset: {}, handlers: {}, children: [],
         addEventListener(event, handler) { this.handlers[event] = handler; },
         replaceChildren(...children) { this.children = children; },
@@ -20,6 +20,7 @@ function setup({count = 5, blobSize = 1} = {}) {
     vm.runInNewContext(fs.readFileSync('static/js/zip_gallery.js', 'utf8'), {
         document: {querySelectorAll: () => buttons, getElementById: get},
         AbortController, DOMException, Image: class {},
+        createArchiveImageViewport: viewport ? () => viewport : undefined,
         URL: {createObjectURL: () => `blob:${++blobId}`, revokeObjectURL: url => revoked.push(url)},
         fetch: (url, {signal}) => new Promise((resolve, reject) => {
             requests.push({url, signal, resolve: () => resolve({ok: true, headers: {get: () => 'image/jpeg'}, blob: async () => ({size: typeof blobSize === 'function' ? blobSize(url) : blobSize})}), reject});
@@ -227,4 +228,30 @@ test('retry preserves backward direction and a fresh open starts forward again',
     get('zip-gallery-close').onclick();
     await loadImage(buttons, get, requests, 10);
     assert.deepEqual(requests.filter(r => !r.done && !r.signal.aborted).map(r => r.url), ['/member/11', '/member/12']);
+});
+
+
+test('zoomed dragging and pinch do not flip images; fitting restores swipe and close releases viewport', async () => {
+    let zoomed = true, attached = 0, detached = 0, closed = 0;
+    const viewport = {isZoomed: () => zoomed, attach() {attached++;}, detach() {detached++;}, close() {closed++;}};
+    const {buttons, get, requests} = setup({viewport});
+    await loadImage(buttons, get, requests, 0);
+    assert.equal(attached, 1);
+    const stage = get('zip-gallery-stage');
+    const swipe = () => {
+        stage.handlers.touchstart({touches: [{clientX: 200}]});
+        stage.handlers.touchend({changedTouches: [{clientX: 20}]});
+    };
+    swipe();
+    assert.equal(get('zip-gallery-counter').textContent, '1 / 5');
+    zoomed = false;
+    stage.handlers.touchstart({touches: [{clientX: 200}, {clientX: 250}]});
+    stage.handlers.touchend({changedTouches: [{clientX: 20}]});
+    assert.equal(get('zip-gallery-counter').textContent, '1 / 5');
+    swipe();
+    assert.equal(get('zip-gallery-counter').textContent, '2 / 5');
+    assert.equal(detached, 2);
+    get('zip-gallery-close').onclick();
+    assert.equal(closed, 1);
+    await tick();
 });

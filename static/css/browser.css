@@ -236,3 +236,15 @@ thead .column-resizer { right: 0; }
 .archive-browser .table-responsive { overflow-x: auto; max-width: 100%; }
 table.columns-sized { table-layout: fixed; min-width: 0; }
 table.columns-sized th, table.columns-sized td { overflow-wrap: anywhere; min-width: 0 !important; }
+
+/* Image gestures use the bundled Panzoom library. */
+#zip-gallery.gallery-expanded { width: 100vw; height: 100dvh; max-width: none; max-height: none; border: 0; border-radius: 0; }
+.zip-gallery-zoom { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+#zip-gallery-zoom-level { min-width: 5ch; text-align: center; font-size: 12px; font-variant-numeric: tabular-nums; }
+#zip-gallery-stage { overflow: hidden; touch-action: none; padding: 0; position: relative; }
+#zip-gallery-stage img { flex-shrink: 0; user-select: none; -webkit-user-drag: none; }
+#zip-gallery-stage.is-zoomed { cursor: grab; }
+#zip-gallery-stage.is-zoomed:active { cursor: grabbing; }
+@media (max-width: 600px) {
+    #zip-gallery > .zip-gallery-toolbar:first-child { grid-template-columns: 1fr auto auto auto; }
+}
