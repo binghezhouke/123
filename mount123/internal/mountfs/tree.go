@@ -137,7 +137,11 @@ func zipEntries(z *zip.Reader, source *storage.Remote) (map[string]*entry, error
 	root := &entry{directory: true, children: map[string]*entry{}}
 	seen := map[string]bool{}
 	for _, f := range z.File {
-		name := strings.TrimSuffix(f.Name, "/")
+		decoded, err := zipName(f)
+		if err != nil {
+			return nil, err
+		}
+		name := strings.TrimSuffix(decoded, "/")
 		if seen[name] {
 			return nil, fmt.Errorf("duplicate ZIP path")
 		}
