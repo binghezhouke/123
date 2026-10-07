@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}{{ filename }} · 视频播放 - CloudArchive{% endblock %}
+{% block content %}
+<div class="card archive-browser zip-video-page">
+    <div class="card-header browser-heading">
+        <div><p class="eyebrow">压缩包视频</p><h1>{{ filename }}</h1></div>
+    </div>
+    <div class="card-body">
+        <nav aria-label="视频操作" class="archive-path">
+            <a href="{{ back_url }}">返回压缩包目录</a>
+            <a class="btn btn-sm btn-secondary" href="{{ download_url }}">下载视频</a>
+        </nav>
+        <div class="zip-video-frame">
+            <video controls preload="metadata" playsinline src="{{ source_url }}" aria-label="{{ filename }}"></video>
+        </div>
+        <p id="zip-video-error" class="zip-video-error" role="status" aria-live="polite" hidden>
+            视频无法播放，可能是编码格式不受支持，或压缩包读取失败。你可以返回目录或下载视频。
+        </p>
+    </div>
+</div>
+<script>
+(() => {
+    const video = document.querySelector('.zip-video-frame video');
+    const error = document.getElementById('zip-video-error');
+    if (video && error) video.addEventListener('error', () => { error.hidden = false; });
+})();
+</script>
+{% endblock %}

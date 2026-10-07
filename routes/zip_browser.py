@@ -21,6 +21,8 @@ from flask import (
 )
 
 from api import Pan123APIError
+from api.zip_media import VIDEO_TYPES, can_stream, locate_member
+from .zip_media import video_response
 from api.archive_names import member_name, decode_archive_text
 from api.split_archive import SPLIT_7Z, discover_volumes
 from api.zip_preview import ZipPreviewError, ChangedArchive, ArchivePasswordRequired
@@ -89,10 +91,30 @@ def browse(file_id, member_id=None):
                 if member_id >= len(entries):
                     abort(404)
                 entry = entries[member_id]
-                data = read_archive_member(archive, source, entry)
                 filename = member_name(entry).rsplit("/", 1)[-1]
                 suffix = PurePosixPath(filename).suffix.lower()
                 download = request.args.get("download") == "1"
+                if suffix in VIDEO_TYPES and can_stream(entry, kind):
+                    location = locate_member(archive, source, entry)
+                    if request.args.get("stream") == "1" or download:
+                        return video_response(location, filename, VIDEO_TYPES[suffix], download)
+                    parent_path = member_name(entry).rpartition("/")[0]
+                    return render_template(
+                        "zip_video.html",
+                        file=file,
+                        filename=filename,
+                        source_url=url_for(
+                            "zip.browse", file_id=file_id, member_id=member_id, stream=1, v=source.index_version
+                        ),
+                        back_url=url_for("zip.browse", file_id=file_id, path=parent_path),
+                        download_url=url_for(
+                            "zip.browse", file_id=file_id, member_id=member_id, download=1, v=source.index_version
+                        ),
+                        breadcrumbs=folder_breadcrumbs(client, file.get("parentFileId", 0)),
+                    )
+                if request.args.get("stream") == "1":
+                    raise ZipPreviewError("当前仅支持 ZIP 中未加密、仅打包（Store）的视频直接播放")
+                data = read_archive_member(archive, source, entry)
                 mimetype = PREVIEW_TYPES.get(suffix)
                 if suffix in TEXT_EXTENSIONS and not download:
                     data = decode_archive_text(data).encode("utf-8")
@@ -132,6 +154,8 @@ def browse(file_id, member_id=None):
                             "size": entry.file_size,
                             "encrypted": bool(entry.flag_bits & 1),
                             "image": PREVIEW_TYPES.get(suffix, "").startswith("image/"),
+                            "video": suffix in VIDEO_TYPES,
+                            "streamable": suffix in VIDEO_TYPES and can_stream(entry, kind),
                             "preview": suffix in TEXT_EXTENSIONS or suffix in PREVIEW_TYPES,
                         }
                     )
