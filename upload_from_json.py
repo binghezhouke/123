@@ -4,7 +4,8 @@
 ``etag#size#path$...`` 文本。实际逻辑在 upload_core.upload_manifest。
 
 默认行为：
-- 先查目标目录快照，云端已有同一文件就不发请求（也不会造出重复文件）
+- 未传目录树时不主动列目标目录判重，直接按清单执行秒传
+- 传入 --tree 时按目录树快照先筛掉已上传文件
 - 剩下的按 8 请求/秒限速并发秒传，失败的串行重试一轮
 
 传 --tree 目录树导出文件（网页端"导出目录树"生成的 txt）可以先按文件名
@@ -44,7 +45,7 @@ def main():
     parser.add_argument('--rate', type=float, default=DEFAULT_RATE,
                         help=f'每秒请求数上限 (默认: {DEFAULT_RATE:g}，账号级限流约 8/s；0 表示不限速)')
     parser.add_argument('--no-dedup', action='store_true',
-                        help='不列目标目录做判重（目标目录非常大时可能更划算）')
+                        help='不列目标目录做判重（未传 --tree 时默认不去重）')
     parser.add_argument('--verify', action='store_true',
                         help='清单只有 SHA1 时也发秒传请求确认，而不是按"同名同大小"跳过')
     parser.add_argument('-v', '--verbose', action='store_true',
@@ -66,7 +67,8 @@ def main():
         stats = upload_manifest(
             client, args.json_file, args.directory,
             dir_tree=tree, max_workers=args.workers, rate=rate,
-            dedup=not args.no_dedup, verify_sha1=args.verify,
+            # 只有用户显式提供目录树时才启用判重；未提供时默认直接上传。
+            dedup=bool(tree_index) and not args.no_dedup, verify_sha1=args.verify,
             tree_index=tree_index, tree_verify=args.tree_verify,
             verbose=args.verbose)
 

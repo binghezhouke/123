@@ -479,7 +479,10 @@ class FileService:
             logger.error("完成上传步骤失败")
             return None
 
-    def _calculate_md5(self, file_path: str, chunk_size: int = 8192) -> str:
+    # 哈希读盘块大小：太小（如 8KB）会让 Python 层循环成为瓶颈，1MiB 足够大又不会占太多内存
+    HASH_CHUNK_SIZE = 1024 * 1024
+
+    def _calculate_md5(self, file_path: str, chunk_size: int = HASH_CHUNK_SIZE) -> str:
         """计算文件的MD5值"""
         md5 = hashlib.md5()
         with open(file_path, 'rb') as f:
@@ -487,7 +490,7 @@ class FileService:
                 md5.update(chunk)
         return md5.hexdigest()
 
-    def _calculate_sha1(self, file_path: str, chunk_size: int = 8192) -> str:
+    def _calculate_sha1(self, file_path: str, chunk_size: int = HASH_CHUNK_SIZE) -> str:
         """计算文件的SHA1值"""
         sha1 = hashlib.sha1()
         with open(file_path, 'rb') as f:

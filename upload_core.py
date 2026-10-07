@@ -403,6 +403,10 @@ class RemoteDirTree:
         """只查缓存，不创建目录。用于并发阶段避免多线程同时建同一个目录。"""
         return self._ids.get(normalize_remote_path(path))
 
+    def was_created(self, path: str) -> bool:
+        """这个目录是不是本次运行里由我们 mkdir 出来的（新目录必然是空的）。"""
+        return normalize_remote_path(path) in self._created
+
     def ensure_dirs(self, paths: Iterable[str]) -> List[Tuple[str, str]]:
         """批量预建目录（去重后串行执行）；返回 [(失败路径, 错误信息), ...]"""
         targets = sorted({normalize_remote_path(p) for p in paths if normalize_remote_path(p)})
@@ -974,14 +978,30 @@ def _upload_manifest_inner(client, files_to_upload, uses_base62, base_path,
 
 # ---------------------------------------------------------------- 本地目录上传
 
+@dataclass
+class _LocalFile:
+    """一个待上传的本地文件（目录已解析、快照判重已通过）"""
+
+    local_file: str
+    remote_file: str      # 打印用完整远程路径
+    filename: str
+    parent_id: int
+    size: int
+
+
 def upload_directory(client, local_path: str, remote_path: str = "",
                      dry_run: bool = False, progress: bool = True,
                      rate: Optional[float] = DEFAULT_RATE, index: RemoteIndex = None,
-                     verbose: bool = False) -> UploadStats:
+                     verbose: bool = False, max_workers: int = 8) -> UploadStats:
     """
     递归上传本地目录到远程路径。
 
-    同名同大小文件会跳过；先尝试 SHA1 秒传，未命中才走分片上传。
+    处理顺序（与清单上传同一套思路，越靠前越省接口调用）：
+    1. 串行准备目录：逐级创建并缓存，已存在的目录从快照取 ID，不发 mkdir
+    2. 快照判重：同名同大小文件零请求跳过（目录在解析时已列过一次）
+    3. 并发上传（受账号级限速约束）：先试 SHA1 秒传，未命中走分片上传
+    4. 失败的串行重试一轮
+
     verbose=False 时只打印失败项，其余交给进度条与汇总。
     """
     stats = UploadStats()
@@ -989,12 +1009,13 @@ def upload_directory(client, local_path: str, remote_path: str = "",
 
     if not dry_run:
         _configure_rate(client, rate)
-    tree = RemoteDirTree(
-        client, remote_path,
-        index if index is not None else (RemoteIndex(client) if not dry_run else None))
+        if index is None:
+            index = RemoteIndex(client)
+    tree = RemoteDirTree(client, remote_path, index)
 
-    # 统计文件总数用于进度显示
-    total_files = sum(len(filenames) for _, _, filenames in os.walk(local_path))
+    # 只遍历一遍：既数总数供进度显示，也逐目录处理
+    walk = list(os.walk(local_path))
+    total_files = sum(len(filenames) for _, _, filenames in walk)
     if total_files == 0:
         emit("本地目录中没有要上传的文件。")
         return stats
@@ -1007,8 +1028,70 @@ def upload_directory(client, local_path: str, remote_path: str = "",
         if bar:
             bar.update(1)
 
+    def handle(item: _LocalFile):
+        # skip_if_exists=False：判重已在准备阶段用快照做过，
+        # 不再让 upload_file 为每个文件全量列一遍目标目录
+        return client.file_service.upload_file(
+            local_path=item.local_file,
+            parent_id=item.parent_id,
+            filename=item.filename,
+            skip_if_exists=False,
+            try_sha1_reuse=True)
+
+    def count_result(item: _LocalFile, result) -> None:
+        """按 upload_file 的返回记账（跳过/秒传/常规上传/失败口径不变）"""
+        if result and result.get('skipped'):
+            stats.add(STATUS_SKIP, item.remote_file, "已存在同名同大小文件")
+            if verbose:
+                emit(f"  {STATUS_ICONS[STATUS_SKIP]} 跳过已存在文件: {item.filename}")
+        elif result:
+            if result.get('method') == 'sha1_reuse' or result.get('reuse'):
+                stats.add_reuse(item.remote_file, "SHA1秒传")
+                if verbose:
+                    emit(f"  {STATUS_ICONS[STATUS_HIT]} 秒传成功: {item.filename}")
+            else:
+                stats.add(STATUS_HIT, item.remote_file, "已上传")
+                if verbose:
+                    emit(f"  {STATUS_ICONS[STATUS_HIT]} 上传成功: {item.filename}")
+            # 上传成功后补进快照，同批次里再遇到同一文件就不会传第二遍
+            if index is not None:
+                index.remember_file(item.parent_id, item.filename, item.size)
+        else:
+            stats.add(STATUS_FAIL, item.remote_file, "接口未返回结果")
+            emit(f"  {STATUS_ICONS[STATUS_FAIL]} 上传返回失败: {item.filename}")
+
+    def run(items: List[_LocalFile], workers: int,
+            tick_done: bool = True) -> List[Tuple[_LocalFile, str]]:
+        """跑一轮上传，返回仍然失败的 [(条目, 错误信息), ...]（不计入统计）"""
+        failed: List[Tuple[_LocalFile, str]] = []
+        if not items:
+            return failed
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = {executor.submit(handle, it): it for it in items}
+            for future in as_completed(futures):
+                item = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    failed.append((item, str(e)))
+                    emit(f"  {STATUS_ICONS[STATUS_FAIL]} 上传失败 {item.filename}: {e}")
+                else:
+                    count_result(item, result)
+                finally:
+                    if tick_done:
+                        tick()
+        except KeyboardInterrupt:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=True)
+        return failed
+
+    todo: List[_LocalFile] = []
     try:
-        for dirpath, _, filenames in os.walk(local_path):
+        # -------- 阶段1+2：串行建目录 + 快照判重（判重不发请求） --------
+        for dirpath, _, filenames in walk:
             rel = os.path.relpath(dirpath, local_path)
             rel_posix = '' if rel == '.' else rel.replace(os.sep, '/')
             remote_dir = normalize_remote_path(
@@ -1023,6 +1106,9 @@ def upload_directory(client, local_path: str, remote_path: str = "",
                     tick()
                 continue
 
+            # 本次运行新建的目录必然是空的，不必列目录判重
+            fresh_dir = not dry_run and tree.was_created(remote_dir)
+
             for fname in filenames:
                 local_file = os.path.join(dirpath, fname)
                 remote_file = f"/{remote_dir}/{fname}" if remote_dir else f"/{fname}"
@@ -1032,36 +1118,28 @@ def upload_directory(client, local_path: str, remote_path: str = "",
                     tick()
                     continue
 
-                try:
-                    result = client.file_service.upload_file(
-                        local_path=local_file,
-                        parent_id=parent_id,
-                        filename=fname,
-                        skip_if_exists=True,
-                        try_sha1_reuse=True,
-                    )
-                except Exception as e:
-                    stats.add(STATUS_FAIL, remote_file, str(e))
-                    emit(f"  {STATUS_ICONS[STATUS_FAIL]} 上传失败 {fname}: {e}")
-                else:
-                    if result and result.get('skipped'):
-                        stats.add(STATUS_SKIP, remote_file, "已存在同名同大小文件")
-                        if verbose:
-                            emit(f"  {STATUS_ICONS[STATUS_SKIP]} 跳过已存在文件: {fname}")
-                    elif result:
-                        if result.get('method') == 'sha1_reuse' or result.get('reuse'):
-                            stats.add_reuse(remote_file, "SHA1秒传")
-                            if verbose:
-                                emit(f"  {STATUS_ICONS[STATUS_HIT]} 秒传成功: {fname}")
-                        else:
-                            stats.add(STATUS_HIT, remote_file, "已上传")
-                            if verbose:
-                                emit(f"  {STATUS_ICONS[STATUS_HIT]} 上传成功: {fname}")
-                    else:
-                        stats.add(STATUS_FAIL, remote_file, "接口未返回结果")
-                        emit(f"  {STATUS_ICONS[STATUS_FAIL]} 上传返回失败: {fname}")
-                finally:
+                size = os.path.getsize(local_file)
+                if not fresh_dir and index is not None and \
+                        index.find_file(parent_id, fname, size) is not None:
+                    stats.add_loose(remote_file)
+                    if verbose:
+                        emit(f"  {STATUS_ICONS[STATUS_SKIP]} 跳过已存在文件: {fname}")
                     tick()
+                    continue
+
+                todo.append(_LocalFile(local_file, remote_file, fname, parent_id, size))
+
+        # -------- 阶段3：并发上传（限速器压住实际速率） --------
+        failed = run(todo, max_workers)
+
+        # -------- 阶段4：失败的串行重试一轮（仍失败就如实报出来） --------
+        if failed:
+            emit(f"  ↻ {len(failed)} 个文件失败，串行重试一轮...")
+            still_failed = run([item for item, _ in failed], 1, tick_done=False)
+            reason_by_file = {item.local_file: err for item, err in failed}
+            for item, err in still_failed:
+                stats.add(STATUS_FAIL, item.remote_file,
+                          reason_by_file.get(item.local_file, err))
     finally:
         if bar:
             bar.close()

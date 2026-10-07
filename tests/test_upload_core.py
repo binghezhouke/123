@@ -582,11 +582,13 @@ class StubUploadFileService(StubFileService):
         self.upload_results = results or {}
         self.error = error
         self.uploaded = []
+        self.calls = []   # (filename, skip_if_exists, try_sha1_reuse)
 
     def upload_file(self, local_path, parent_id, filename, skip_if_exists, try_sha1_reuse):
         if self.error:
             raise self.error
         self.uploaded.append((filename, parent_id))
+        self.calls.append((filename, skip_if_exists, try_sha1_reuse))
         return self.upload_results.get(filename, {"fileID": 1, "method": "sha1_reuse"})
 
 
@@ -672,3 +674,71 @@ def test_upload_directory_reports_dir_failure_and_continues(tmp_path):
 
     assert stats.fail == 1
     assert stats.hit == 1
+
+
+def test_upload_directory_skips_existing_via_snapshot(tmp_path):
+    """快照判重：目标目录已列出的同名同大小文件零请求跳过，不再调 upload_file。"""
+    (tmp_path / "a.txt").write_text("hello", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("world!", encoding="utf-8")
+    client = StubUploadClient()
+    client.file_service.listings[0] = [remote_dir_record("remote", 7)]
+    client.file_service.listings[7] = [
+        remote_file_record("a.txt", 5, MD5_A),
+        remote_file_record("b.txt", 6, MD5_B),
+    ]
+
+    stats = upload_directory(client, str(tmp_path), "remote", progress=False)
+
+    assert client.file_service.uploaded == []
+    assert client.file_service.mkdir_calls == []   # 目录从快照取 ID，也不 mkdir
+    assert stats.skip == 2
+    assert stats.existed == 2
+    assert stats.total == 2
+
+
+def test_upload_directory_uploads_same_name_different_size(tmp_path):
+    """同名但大小不同的文件不走快照跳过，照常上传。"""
+    (tmp_path / "a.txt").write_text("changed content", encoding="utf-8")
+    client = StubUploadClient()
+    client.file_service.listings[0] = [remote_dir_record("remote", 7)]
+    client.file_service.listings[7] = [remote_file_record("a.txt", 5, MD5_A)]
+
+    stats = upload_directory(client, str(tmp_path), "remote", progress=False)
+
+    assert [name for name, _ in client.file_service.uploaded] == ["a.txt"]
+    # 判重已在快照阶段做过，upload_file 不再为每个文件列目录
+    assert client.file_service.calls[0] == ("a.txt", False, True)
+    assert stats.hit == 1
+
+
+def test_upload_directory_retries_failed_uploads(tmp_path):
+    """第一轮全部失败、重试成功：最终计入 hit，而不是 fail。"""
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    client = StubUploadClient()
+    attempts = []
+
+    def flaky_upload(**kwargs):
+        attempts.append(kwargs["filename"])
+        if len(attempts) == 1:
+            raise Pan123APIError("slow down")
+        return {"fileID": 1, "reuse": True, "method": "sha1_reuse"}
+
+    client.file_service.upload_file = flaky_upload
+
+    stats = upload_directory(client, str(tmp_path), "remote", progress=False)
+
+    assert attempts == ["a.txt", "a.txt"]
+    assert stats.fail == 0
+    assert stats.hit == 1
+    assert stats.reuse == 1
+
+
+def test_upload_directory_dedup_counts_only_once_on_persistent_failure(tmp_path):
+    """持续失败的文件只记一次 fail（重试不重复计数），原因取第一轮的错误。"""
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    client = StubUploadClient(error=Pan123APIError("disk full"))
+
+    stats = upload_directory(client, str(tmp_path), "remote", progress=False)
+
+    assert stats.fail == 1
+    assert "disk full" in stats.failures[0][1]

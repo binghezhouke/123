@@ -9,7 +9,8 @@
 脚本会：
 - 使用仓库中的 ``Pan123Client`` 客户端进行认证
 - 在远程创建对应目录结构（逐级创建并缓存目录ID）
-- 逐文件上传，同名同大小文件跳过，先试 SHA1 秒传再走分片上传
+- 先用目录快照零请求判重（同名同大小跳过），再并发上传（先试 SHA1 秒传再走分片上传），
+  实际请求速率受 --rate 限制；失败的串行重试一轮
 
 实际逻辑在 upload_core.upload_directory。
 """
@@ -31,6 +32,8 @@ def main():
     parser.add_argument('--dry-run', action='store_true', help='仅打印计划操作，不实际上传')
     parser.add_argument('--rate', type=float, default=DEFAULT_RATE,
                         help=f'每秒请求数上限 (默认: {DEFAULT_RATE:g}；0 表示不限速)')
+    parser.add_argument('-j', '--workers', type=int, default=8,
+                        help='并发上传线程数 (默认: 8；实际请求速率仍受 --rate 限制)')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='逐条打印每个文件的结果（默认只打印失败项）')
     args = parser.parse_args()
@@ -48,7 +51,8 @@ def main():
             stats = upload_directory(client, local_path, args.remote_path,
                                      dry_run=args.dry_run,
                                      rate=None if args.rate <= 0 else args.rate,
-                                     verbose=args.verbose)
+                                     verbose=args.verbose,
+                                     max_workers=max(1, args.workers))
     except KeyboardInterrupt:
         print("\n用户中断")
         sys.exit(3)
