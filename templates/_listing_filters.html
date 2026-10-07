@@ -1,0 +1,6 @@
+<label>排序 <select name="sort">
+{% for value,label in [('original','原始顺序'),('name','自然名称'),('size','大小')] %}<option value="{{ value }}" {% if sort|default('original') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+</select></label>
+<label>方向 <select name="direction"><option value="asc" {% if direction|default('asc') == 'asc' %}selected{% endif %}>升序</option><option value="desc" {% if direction == 'desc' %}selected{% endif %}>降序</option></select></label>
+<label>类型 <select name="kind">{% for value,label in [('all','全部'),('image','图片'),('video','视频')] %}<option value="{{ value }}" {% if kind|default('all') == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+<button type="submit" class="btn btn-secondary">应用</button>

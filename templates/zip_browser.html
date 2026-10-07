@@ -22,7 +22,7 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="password">
                 <input type="hidden" name="path" value="{{ prefix }}">
-                {% if password_required and member_id is not none %}<input type="hidden" name="member_id" value="{{ member_id }}"><input type="hidden" name="v" value="{{ archive_version }}"><input type="hidden" name="download" value="{{ request.args.get('download', '') }}">{% endif %}
+                {% if password_required and member_id is not none %}<input type="hidden" name="member_id" value="{{ member_id }}"><input type="hidden" name="v" value="{{ archive_version }}"><input type="hidden" name="download" value="{{ request.args.get('download', '') }}">{% if request.args.get("expected_path") is not none %}<input type="hidden" name="expected_path" value="{{ request.args['expected_path'] }}">{% endif %}{% endif %}
                 <label for="zip-password-entry">{% if password_set %}重新输入压缩包密码{% else %}压缩包密码{% endif %}</label>
                 <input id="zip-password-entry" type="password" name="password" required maxlength="1024" autocomplete="current-password">
                 <button class="btn btn-primary" type="submit">{% if password_required %}重新提交密码{% elif password_set %}修改密码{% else %}解锁压缩包{% endif %}</button>
@@ -39,25 +39,27 @@
         </section>
         {% endif %}
         {% if not password_required %}
+        <form method="get" class="browser-filters"><input type="hidden" name="path" value="{{ prefix }}">{% include '_listing_filters.html' %}</form>
         <div class="table-responsive">
             <table class="table" data-column-layout="archive">
                 <thead><tr><th>名称</th><th>解压后大小</th><th>操作</th></tr></thead>
                 <tbody>
                 {% for folder in folders %}
-                    <tr><td><a href="{{ url_for('zip.browse', file_id=file.fileId, path=prefix ~ folder ~ '/') }}"><i class="fas fa-folder" aria-hidden="true"></i> {{ folder }}/</a></td><td>—</td><td></td></tr>
+                    <tr><td><a href="{{ url_for('zip.browse', file_id=file.fileId, path=prefix ~ folder ~ '/', sort=sort, direction=direction, kind=kind) }}"><i class="fas fa-folder" aria-hidden="true"></i> {{ folder }}/</a></td><td>—</td><td></td></tr>
                 {% endfor %}
                 {% for entry in files %}
-                    <tr id="archive-member-{{ entry.id }}" data-favorite-key="zip:{{ file.fileId }}:{{ archive_version }}:{{ entry.id }}" data-favorite-name="{{ entry.name }}" data-favorite-url="{{ url_for('zip.browse', file_id=file.fileId, path=prefix) }}#archive-member-{{ entry.id }}">
+                    <tr id="archive-member-{{ entry.id }}" data-favorite-key="zip:{{ file.fileId }}:{{ archive_version }}:{{ entry.id }}" data-favorite-member-path="{{ entry.member_path }}" data-favorite-name="{{ entry.name }}" data-favorite-url="{{ url_for('zip.browse', file_id=file.fileId, path=prefix) }}#archive-member-{{ entry.id }}">
                         <td style="overflow-wrap: anywhere;">{{ entry.name }}{% if entry.encrypted %} <span class="badge bg-secondary">加密</span>{% endif %}{% if entry.video %} <span class="badge bg-secondary">视频</span>{% endif %}</td>
                         <td>{{ '{:,}'.format(entry.size) }} B</td>
                         <td>
                             {% if solid %}固实压缩：请下载原文件
                             {% elif entry.encrypted and not password_set %}<a href="#archive-password-entry">输入密码</a>
+                            {% elif entry.nested %}<a class="btn btn-sm btn-primary" href="{{ url_for('nested_archive.prepare', file_id=file.fileId, member_id=entry.id, v=archive_version) }}">准备并浏览内层压缩包</a>
                             {% elif entry.client_video %}
                                 <button type="button" class="btn btn-sm btn-primary zip-client-video" data-url="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, client_video=1, v=archive_version) }}" data-name="{{ entry.name }}">在浏览器中播放</button>
                                 <a class="btn btn-sm btn-secondary" href="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, download=1, v=archive_version) }}">下载</a>
                             {% elif entry.video and entry.streamable %}
-                                <a class="btn btn-sm btn-primary" href="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, v=archive_version) }}">播放视频</a>
+                                <a class="btn btn-sm btn-primary" href="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, v=archive_version, sort=sort, direction=direction) }}">播放视频</a>
                                 <a class="btn btn-sm btn-secondary" href="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, download=1, v=archive_version) }}">下载</a>
                             {% elif entry.video %}
                                 <span class="text-secondary">{{ entry.client_video_reason or '暂不支持直接播放压缩或加密的视频' }}</span>
@@ -81,32 +83,8 @@
 {% endblock %}
 
 {% block extra_scripts %}
-
-<dialog id="zip-gallery" aria-labelledby="zip-gallery-title">
-    <div class="zip-gallery-toolbar">
-        <h2 id="zip-gallery-title">图片预览</h2>
-        <span id="zip-gallery-counter"></span>
-        <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
-        <button id="zip-gallery-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">全屏</button>
-        <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
-    </div>
-    <div class="zip-gallery-zoom" role="group" aria-label="图片缩放">
-        <button id="zip-gallery-zoom-out" class="btn btn-secondary" type="button" aria-label="缩小图片" disabled>−</button>
-        <span id="zip-gallery-zoom-level" title="相对于适应窗口大小的缩放比例">100%</span>
-        <button id="zip-gallery-zoom-in" class="btn btn-secondary" type="button" aria-label="放大图片" disabled>＋</button>
-        <button id="zip-gallery-zoom-reset" class="btn btn-secondary" type="button" disabled>适应窗口</button>
-    </div>
-    <div id="zip-gallery-stage"></div>
-    <p id="zip-gallery-status" role="status" aria-live="polite"></p>
-    <div class="zip-gallery-toolbar gallery-controls">
-        <button id="zip-gallery-prev" class="btn btn-secondary" type="button">← 上一张</button>
-        <button id="zip-gallery-retry" class="btn btn-secondary" type="button" hidden>重试</button>
-        <button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
-    </div>
-</dialog>
-<script src="{{ url_for('static', filename='js/vendor/panzoom/panzoom.min.js') }}" defer></script>
-<script src="{{ url_for('static', filename='js/image_viewport.js') }}" defer></script>
-<script src="{{ url_for('static', filename='js/zip_gallery.js') }}" defer></script>
+{% set gallery_scope = 'archive:' ~ file.fileId ~ ':' ~ archive_version ~ ':' ~ prefix %}
+{% include '_image_gallery.html' %}
 <dialog id="zip-client-video" aria-labelledby="zip-client-video-title" data-worker-url="{{ url_for('static', filename='js/zip_inflate_worker.js') }}">
     <div class="zip-video-toolbar">
         <h2 id="zip-client-video-title">视频预览</h2>
@@ -116,6 +94,8 @@
     <progress id="zip-client-video-progress" max="1" value="0"></progress>
     <p id="zip-client-video-status" role="status" aria-live="polite">正在准备直接播放，当前页面保留一个视频。</p>
     <div class="zip-video-actions">
+        <button id="zip-client-video-prev" class="btn btn-secondary" type="button">上一个视频</button>
+        <button id="zip-client-video-next" class="btn btn-secondary" type="button">下一个视频</button>
         <button id="zip-client-video-cancel" class="btn btn-secondary" type="button" hidden>取消</button>
         <button id="zip-client-video-retry" class="btn btn-secondary" type="button" hidden>重试</button>
         <a id="zip-client-video-download" class="btn btn-secondary" hidden>下载视频</a>

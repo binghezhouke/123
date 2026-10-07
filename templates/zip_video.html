@@ -8,6 +8,8 @@
     <div class="card-body">
         <nav aria-label="视频操作" class="archive-path">
             <a href="{{ back_url }}">返回压缩包目录</a>
+            {% if previous_video %}<a href="{{ previous_video }}">上一个视频</a>{% endif %}
+            {% if next_video %}<a href="{{ next_video }}">下一个视频</a>{% endif %}
             <a class="btn btn-sm btn-secondary" href="{{ download_url }}">下载视频</a>
         </nav>
         <div class="zip-video-frame">

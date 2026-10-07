@@ -143,6 +143,8 @@ class SplitRangeReader(io.RawIOBase):
         )
 
     def read(self, size=-1):
+        if getattr(self, "cancel_event", None) is not None and self.cancel_event.is_set():
+            raise InterruptedError("已取消")
         size = self.size - self.position if size is None or size < 0 else min(size, self.size - self.position)
         if size <= 0:
             return b""
@@ -167,6 +169,7 @@ class SplitRangeReader(io.RawIOBase):
                 expected = RangeSnapshot(part.size, self.validators.get(index), ())
                 self.readers[index] = RangeReader(self.volumes.url(index, self.resolve), snapshot=expected)
             reader = self.readers[index]
+            reader.cancel_event = getattr(self, "cancel_event", None)
             reader.deadline = self.deadline
             reader.remaining = self.remaining
             data = reader._fetch(relative, relative + count - 1)

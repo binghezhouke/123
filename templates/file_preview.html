@@ -10,6 +10,7 @@
 <div class="file-preview-stage" style="min-height: 60vh; display: flex; justify-content: center; align-items: center; background: var(--bg-secondary, #f5f5f7); border-radius: 12px; padding: 12px;">
 {% set source = url_for('preview.content', file_id=file.fileId) %}
 {% if kind == 'image' %}
+<button type="button" class="btn btn-primary" data-gallery-image data-file-id="{{ file.fileId }}" data-url="{{ source }}" data-name="{{ file.filename }}">浏览图片</button>
 <img src="{{ source }}" alt="{{ file.filename }}" style="max-width: 100%; max-height: 75vh; object-fit: contain;" onerror="document.getElementById('preview-error').hidden=false;">
 {% elif kind == 'video' %}
 <video src="{{ source }}" controls preload="metadata" style="max-width: 100%; max-height: 75vh;"></video>
@@ -20,4 +21,7 @@
 {% endif %}
 </div>
 <p id="preview-error" role="status" hidden>文件预览失败，请刷新重试或下载文件。</p>
+{% endblock %}
+{% block extra_scripts %}
+{% if kind == 'image' %}{% set gallery_scope = 'directory:' ~ file.get('parentFileId', 0) %}{% include '_image_gallery.html' %}{% endif %}
 {% endblock %}

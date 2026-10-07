@@ -18,6 +18,7 @@
         button.setAttribute('aria-busy', 'true');
         button.textContent = '加载中…';
         status.textContent = '';
+        let succeeded = false;
         try {
             const response = await fetch(url, {headers: {'X-Requested-With': 'XMLHttpRequest'}});
             if (!response.ok) throw new Error('读取失败');
@@ -41,6 +42,7 @@
                 container.append(fragment);
             }
             completed.add(url);
+            succeeded = true;
             const count = document.querySelectorAll('#fileContainer .file-item').length;
             if (count) document.querySelector('.empty-state')?.remove();
             const heading = document.querySelector('[data-file-count]');
@@ -60,11 +62,13 @@
                 element.scrollTop = top;
                 element.scrollLeft = left;
             }
+            document.dispatchEvent(new CustomEvent('files:appended', {detail: {url}}));
         } catch {
             status.textContent = '加载失败，当前列表已保留，请重试。';
             button.textContent = '重试加载';
         } finally {
             busy = false;
+            document.dispatchEvent(new CustomEvent('files:load-complete', {detail: {ok: succeeded}}));
             button.removeAttribute('aria-busy');
             if (button.hasAttribute('href')) button.removeAttribute('aria-disabled');
         }

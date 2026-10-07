@@ -1,5 +1,9 @@
 {% extends "base.html" %}
 
+{% block extra_head %}
+<link href="{{ url_for('static', filename='css/browser_position.css') }}" rel="stylesheet">
+{% endblock %}
+
 {% block title %}{% if parent_id != 0 %}文件夹 - {% endif %}CloudArchive{% endblock %}
 
 {% block content %}
@@ -8,9 +12,13 @@
     <div><p class="eyebrow">资料库</p><h1>{{ breadcrumbs[-1].name if breadcrumbs|default([]) else '我的文件' }}</h1></div>
     <span class="item-count" data-file-count>{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
 </header>
+<form method="get" class="browser-filters">
+    <input type="hidden" name="parent_id" value="{{ parent_id }}">
+    {% include '_listing_filters.html' %}
+</form>
 <div class="file-grid" id="fileContainer">
     {% for file in files %}
-    <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+    <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" {% if not file.is_folder and file.file_extension in ['.png','.jpg','.jpeg','.gif','.webp','.bmp'] %}data-gallery-image data-url="{{ url_for('preview.content', file_id=file.fileId) }}" data-name="{{ file.filename }}"{% endif %} data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
         <a class="favorite-file-link" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}"><div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}"><i class="{{ file.icon }}" aria-hidden="true"></i></div>
         <div class="file-grid-name">{{ file.filename }}</div>
         <span class="file-grid-meta">{{ '文件夹' if file.is_folder else file.size_formatted }}</span>
@@ -21,7 +29,7 @@
 <div class="file-list" id="fileListView" data-column-layout="files" style="display: none;">
     <div class="file-list-header"><div>名称</div><div>大小</div><div>类型</div><div>修改日期</div></div>
     {% for file in files %}
-    <div class="file-list-row file-item" data-file-id="{{ file.fileId }}" data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+    <div class="file-list-row file-item" data-file-id="{{ file.fileId }}" {% if not file.is_folder and file.file_extension in ['.png','.jpg','.jpeg','.gif','.webp','.bmp'] %}data-gallery-image data-url="{{ url_for('preview.content', file_id=file.fileId) }}" data-name="{{ file.filename }}"{% endif %} data-favorite-key="file:{{ file.fileId }}" data-favorite-name="{{ file.filename }}" data-favorite-url="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
         <a class="file-list-name favorite-file-link" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}"><span class="file-list-icon"><i class="{{ file.icon }}" aria-hidden="true"></i></span>{{ file.filename }}</a>
         <div class="file-list-meta">{{ file.size_formatted if not file.is_folder else '—' }}</div>
         <div class="file-list-meta">{{ file.category_name }}</div>
@@ -31,9 +39,9 @@
 </div>
 
 <!-- Pagination -->
-{% if next_last_file_id and next_last_file_id != -1 %}
+{% if (next_last_file_id and next_last_file_id != -1) or next_offset is not none and next_offset is defined %}
 <div class="d-flex justify-content-center mt-4">
-    <a href="{{ url_for('main.index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}"
+    <a href="{{ url_for('main.index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit, sort=sort, direction=direction, kind=kind, snapshot=snapshot, offset=next_offset) }}"
        class="btn btn-primary" data-load-more>
         <i class="fas fa-chevron-right" style="margin-right: 6px;"></i> 加载更多
     </a>
@@ -53,6 +61,10 @@
 {% endblock %}
 
 {% block extra_scripts %}
+{% set gallery_scope = 'directory:' ~ parent_id %}
+{% set gallery_index_url = url_for('main.directory_images', parent_id=parent_id, sort=sort, direction=direction) %}
+{% include '_image_gallery.html' %}
+<script src="{{ url_for('static', filename='js/browser_position.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/file_pagination.js') }}" defer></script>
 <script>
 // View switching - Override the base function for this page

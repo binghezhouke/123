@@ -1,0 +1,10 @@
+.file-item.browser-restored-selection {
+    outline: 2px solid var(--accent-color, #4b8fe2);
+    outline-offset: 2px;
+    border-radius: 6px;
+    background-color: color-mix(in srgb, var(--accent-color, #4b8fe2) 10%, transparent);
+}
+
+.file-item.browser-restored-selection:focus-within {
+    outline-width: 3px;
+}

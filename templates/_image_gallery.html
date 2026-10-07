@@ -1,0 +1,37 @@
+<button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
+<dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="{{ gallery_scope|default(request.path ~ '?' ~ request.query_string.decode('utf-8', 'ignore')) }}" {% if gallery_index_url|default('') %}data-gallery-index-url="{{ gallery_index_url }}"{% endif %}>
+    <div class="zip-gallery-toolbar">
+        <h2 id="zip-gallery-title">图片预览</h2><span id="zip-gallery-counter"></span>
+        <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
+        <button id="zip-gallery-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">全屏</button>
+        <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
+    </div>
+    <div class="zip-gallery-zoom" role="group" aria-label="图片缩放">
+        <button id="zip-gallery-zoom-out" class="btn btn-secondary" type="button" aria-label="缩小图片" disabled>−</button><span id="zip-gallery-zoom-level">100%</span>
+        <button id="zip-gallery-zoom-in" class="btn btn-secondary" type="button" aria-label="放大图片" disabled>＋</button>
+        <button id="zip-gallery-zoom-reset" class="btn btn-secondary" type="button" disabled>适应窗口</button>
+        <button id="zip-gallery-original" class="btn btn-secondary" type="button">原始尺寸 1:1</button>
+        <button id="zip-gallery-rotate" class="btn btn-secondary" type="button">旋转 90°</button>
+    </div>
+    <div id="zip-gallery-stage"></div>
+    <p id="zip-gallery-status" role="status" aria-live="polite"></p>
+    <div class="zip-gallery-toolbar gallery-controls">
+        <button id="zip-gallery-prev" class="btn btn-secondary" type="button">← 上一张</button><button id="zip-gallery-retry" class="btn btn-secondary" type="button" hidden>重试</button><button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
+        <button id="zip-gallery-thumb-toggle" class="btn btn-secondary" type="button" aria-expanded="false">缩略图</button>
+        <form id="zip-gallery-jump-form"><label for="zip-gallery-jump-input">序号</label><input id="zip-gallery-jump-input" type="number" min="1" step="1" required><button class="btn btn-secondary" type="submit">跳转</button></form>
+    </div>
+    <p id="zip-gallery-jump-message" role="status"></p>
+    <div id="zip-gallery-thumbs" class="gallery-thumbs" hidden></div>
+    <div id="zip-gallery-index" hidden></div>
+    <details id="zip-gallery-settings"><summary>预取设置</summary><form id="zip-gallery-settings-form">
+        <label>预取数量 <input id="zip-gallery-setting-count" type="number" min="0" max="50" value="9"> 张</label>
+        <label>后台并发 <input id="zip-gallery-setting-concurrency" type="number" min="1" max="6" value="2"> 个</label>
+        <label>缓存预算 <input id="zip-gallery-setting-budget" type="number" min="16" max="2048" value="256"> MiB</label>
+        <button class="btn btn-secondary" type="submit">保存</button><button id="zip-gallery-settings-reset" class="btn btn-secondary" type="button">恢复默认</button>
+    </form></details>
+    <details id="zip-gallery-diagnostics"><summary>预取与缓存诊断</summary><p id="zip-gallery-diagnostics-output"></p><button id="zip-gallery-diagnostics-reset" class="btn btn-secondary" type="button">重置统计</button></details>
+</dialog>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/gallery.css') }}">
+<script src="{{ url_for('static', filename='js/vendor/panzoom/panzoom.min.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/image_viewport.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/zip_gallery.js') }}" defer></script>

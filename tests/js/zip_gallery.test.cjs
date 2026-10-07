@@ -3,9 +3,20 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 
-function setup({count = 5, blobSize = 1, viewport = null} = {}) {
-    const element = () => ({dataset: {}, handlers: {}, children: [],
-        addEventListener(event, handler) { this.handlers[event] = handler; },
+function setup({count = 5, blobSize = 1, viewport = null, indexPages = null, delayIndex = false} = {}) {
+    const documentHandlers = {};
+    const element = () => ({dataset: {}, handlers: {}, children: [], isConnected: true,
+        addEventListener(event, handler) {
+            this.handlers[event] = handler;
+            if (event === 'click') this.handlers[event] = supplied => {
+                const value = supplied || {target: this, preventDefault() {}};
+                handler(value); (documentHandlers.click || []).forEach(listener => listener(value));
+            };
+        },
+        closest(selector) { return selector.includes('data-gallery-resume') && this.dataset.galleryResume !== undefined ? this : selector.includes('data-gallery-image') || selector.includes('.zip-image') ? this : null; },
+        getAttribute() { return ''; },
+        append(child) { this.children.push(child); },
+        get childElementCount() { return this.children.length; },
         replaceChildren(...children) { this.children = children; },
         showModal() { this.open = true; },
         close() { this.open = false; this.handlers.close(); }});
@@ -14,20 +25,38 @@ function setup({count = 5, blobSize = 1, viewport = null} = {}) {
         if (!elements.has(id)) elements.set(id, element());
         return elements.get(id);
     };
-    const buttons = Array.from({length: count}, (_, i) => Object.assign(element(), {dataset: {url: `/member/${i}`, name: `${i}.jpg`}}));
-    const requests = [], revoked = [];
+    const buttons = Array.from({length: count}, (_, i) => Object.assign(element(), {dataset: {url: `/member/${i}`, name: `${i}.jpg`, fileId: String(i)}}));
+    const requests = [], indexRequests = [], revoked = [];
+    const storage = new Map();
     let blobId = 0;
     vm.runInNewContext(fs.readFileSync('static/js/zip_gallery.js', 'utf8'), {
-        document: {querySelectorAll: () => buttons, getElementById: get},
+        document: {
+            querySelectorAll: () => buttons, getElementById: get, createElement: () => element(),
+            querySelector: selector => selector === '[data-gallery-resume]' ? get('gallery-resume') : null,
+            addEventListener: (name, handler) => { (documentHandlers[name] ||= []).push(handler); },
+            removeEventListener: name => { delete documentHandlers[name]; },
+        },
+        localStorage: {getItem: key => storage.get(key) || null, setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)},
+        location: {pathname: '/directory/0', search: ''},
         AbortController, DOMException, Image: class {},
         createArchiveImageViewport: viewport ? () => viewport : undefined,
         URL: {createObjectURL: () => `blob:${++blobId}`, revokeObjectURL: url => revoked.push(url)},
-        fetch: (url, {signal}) => new Promise((resolve, reject) => {
-            requests.push({url, signal, resolve: () => resolve({ok: true, headers: {get: () => 'image/jpeg'}, blob: async () => ({size: typeof blobSize === 'function' ? blobSize(url) : blobSize})}), reject});
+        fetch: (url, {signal}) => {
+            if (url === '/api/images') {
+                if (!delayIndex) return Promise.resolve({ok: true, json: async () => ({items: indexPages, next: null})});
+                return new Promise((resolve, reject) => { indexRequests.push({signal, resolve: () => resolve({ok:true,json:async()=>({items:indexPages,next:null})}), reject}); signal.addEventListener('abort',()=>reject(new DOMException('Aborted','AbortError'))); });
+            }
+            return new Promise((resolve, reject) => {
+            requests.push({url, signal, resolve: () => resolve({ok: true, headers: {get: name => name === 'Server-Timing' ? 'extract;dur=12' : 'image/jpeg'}, blob: async () => ({size: typeof blobSize === 'function' ? blobSize(url) : blobSize})}), reject});
             signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
-        }),
+            });
+        },
     });
-    return {buttons, get, requests, revoked};
+    get('zip-gallery').dataset.galleryScope = 'directory:0';
+    get('gallery-resume').dataset.galleryResume = '';
+    if (indexPages) get('zip-gallery').dataset.galleryIndexUrl = '/api/images';
+    for (const button of buttons) button.handlers.click = () => (documentHandlers.click || []).forEach(handler => handler({target:button, preventDefault() {}}));
+    return {buttons, get, requests, revoked, storage, indexRequests, dispatchClick:target=>(documentHandlers.click||[]).forEach(handler=>handler({target,preventDefault(){}}))};
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -162,6 +191,79 @@ test('byte-budget eviction does not cause endless prefetch refetching', async ()
     assert.equal(requests.length, 10);
     assert.equal(requests.filter(r => !r.done).length, 0);
     assert.equal(get('zip-gallery-stage').children[0].alt, '0.jpg');
+});
+
+test('failed prefetch entries are attempted once and do not spin', async () => {
+    const {buttons, get, requests} = setup({count: 5});
+    buttons[0].handlers.click(); requests[0].done = true; requests[0].resolve(); await tick();
+    get('zip-gallery-stage').children[0].onload();
+    requests[1].done = true; requests[1].reject(new Error('network failure')); await tick();
+    requests[2].done = true; requests[2].resolve(); await tick();
+    await drainPrefetch(requests);
+    assert.equal(requests.filter(request => request.url === '/member/1').length, 1);
+});
+
+test('gallery progress is stored by stable image id', async () => {
+    const {buttons, get, requests, storage} = setup();
+    buttons[3].handlers.click(); requests[0].resolve(); await tick();
+    assert.deepEqual(JSON.parse(storage.get('galleryProgress:directory:0')), {identity: '3', name: '3.jpg'});
+});
+
+test('resume loads the metadata index before returning to a saved image', async () => {
+    const {get, requests, storage, dispatchClick} = setup({count:3,indexPages:[
+        {id:0,name:'0.jpg',url:'/member/0'}, {id:1,name:'1.jpg',url:'/member/1'}, {id:2,name:'2.jpg',url:'/member/2'},
+    ]});
+    storage.set('galleryProgress:directory:0',JSON.stringify({identity:'2',name:'2.jpg'}));
+    dispatchClick(get('gallery-resume')); await tick(); await tick();
+    assert.equal(requests[0].url,'/member/2');
+    assert.equal(get('zip-gallery-counter').textContent,'3 / 3');
+});
+
+test('metadata index supports cross-page jump and reopening after the index is cached', async () => {
+    const {buttons, get, requests} = setup({count: 3, indexPages: [
+        {id: 0, name: '0.jpg', url: '/member/0'},
+        {id: 1, name: '1.jpg', url: '/member/1'},
+        {id: 2, name: '2.jpg', url: '/member/2'},
+    ]});
+    buttons[1].handlers.click(); await tick(); requests[0].resolve(); await tick();
+    assert.equal(get('zip-gallery-counter').textContent, '2 / 3');
+    get('zip-gallery-close').onclick();
+    buttons[2].handlers.click(); await tick(); requests[1].resolve(); await tick();
+    assert.equal(get('zip-gallery-counter').textContent, '3 / 3');
+});
+
+test('closing during a metadata fetch aborts it and a fresh open starts a new fetch', async () => {
+    const {buttons, get, requests, indexRequests} = setup({count:3, delayIndex:true, indexPages:[
+        {id:0,name:'0.jpg',url:'/member/0'}, {id:1,name:'1.jpg',url:'/member/1'}, {id:2,name:'2.jpg',url:'/member/2'},
+    ]});
+    buttons[0].handlers.click(); await tick(); assert.equal(indexRequests.length,1);
+    get('zip-gallery-close').onclick(); assert.equal(indexRequests[0].signal.aborted,true);
+    buttons[2].handlers.click(); await tick(); assert.equal(indexRequests.length,2);
+    indexRequests[1].resolve(); await tick(); await tick();
+    assert.equal(requests[0].url,'/member/2');
+    assert.equal(get('zip-gallery-title').textContent,'2.jpg');
+});
+
+test('prefetch settings persist and cap background concurrency', async () => {
+    const {buttons, get, requests, storage} = setup();
+    get('zip-gallery-setting-count').value = '1';
+    get('zip-gallery-setting-concurrency').value = '1';
+    get('zip-gallery-setting-budget').value = '16';
+    get('zip-gallery-settings-form').handlers.submit({preventDefault() {}});
+    assert.deepEqual(JSON.parse(storage.get('imageGallerySettings')), {count: 1, concurrency: 1, budget: 16});
+    buttons[0].handlers.click(); requests[0].resolve(); await tick(); get('zip-gallery-stage').children[0].onload();
+    assert.equal(requests.length, 2);
+});
+
+test('diagnostics report request and server extraction time separately', async () => {
+    const {buttons, get, requests} = setup();
+    get('zip-gallery-diagnostics').open = true;
+    buttons[0].handlers.click(); requests[0].resolve(); await tick();
+    get('zip-gallery-stage').children[0].onload();
+    assert.match(get('zip-gallery-diagnostics-output').textContent, /请求平均 .* ms/);
+    assert.match(get('zip-gallery-diagnostics-output').textContent, /服务器解压平均 12 ms/);
+    get('zip-gallery-diagnostics-reset').handlers.click({target:{closest:()=>null}});
+    assert.match(get('zip-gallery-diagnostics-output').textContent, /服务器解压平均 未知/);
 });
 
 async function drainPrefetch(requests) {

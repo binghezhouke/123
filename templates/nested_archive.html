@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}内层压缩包 · CloudArchive{% endblock %}
+{% block content %}
+<main class="container-fluid py-4">
+  {% if mode == 'prepare' %}
+  <section class="card p-4 mx-auto" style="max-width: 680px">
+    <h1 class="h4">准备内层压缩包</h1>
+    <p>此操作会在后台将内层压缩包解压到有容量和过期限制的本地缓存。处理完成后可浏览目录。</p>
+    <form method="post">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="v" value="{{ archive_version }}">
+      <label class="form-label" for="outer-password">外层压缩包密码（如需要）</label>
+      <input class="form-control mb-3" id="outer-password" name="outer_password" type="password" maxlength="1024" autocomplete="current-password">
+      <label class="form-label" for="inner-password">内层压缩包密码（如需要）</label>
+      <input class="form-control mb-3" id="inner-password" name="inner_password" type="password" maxlength="1024" autocomplete="current-password">
+      <button class="btn btn-primary" type="submit">开始准备</button>
+    </form>
+  </section>
+  {% elif mode == 'status' %}
+  <section class="card p-4 mx-auto" style="max-width: 680px" data-job-url="{{ url_for('nested_archive.job_status', job_id=status.id) }}" data-csrf="{{ csrf_token }}" data-state="{{ status.state }}">
+    <h1 class="h4">内层压缩包准备</h1>
+    <p id="job-phase" role="status" aria-live="polite">{{ status.phase }}</p>
+    <p id="job-progress">已处理 {{ '{:,}'.format(status.processed) }} B{% if status.total is not none %} / {{ '{:,}'.format(status.total) }} B{% endif %}</p>
+    <progress id="job-bar" max="100" value="0" hidden></progress>
+    <p id="job-error" class="text-danger">{{ status.error or '' }}</p>
+    <form id="cancel-job" method="post" action="{{ url_for('nested_archive.job_status', job_id=status.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button class="btn btn-outline-danger" type="submit" {% if status.state not in ['queued', 'running'] %}hidden{% endif %}>取消准备</button>
+    </form>
+    {% if browse_url %}<a id="browse-ready" class="btn btn-primary" href="{{ browse_url }}">浏览内层目录</a>{% else %}<a id="browse-ready" hidden></a>{% endif %}
+    <button id="retry-status" class="btn btn-outline-secondary" type="button" hidden onclick="location.reload()">重新获取状态</button>
+  </section>
+  {% elif mode == 'browse' %}
+  <section class="card p-4">
+    <h1 class="h4">内层压缩包目录</h1>
+    <nav class="mb-3"><a href="{{ url_for('nested_archive.browse', job_id=job_id, path=parent) if prefix else url_for('nested_archive.job_page', job_id=job_id) }}">上级目录</a>{% if prefix %}<span> / {{ prefix }}</span>{% endif %}</nav>
+    <div class="table-responsive"><table class="table"><thead><tr><th>名称</th><th>大小</th><th>操作</th></tr></thead><tbody>
+      {% for name in dirs %}<tr><td>📁 <a href="{{ url_for('nested_archive.browse', job_id=job_id, path=(prefix + '/' if prefix else '') + name) }}">{{ name }}/</a></td><td>—</td><td></td></tr>{% endfor %}
+      {% for item in files %}<tr><td>{{ item.name }}</td><td>{{ '{:,}'.format(item.size) }} B</td><td>{% if item.image %}<button type="button" class="btn btn-sm btn-primary zip-image" data-url="{{ item.url }}" data-name="{{ item.name }}">浏览图片</button>{% else %}<a class="btn btn-sm btn-primary" href="{{ item.url }}" target="_blank" rel="noopener">打开</a>{% endif %} <a class="btn btn-sm btn-secondary" href="{{ item.url }}?download=1">下载</a></td></tr>{% endfor %}
+      {% if not dirs and not files %}<tr><td colspan="3">此目录为空</td></tr>{% endif %}
+    </tbody></table></div>
+  </section>
+  {% include "_image_gallery.html" %}
+  {% endif %}
+</main>
+{% endblock %}
+{% block extra_scripts %}
+{% if mode == 'status' %}
+<script>
+(() => {
+  const box = document.querySelector('[data-job-url]');
+  const phase = document.getElementById('job-phase');
+  const progress = document.getElementById('job-progress');
+  const bar = document.getElementById('job-bar');
+  const error = document.getElementById('job-error');
+  const button = document.querySelector('#cancel-job button');
+  const ready = document.getElementById('browse-ready');
+  const bytes = value => `${Number(value || 0).toLocaleString()} B`;
+  const poll = async () => {
+    try {
+      const response = await fetch(box.dataset.jobUrl, {headers: {'Accept': 'application/json'}});
+      if (!response.ok) {
+        phase.textContent = '无法获取任务状态';
+        error.textContent = '任务可能已过期或当前会话已变化，请返回目录重新准备。';
+        document.getElementById('retry-status').hidden = false;
+        return;
+      }
+      const state = await response.json();
+      phase.textContent = state.phase;
+      progress.textContent = `已处理 ${bytes(state.processed)}${state.total === null ? '' : ` / ${bytes(state.total)}`}`;
+      if (state.total > 0) { bar.hidden = false; bar.value = Math.min(100, state.processed / state.total * 100); }
+      error.textContent = state.error || '';
+      if (button) button.hidden = !['queued', 'running'].includes(state.state);
+      if (state.browse_url) { ready.hidden = false; ready.href = state.browse_url; ready.textContent = '浏览内层目录'; }
+      if (['queued', 'running'].includes(state.state)) setTimeout(poll, 800);
+    } catch (_) {
+      phase.textContent = '连接中断';
+      error.textContent = '无法连接到任务状态服务，请稍后重试。';
+      document.getElementById('retry-status').hidden = false;
+    }
+  };
+  document.getElementById('cancel-job').addEventListener('submit', async event => {
+    event.preventDefault();
+    if (button) button.disabled = true;
+    try { await fetch(box.dataset.jobUrl, {method: 'POST', body: new FormData(event.currentTarget)}); }
+    catch (_) { error.textContent = '取消请求未能送达，请检查连接后重试。'; }
+    finally { if (button) button.disabled = false; poll(); }
+  });
+  if (box.dataset.state !== 'complete') poll();
+})();
+</script>
+{% endif %}
+{% endblock %}

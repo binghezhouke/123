@@ -6,6 +6,7 @@ import re
 import struct
 import time
 import zipfile
+import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -131,6 +132,8 @@ class RangeReader(io.RawIOBase):
             self.size, self.validator = size, validator
             data = bytearray()
             for chunk in response.iter_content(64 * 1024):
+                if getattr(self, "cancel_event", None) is not None and self.cancel_event.is_set():
+                    raise InterruptedError("已取消")
                 data.extend(chunk)
                 if len(data) > length or time.monotonic() > self.deadline:
                     raise ZipPreviewError("ZIP 读取超过大小或时间限制")
@@ -200,14 +203,14 @@ def open_remote_zip(url, snapshot=None, record=False, password=None):
             raise zipfile.BadZipFile(str(exc)) from exc
 
 
-def read_member(archive, source, entry, max_size=FILE_LIMIT):
+def read_member(archive, source, entry, max_size=FILE_LIMIT, output_file=False, output_path=None, on_progress=None):
     try:
-        return _read_member(archive, source, entry, max_size)
+        return _read_member(archive, source, entry, max_size, output_file, output_path, on_progress)
     except pyzipper.zipfile.BadZipFile as exc:
         raise zipfile.BadZipFile(str(exc)) from exc
 
 
-def _read_member(archive, source, entry, max_size=FILE_LIMIT):
+def _read_member(archive, source, entry, max_size=FILE_LIMIT, output_file=False, output_path=None, on_progress=None):
     if entry.is_dir():
         raise ZipPreviewError("请选择文件")
     if entry.flag_bits & 1 and not archive.pwd:
@@ -221,6 +224,9 @@ def _read_member(archive, source, entry, max_size=FILE_LIMIT):
     # Large images read compressed data in bounded windows, not a second full copy.
     if max_size is None:
         source.read_ahead = min(INDEX_LIMIT, max(65536, entry.compress_size + 65536))
+    # Unbounded image previews go to disk.  ZipExtFile validates CRC only after
+    # EOF, so the complete member is checked before this file is returned.
+    output = (open(output_path, "xb") if output_path is not None else tempfile.TemporaryFile(mode="w+b")) if output_file and max_size is None else None
     chunks, total = [], 0
     if entry.flag_bits & 1 and max_size is not None:
         # Include the encryption header and authentication trailer in the range.
@@ -230,15 +236,34 @@ def _read_member(archive, source, entry, max_size=FILE_LIMIT):
             raise ZipPreviewError("ZIP 文件头损坏")
         name_size, extra_size = struct.unpack_from("<HH", header, 26)
         source.prefetch(entry.header_offset + 30 + name_size + extra_size, entry.compress_size)
-    with archive.open(entry) as member:
-        if not entry.flag_bits & 1 and max_size is not None:
-            source.prefetch(source.tell(), entry.compress_size)
-        while True:
-            chunk = member.read(64 * 1024)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > output_limit or time.monotonic() > source.deadline:
-                raise ZipPreviewError("文件解压超过大小或时间限制")
-            chunks.append(chunk)
-    return b"".join(chunks)
+    try:
+        with archive.open(entry) as member:
+            if not entry.flag_bits & 1 and max_size is not None:
+                source.prefetch(source.tell(), entry.compress_size)
+            while True:
+                if getattr(source, "cancel_event", None) is not None and source.cancel_event.is_set():
+                    raise InterruptedError("已取消")
+                chunk = member.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > output_limit or time.monotonic() > source.deadline:
+                    raise ZipPreviewError("文件解压超过大小或时间限制")
+                if output is None:
+                    chunks.append(chunk)
+                else:
+                    output.write(chunk)
+                if on_progress:
+                    on_progress(total, entry.file_size)
+        if output is not None:
+            output.flush()
+            if output_path is not None:
+                output.close()
+                return output_path
+            output.seek(0)
+            return output
+        return b"".join(chunks)
+    except BaseException:
+        if output is not None:
+            output.close()
+        raise

@@ -166,6 +166,9 @@
         const gallery = document.getElementById('zip-gallery');
         if (gallery?.open) gallery.close();
         byId('title').textContent = button.dataset.name;
+        const position = buttons.indexOf(button);
+        if (byId('prev')) byId('prev').disabled = position <= 0;
+        if (byId('next')) byId('next').disabled = position >= buttons.length - 1;
         if (!dialog.open) dialog.showModal();
         if (cache?.urlKey === keyHint) {
             showCached({filename: button.dataset.name, name: button.dataset.name});
@@ -178,6 +181,12 @@
         open(button);
         if (active) active.url = button.dataset.url;
     }));
+    for (const [name, step] of [['prev', -1], ['next', 1]]) {
+        byId(name)?.addEventListener('click', () => {
+            const index = buttons.indexOf(selectedButton) + step;
+            if (index >= 0 && index < buttons.length) open(buttons[index]);
+        });
+    }
     player.addEventListener('error', () => {
         if (streaming) {
             streaming.fallback();

@@ -27,6 +27,7 @@ function setup() {
         createDocumentFragment: () => ({items: [], append(item) {this.items.push(item);}}),
         importNode: node => item(node.dataset.fileId),
         addEventListener() {},
+        dispatchEvent() {},
     };
     class DOMParser {
         parseFromString() {
@@ -37,6 +38,7 @@ function setup() {
         }
     }
     vm.runInNewContext(fs.readFileSync('static/js/file_pagination.js', 'utf8'), {
+        CustomEvent: class {constructor(type, options) {this.type = type; this.detail = options.detail;}},
         document, DOMParser, fetch: async url => {state.calls.push(url); return state.response;},
     });
     state.click = () => button.click({preventDefault() {}});

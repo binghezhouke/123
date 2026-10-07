@@ -1,0 +1,2 @@
+{% extends 'base.html' %}
+{% block content %}<h1>压缩包内容已变化</h1><p role="alert">{{ error }}</p><a class="btn btn-primary" href="{{ url_for('zip.browse', file_id=file_id) }}">返回压缩包目录重新定位</a>{% endblock %}

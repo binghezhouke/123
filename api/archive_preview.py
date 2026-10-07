@@ -1,12 +1,15 @@
 """Read-only non-solid 7z/RAR adapters sharing the bounded HTTP range reader."""
 
 import io
+import errno
+import os
 import time
 import lzma
 import zlib
 import zipfile
 import struct
 import pyzipper
+import tempfile
 from threading import Timer
 from contextlib import contextmanager, ExitStack
 from dataclasses import dataclass
@@ -41,15 +44,23 @@ class Entry:
 
 
 class BoundedWriter(Py7zIO):
-    def __init__(self, deadline, max_size=FILE_LIMIT):
-        self.data = io.BytesIO()
+    def __init__(self, deadline, max_size=FILE_LIMIT, cancel_event=None, output_path=None, on_progress=None, total=None):
+        self.output_path = output_path
+        self.data = (open(output_path, "xb") if output_path is not None else tempfile.TemporaryFile(mode="w+b")) if max_size is None else io.BytesIO()
         self.deadline = deadline
         self.max_size = max_size
+        self.cancel_event = cancel_event
+        self.on_progress, self.total = on_progress, total
 
     def write(self, data):
-        if self.data.tell() + len(data) > self.max_size or time.monotonic() > self.deadline:
+        if self.cancel_event is not None and self.cancel_event.is_set():
+            raise InterruptedError("已取消")
+        if (self.max_size is not None and self.data.tell() + len(data) > self.max_size) or time.monotonic() > self.deadline:
             raise ZipPreviewError("文件解压超过大小或时间限制")
-        return self.data.write(data)
+        result = self.data.write(data)
+        if self.on_progress:
+            self.on_progress(self.data.tell(), self.total)
+        return result
 
     def read(self, size=None):
         return self.data.read(size)
@@ -61,12 +72,16 @@ class BoundedWriter(Py7zIO):
         pass
 
     def size(self):
-        return len(self.data.getbuffer())
+        position = self.data.tell()
+        self.data.seek(0, 2)
+        result = self.data.tell()
+        self.data.seek(position)
+        return result
 
 
 class Factory(WriterFactory):
-    def __init__(self, deadline, max_size=FILE_LIMIT):
-        self.writer = BoundedWriter(deadline, max_size)
+    def __init__(self, deadline, max_size=FILE_LIMIT, cancel_event=None, output_path=None, on_progress=None, total=None):
+        self.writer = BoundedWriter(deadline, max_size, cancel_event, output_path, on_progress, total)
         self.created = False
 
     def create(self, filename):
@@ -106,7 +121,7 @@ class ArchiveAdapter:
     def infolist(self):
         return self.entries
 
-    def read(self, entry, max_size=FILE_LIMIT):
+    def read(self, entry, max_size=FILE_LIMIT, output_file=False, output_path=None, on_progress=None):
         if self.solid:
             raise ZipPreviewError("固实压缩包暂仅支持目录浏览，请下载原文件")
         if entry.directory:
@@ -131,10 +146,31 @@ class ArchiveAdapter:
                 raise ZipPreviewError("暂不支持链接或特殊文件")
             if sum(e.filename == entry.filename for e in self.entries) != 1:
                 raise ZipPreviewError("暂不支持 7z 内的重复文件名")
-            factory = Factory(self.source.deadline, output_limit)
+            factory = Factory(self.source.deadline, None if output_file and max_size is None else output_limit,
+                              getattr(self.source, "cancel_event", None), output_path, on_progress, output_limit)
             self.archive.max_extract_size = output_limit
-            self.archive.extract(targets=[f.filename], factory=factory)
-            data = factory.writer.data.getvalue()
+            try:
+                self.archive.extract(targets=[f.filename], factory=factory)
+                if factory.writer.size() != entry.file_size:
+                    raise ZipPreviewError("7z 成员数据与目录声明大小不符")
+                data = factory.writer.data
+                if output_file and max_size is None and output_path is not None:
+                    data.flush()
+                    data.close()
+                    data = output_path
+                elif output_file and max_size is None:
+                    data.flush()
+                    data.seek(0)
+                else:
+                    data = data.getvalue()
+            except BaseException:
+                factory.writer.data.close()
+                if output_path is not None:
+                    try:
+                        os.unlink(output_path)
+                    except FileNotFoundError:
+                        pass
+                raise
         else:
             f = entry.original
             if (
@@ -179,11 +215,58 @@ class ArchiveAdapter:
                     timer.daemon = True
                     timer.start()
                 try:
-                    data = stream.read(output_limit + 1)
+                    if output_file and max_size is None:
+                        data = open(output_path, "xb") if output_path is not None else tempfile.TemporaryFile(mode="w+b")
+                        try:
+                            written = 0
+                            while True:
+                                if getattr(self.source, "cancel_event", None) is not None and self.source.cancel_event.is_set():
+                                    raise InterruptedError("已取消")
+                                chunk = stream.read(64 * 1024)
+                                if not chunk:
+                                    break
+                                written += len(chunk)
+                                if written > entry.file_size:
+                                    raise ZipPreviewError("RAR 成员超过目录声明大小")
+                                data.write(chunk)
+                                if on_progress:
+                                    on_progress(data.tell(), output_limit)
+                                if time.monotonic() > self.source.deadline:
+                                    raise ZipPreviewError("文件解压超过大小或时间限制")
+                            if written != entry.file_size:
+                                raise ZipPreviewError("RAR 成员数据不完整")
+                            data.flush()
+                            if output_path is not None:
+                                data.close()
+                                data = output_path
+                            else:
+                                data.seek(0)
+                        except BaseException:
+                            data.close()
+                            if output_path is not None:
+                                try:
+                                    os.unlink(output_path)
+                                except FileNotFoundError:
+                                    pass
+                            raise
+                    else:
+                        data = stream.read(output_limit + 1)
                 finally:
                     if timer:
                         timer.cancel()
-        if len(data) > output_limit or time.monotonic() > self.source.deadline:
+        if (not output_file or max_size is not None) and len(data) > output_limit:
+            if output_path is not None:
+                try:
+                    os.unlink(output_path)
+                except FileNotFoundError:
+                    pass
+            raise ZipPreviewError("文件解压超过大小或时间限制")
+        if time.monotonic() > self.source.deadline:
+            if output_path is not None:
+                try:
+                    os.unlink(output_path)
+                except FileNotFoundError:
+                    pass
             raise ZipPreviewError("文件解压超过大小或时间限制")
         return data
 
@@ -218,6 +301,8 @@ def open_archive(url, kind, snapshot=None, record=False, resolve_part=None, pass
                     yield ArchiveAdapter(archive, source, kind, password), source
             else:
                 raise ZipPreviewError("不支持此压缩格式")
+    except InterruptedError:
+        raise
     except (py7zr.exceptions.PasswordRequired, rarfile.PasswordRequired, rarfile.RarWrongPassword) as exc:
         raise ArchivePasswordRequired("压缩包已加密，请输入正确的解压密码") from exc
     except (
@@ -235,6 +320,8 @@ def open_archive(url, kind, snapshot=None, record=False, resolve_part=None, pass
             raise ArchivePasswordRequired("密码不正确，或加密数据已损坏，请重新输入密码") from exc
         raise ZipPreviewError("压缩数据损坏或算法不支持") from exc
     except (rarfile.Error, py7zr.exceptions.ArchiveError, OSError, ValueError) as exc:
+        if isinstance(exc, OSError) and exc.errno in (errno.ENOSPC, getattr(errno, "EDQUOT", -1)):
+            raise
         if isinstance(exc, ZipPreviewError):
             raise
         if password is not None and isinstance(exc, (py7zr.exceptions.ArchiveError, rarfile.BadRarFile, ValueError)):
@@ -246,3 +333,10 @@ def read_archive_member(archive, source, entry, max_size=FILE_LIMIT):
     if isinstance(archive, ArchiveAdapter):
         return archive.read(entry, max_size=max_size)
     return read_member(archive, source, entry, max_size=max_size)
+
+
+def read_archive_member_file(archive, source, entry, output_path=None, on_progress=None):
+    """Extract a validated member to a disk file in bounded memory."""
+    if isinstance(archive, ArchiveAdapter):
+        return archive.read(entry, max_size=None, output_file=True, output_path=output_path, on_progress=on_progress)
+    return read_member(archive, source, entry, max_size=None, output_file=True, output_path=output_path, on_progress=on_progress)

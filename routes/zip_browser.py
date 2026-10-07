@@ -3,6 +3,7 @@
 import io
 import zipfile
 import zlib
+from time import perf_counter
 from pathlib import PurePosixPath
 
 import requests
@@ -28,8 +29,9 @@ from api.archive_probe import detected_kind
 from api.archive_names import member_name, decode_archive_text
 from api.split_archive import SPLIT_7Z, discover_volumes
 from api.zip_preview import ZipPreviewError, ChangedArchive, ArchivePasswordRequired
-from api.archive_preview import read_archive_member
+from api.archive_preview import read_archive_member, read_archive_member_file
 from .utils import get_client, folder_breadcrumbs
+from .listing import options, natural_key
 
 zip_bp = Blueprint("zip", __name__)
 TEXT_EXTENSIONS = {
@@ -93,6 +95,8 @@ def browse(file_id, member_id=None):
                 if member_id >= len(entries):
                     abort(404)
                 entry = entries[member_id]
+                if request.args.get("expected_path") is not None and request.args["expected_path"] != member_name(entry):
+                    raise ChangedArchive("收藏指向的文件已变化，请返回目录重新定位")
                 filename = member_name(entry).rsplit("/", 1)[-1]
                 suffix = PurePosixPath(filename).suffix.lower()
                 download = request.args.get("download") == "1"
@@ -118,10 +122,24 @@ def browse(file_id, member_id=None):
                     if request.args.get("stream") == "1" or download:
                         return video_response(location, filename, VIDEO_TYPES[suffix], download)
                     parent_path = member_name(entry).rpartition("/")[0]
+                    video_sort, video_direction, _ = options(request.args)
+                    peers = [(i, item) for i, item in enumerate(entries)
+                             if member_name(item).rpartition('/')[0] == parent_path
+                             and PurePosixPath(member_name(item)).suffix.lower() in VIDEO_TYPES
+                             and can_stream(item, kind)]
+                    if video_sort != 'original':
+                        peers.sort(key=lambda pair: ((pair[1].file_size if video_sort == 'size' else natural_key(member_name(pair[1]))),
+                                                     natural_key(member_name(pair[1])), pair[0]), reverse=video_direction == 'desc')
+                    position = next(i for i, pair in enumerate(peers) if pair[0] == member_id)
+                    def peer_url(offset):
+                        target = position + offset
+                        return url_for('zip.browse', file_id=file_id, member_id=peers[target][0], v=source.index_version,
+                                       sort=video_sort, direction=video_direction) if 0 <= target < len(peers) else None
                     return render_template(
                         "zip_video.html",
                         file=file,
                         filename=filename,
+                        previous_video=peer_url(-1), next_video=peer_url(1),
                         source_url=url_for(
                             "zip.browse", file_id=file_id, member_id=member_id, stream=1, v=source.index_version
                         ),
@@ -133,22 +151,31 @@ def browse(file_id, member_id=None):
                     )
                 if request.args.get("stream") == "1":
                     raise ZipPreviewError("当前仅支持 ZIP 中未加密、仅打包（Store）的视频直接播放")
+                extraction_started = perf_counter()
                 mimetype = PREVIEW_TYPES.get(suffix)
                 if mimetype and mimetype.startswith("image/"):
-                    data = read_archive_member(archive, source, entry, max_size=None)
+                    data = read_archive_member_file(archive, source, entry)
                 else:
                     data = read_archive_member(archive, source, entry)
                 if suffix in TEXT_EXTENSIONS and not download:
                     data = decode_archive_text(data).encode("utf-8")
                     mimetype = "text/plain; charset=utf-8"
-                response = send_file(
-                    io.BytesIO(data),
-                    mimetype=mimetype or "application/octet-stream",
-                    as_attachment=download or not mimetype,
-                    download_name=filename,
-                    conditional=False,
-                    max_age=0,
-                )
+                try:
+                    response = send_file(
+                        data if hasattr(data, "read") else io.BytesIO(data),
+                        mimetype=mimetype or "application/octet-stream",
+                        as_attachment=download or not mimetype,
+                        download_name=filename,
+                        conditional=False,
+                        max_age=0,
+                    )
+                except BaseException:
+                    if hasattr(data, "close"):
+                        data.close()
+                    raise
+                if hasattr(data, "close"):
+                    response.call_on_close(data.close)
+                response.headers["Server-Timing"] = f"extract;dur={(perf_counter() - extraction_started) * 1000:.1f}"
                 response.headers["Content-Security-Policy"] = "sandbox; default-src 'none'; style-src 'unsafe-inline'"
                 response.headers["X-Content-Type-Options"] = "nosniff"
                 response.headers["Cache-Control"] = "no-store"
@@ -173,6 +200,8 @@ def browse(file_id, member_id=None):
                         {
                             "id": index,
                             "name": remainder,
+                            "member_path": name,
+                            "nested": suffix in (".zip", ".7z", ".7zz", ".rar"),
                             "size": entry.file_size,
                             "encrypted": bool(entry.flag_bits & 1),
                             "image": PREVIEW_TYPES.get(suffix, "").startswith("image/"),
@@ -184,13 +213,20 @@ def browse(file_id, member_id=None):
                     )
             if prefix and not folders and not files and not any(member_name(e) == prefix for e in entries):
                 abort(404)
+            sort, direction, media_kind = options(request.args)
+            if media_kind != 'all':
+                files = [entry for entry in files if entry[media_kind]]
+            if sort != 'original':
+                files.sort(key=lambda entry: ((entry['size'] if sort == 'size' else natural_key(entry['name'])),
+                                              natural_key(entry['name']), entry['id']), reverse=direction == 'desc')
             parent = prefix.rstrip("/").rsplit("/", 1)[0] + "/" if "/" in prefix.rstrip("/") else ""
             return render_template(
                 "zip_browser.html",
                 file=file,
                 prefix=prefix,
                 parent=parent,
-                folders=sorted(folders),
+                folders=sorted(folders, key=natural_key, reverse=direction == "desc"),
+                sort=sort, direction=direction, kind=media_kind,
                 files=files,
                 total=len(entries),
                 solid=getattr(archive, "solid", False),
@@ -246,6 +282,7 @@ def browse(file_id, member_id=None):
                             member_id=int(target_member),
                             v=request.form.get("v", ""),
                             path=target_path,
+                            expected_path=request.form.get("expected_path"),
                             download=request.form.get("download", ""),
                         )
                     )
@@ -305,7 +342,11 @@ def browse(file_id, member_id=None):
                 member_id=member_id,
             )
         ), 401
+    except ChangedArchive as exc:
+        return no_store(render_template("archive_changed.html", error=str(exc), file_id=file_id)), 400
     except (ZipPreviewError, zipfile.BadZipFile, NotImplementedError, RuntimeError, zlib.error, EOFError) as exc:
         return no_store(render_template("error.html", error=f"压缩包无法打开：{exc}")), 400
     except (requests.RequestException, Pan123APIError):
         return no_store(render_template("error.html", error="读取压缩包失败，请稍后重试或重新获取下载地址")), 502
+    except OSError:
+        return no_store(render_template("error.html", error="图片暂存失败，请检查服务器磁盘空间后重试")), 507

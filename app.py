@@ -7,13 +7,16 @@
 import json
 import logging
 import os
+import atexit
 from flask import Flask, render_template
 from routes import main_bp, api_bp
 from routes.zip_browser import zip_bp
 from routes.browser_cache import PageCache
 from api.archive_cache import ArchiveCache
 from api.archive_passwords import ArchivePasswordVault
+from api.archive_jobs import ArchivePreparationJobs
 from routes.preview import preview_bp
+from routes.nested_archive import nested_archive_bp
 
 
 def load_config(config_path='config.json'):
@@ -44,15 +47,26 @@ def create_app(config_path='config.json'):
 
     # 存储完整配置供蓝图使用
     app.config['PAN123_CONFIG'] = config
+    for key in ('ARCHIVE_PREP_TIMEOUT_SECONDS', 'ARCHIVE_PREP_MAX_MEMBER_BYTES'):
+        if key in config:
+            app.config[key] = config[key]
     app.extensions['directory_pages'] = PageCache()
     app.extensions['archive_cache'] = ArchiveCache()
     app.extensions['archive_passwords'] = ArchivePasswordVault()
+    archive_preparation_jobs = ArchivePreparationJobs(
+        root=config.get('ARCHIVE_PREP_CACHE_DIR'),
+        max_bytes=int(config.get('ARCHIVE_PREP_CACHE_BYTES', 64 * 1024**3)),
+        ttl=int(config.get('ARCHIVE_PREP_CACHE_TTL_SECONDS', 6 * 3600)),
+    )
+    app.extensions['archive_preparation_jobs'] = archive_preparation_jobs
+    atexit.register(archive_preparation_jobs.close)
 
     # 注册蓝图
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp)
     app.register_blueprint(zip_bp)
     app.register_blueprint(preview_bp)
+    app.register_blueprint(nested_archive_bp)
 
     # 配置日志
     logging.basicConfig(

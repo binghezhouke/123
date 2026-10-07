@@ -1,12 +1,13 @@
 """
 Main routes blueprint - Page routes (index, search, file_detail, demo_webdav)
 """
-from flask import Blueprint, render_template, request, flash, redirect, url_for, current_app
+from flask import Blueprint, render_template, request, flash, redirect, url_for, current_app, jsonify
 from api import Pan123APIError
 from api.split_archive import SPLIT_7Z
 from .utils import get_client, folder_breadcrumbs
 from pathlib import PurePosixPath
 from routes.zip_browser import TEXT_EXTENSIONS, PREVIEW_TYPES
+from .listing import options, directory_snapshot, order_files
 
 main_bp = Blueprint('main', __name__)
 
@@ -26,14 +27,22 @@ def index():
         key = (parent_id, limit, last_file_id)
         if refresh:
             cache.invalidate_directory(parent_id)
+        sort, direction, kind = options(request.args)
+        snapshot = None
+        next_offset = None
         result = cache.get(key)
-        if result is None:
-            result = client.list_files(parent_id=parent_id, limit=limit, last_file_id=last_file_id)
-            cache.put(key, result)
-            current_app.logger.info('目录页缓存未命中: parent_id=%s', parent_id)
+        if sort != 'original' or kind != 'all':
+            all_files, snapshot = directory_snapshot(client, cache, parent_id, None if refresh else request.args.get('snapshot'))
+            ordered = order_files(all_files, sort, direction, kind)
+            offset = 0 if refresh else max(0, request.args.get('offset', 0, type=int))
+            file_list = ordered[offset:offset + limit]
+            next_offset = offset + limit if offset + limit < len(ordered) else None
+            next_last_file_id = None
         else:
-            current_app.logger.info('目录页缓存命中: parent_id=%s', parent_id)
-        file_list, next_last_file_id = result
+            if result is None:
+                result = client.list_files(parent_id=parent_id, limit=limit, last_file_id=last_file_id)
+                cache.put(key, result)
+            file_list, next_last_file_id = result
         breadcrumbs = folder_breadcrumbs(client, parent_id, refresh=refresh)
 
         return render_template('files.html',
@@ -41,7 +50,8 @@ def index():
                                breadcrumbs=breadcrumbs,
                                parent_id=parent_id,
                                next_last_file_id=next_last_file_id,
-                               limit=limit)
+                               limit=limit, sort=sort, direction=direction, kind=kind,
+                               snapshot=snapshot, next_offset=next_offset)
 
     except Pan123APIError as e:
         flash(f'API错误: {e}', 'error')
@@ -114,7 +124,8 @@ def file_detail(file_id):
                     'pdf' if suffix == '.pdf' else 'text' if suffix in TEXT_EXTENSIONS else media.get(suffix))
             if kind:
                 return render_template('file_preview.html', file=file_info, kind=kind,
-                                       breadcrumbs=folder_breadcrumbs(client, file_info.get('parentFileId', 0)))
+                                       breadcrumbs=folder_breadcrumbs(client, file_info.get('parentFileId', 0)),
+                                       gallery_index_url=url_for('main.directory_images', parent_id=file_info.get('parentFileId', 0)))
 
         download_url = None
         if not file_info.is_folder:
@@ -175,3 +186,22 @@ def demo_webdav(file_id):
 def favorites():
     """Browser-local colored favorites; no cloud API request is necessary."""
     return render_template('favorites.html')
+
+
+@main_bp.route('/api/directory-images')
+def directory_images():
+    try:
+        parent_id = request.args.get('parent_id', 0, type=int)
+        sort, direction, _ = options(request.args)
+        entries, token = directory_snapshot(get_client(), current_app.extensions['directory_pages'],
+                                            parent_id, request.args.get('snapshot'))
+        images = [file for file in order_files(entries, sort, direction, 'image') if not file.is_folder]
+        offset = max(0, request.args.get('offset', 0, type=int))
+        page = images[offset:offset + 100]
+        next_url = (url_for('main.directory_images', parent_id=parent_id, snapshot=token,
+                            sort=sort, direction=direction, offset=offset + 100)
+                    if offset + 100 < len(images) else None)
+        return jsonify(items=[dict(id=f.file_id, name=f.filename,
+                                   url=url_for('preview.content', file_id=f.file_id)) for f in page], next=next_url)
+    except Pan123APIError as exc:
+        return jsonify(error=str(exc)), 502
