@@ -243,7 +243,7 @@ tests/                   pytest 测试（不依赖网络/Redis/真实配置）
 uv sync --group dev
 uv run pytest -q          # 测试
 uv run ruff check .       # 静态检查
-node --test tests/js/zip_gallery.test.cjs  # 图片浏览与预取（需要 Node.js）
+node --test tests/js/*.test.cjs  # 分页、图片浏览与预取（需要 Node.js）
 ```
 
 CI（`.github/workflows/ci.yml`）在 push/PR 时跑这两条命令。

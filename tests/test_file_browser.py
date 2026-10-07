@@ -197,3 +197,59 @@ def test_page_cache_expiry_and_capacity(monkeypatch):
     clock[0] += 31
     assert cache.get((2, 20, None)) is None
     assert cache.get((3, 20, None)) is None
+
+
+@pytest.mark.parametrize(
+    "path", ["/?parent_id=42&limit=10&last_file_id=5", "/search?q=hello&mode=1&limit=10&last_file_id=5"]
+)
+def test_pagination_keeps_next_cursor_on_empty_pages(app, monkeypatch, path):
+    import routes.main
+
+    client = BrowserClient()
+
+    def listing(**kwargs):
+        client.list_calls.append(kwargs)
+        return [], 12
+
+    client.list_files = listing
+    monkeypatch.setattr(routes.main, "get_client", lambda: client)
+    response = app.test_client().get(path)
+    assert response.status_code == 200
+    assert b"data-load-more" in response.data
+    assert b"last_file_id=12" in response.data
+    assert b'id="fileContainer"' in response.data
+    assert b'id="fileListView"' in response.data
+    assert client.list_calls[0]["last_file_id"] == 5
+    assert client.list_calls[0]["limit"] == 10
+    if path.startswith("/search"):
+        assert client.list_calls[0]["search_data"] == "hello"
+        assert client.list_calls[0]["search_mode"] == 1
+    else:
+        assert client.list_calls[0]["parent_id"] == 42
+
+
+@pytest.mark.parametrize("path", ["/", "/search?q=hello"])
+def test_async_pagination_error_is_not_a_successful_empty_page(app, monkeypatch, path):
+    import routes.main
+    from api import Pan123APIError
+
+    client = BrowserClient()
+
+    def fail(**kwargs):
+        raise Pan123APIError("fixture failure")
+
+    client.list_files = fail
+    monkeypatch.setattr(routes.main, "get_client", lambda: client)
+    response = app.test_client().get(path, headers={"X-Requested-With": "XMLHttpRequest"})
+    assert response.status_code == 502
+
+
+def test_search_end_cursor_has_no_load_more_link(app, monkeypatch):
+    import routes.main
+
+    client = BrowserClient()
+    client.list_files = lambda **kwargs: ([make_file(1, "test.txt")], -1)
+    monkeypatch.setattr(routes.main, "get_client", lambda: client)
+    response = app.test_client().get("/search?q=test")
+    assert response.status_code == 200
+    assert b"data-load-more" not in response.data

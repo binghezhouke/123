@@ -45,10 +45,12 @@ def index():
 
     except Pan123APIError as e:
         flash(f'API错误: {e}', 'error')
-        return render_template('files.html', files=[], parent_id=0)
+        status = 502 if request.headers.get('X-Requested-With') == 'XMLHttpRequest' else 200
+        return render_template('files.html', files=[], parent_id=0), status
     except Exception as e:
         flash(f'未知错误: {e}', 'error')
-        return render_template('files.html', files=[], parent_id=0)
+        status = 502 if request.headers.get('X-Requested-With') == 'XMLHttpRequest' else 200
+        return render_template('files.html', files=[], parent_id=0), status
 
 
 @main_bp.route('/search')
@@ -81,10 +83,12 @@ def search():
 
     except Pan123APIError as e:
         flash(f'搜索失败: {e}', 'error')
-        return render_template('search.html', files=[], search_query=search_query)
+        status = 502 if request.headers.get('X-Requested-With') == 'XMLHttpRequest' else 200
+        return render_template('search.html', files=[], search_query=search_query), status
     except Exception as e:
         flash(f'搜索时发生错误: {e}', 'error')
-        return render_template('search.html', files=[], search_query=search_query)
+        status = 502 if request.headers.get('X-Requested-With') == 'XMLHttpRequest' else 200
+        return render_template('search.html', files=[], search_query=search_query), status
 
 
 @main_bp.route('/file/<int:file_id>')

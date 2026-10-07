@@ -3,6 +3,7 @@
 {% block title %}搜索 - CloudArchive{% endblock %}
 
 {% block content %}
+<div data-file-page hidden></div>
 <!-- Search Header -->
 <div class="card mb-4">
     <div class="card-header">
@@ -56,7 +57,7 @@
         <h5 style="margin: 0; font-weight: 600;">
             搜索结果
             {% if files %}
-            <span class="badge bg-primary" style="margin-left: 8px;">{{ files|length }}</span>
+            <span class="badge bg-primary" data-file-count style="margin-left: 8px;">{{ files|length }}</span>
             {% endif %}
         </h5>
         {% if search_query %}
@@ -66,7 +67,6 @@
         {% endif %}
     </div>
 
-    {% if files %}
         <!-- Results Grid -->
         <div class="file-grid" id="fileContainer">
             {% for file in files %}
@@ -125,16 +125,16 @@
         </div>
 
         <!-- Pagination -->
-        {% if next_last_file_id %}
+        {% if next_last_file_id and next_last_file_id != -1 %}
         <div class="d-flex justify-content-center mt-4">
             <a href="{{ url_for('main.search', q=search_query, mode=search_mode, limit=limit, last_file_id=next_last_file_id) }}"
-               class="btn btn-primary">
+               class="btn btn-primary" data-load-more>
                 <i class="fas fa-chevron-right" style="margin-right: 6px;"></i> 加载更多
             </a>
         </div>
         {% endif %}
 
-    {% else %}
+    {% if not files %}
         <!-- No Results -->
         <div class="empty-state">
             <div class="empty-state-icon">
@@ -158,6 +158,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/file_pagination.js') }}" defer></script>
 <script>
 // View switching - Override the base function for this page
 function switchView(view) {
@@ -184,31 +185,8 @@ function switchView(view) {
 
 // Bind download buttons in search results
 document.addEventListener('DOMContentLoaded', function() {
-    const downloadButtons = document.querySelectorAll('.download-btn');
-    downloadButtons.forEach(button => {
-        button.addEventListener('click', function(e) {
-            e.preventDefault();
-            e.stopPropagation();
-            const fileId = this.dataset.fileId;
-            const fileName = this.dataset.fileName || '文件';
-            if (typeof downloadFile === 'function') {
-                downloadFile(fileId, fileName);
-            }
-        });
-    });
-
-    // Single click to open
     const fileItems = document.querySelectorAll('.file-item');
     fileItems.forEach(item => {
-        item.addEventListener('click', function(e) {
-            if (e.target.closest('.btn')) return; // Don't open if clicking buttons
-
-            const link = this.querySelector('a');
-            if (link) {
-                window.location.href = link.href;
-            }
-        });
-
         // Selection on hover (visual feedback only)
         item.addEventListener('mouseenter', function() {
             fileItems.forEach(i => i.classList.remove('selected'));
@@ -225,7 +203,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Update status bar
     const statusCount = document.getElementById('statusCount');
     if (statusCount && fileItems.length > 0) {
-        statusCount.textContent = fileItems.length + ' 个项目';
+        statusCount.textContent = document.querySelectorAll('#fileContainer .file-item').length + ' 个项目';
     }
 
     // Update status text on hover

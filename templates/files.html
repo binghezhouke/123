@@ -3,11 +3,11 @@
 {% block title %}{% if parent_id != 0 %}文件夹 - {% endif %}CloudArchive{% endblock %}
 
 {% block content %}
+<div data-file-page hidden></div>
 <header class="browser-heading">
     <div><p class="eyebrow">资料库</p><h1>{{ breadcrumbs[-1].name if breadcrumbs|default([]) else '我的文件' }}</h1></div>
-    <span class="item-count">{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
+    <span class="item-count" data-file-count>{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
 </header>
-{% if files %}
 <div class="file-grid" id="fileContainer">
     {% for file in files %}
     <a class="file-grid-item file-item" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
@@ -33,13 +33,13 @@
 {% if next_last_file_id and next_last_file_id != -1 %}
 <div class="d-flex justify-content-center mt-4">
     <a href="{{ url_for('main.index', parent_id=parent_id, last_file_id=next_last_file_id, limit=limit) }}"
-       class="btn btn-primary">
+       class="btn btn-primary" data-load-more>
         <i class="fas fa-chevron-right" style="margin-right: 6px;"></i> 加载更多
     </a>
 </div>
 {% endif %}
 
-{% else %}
+{% if not files %}
 <!-- Empty State -->
 <div class="empty-state">
     <div class="empty-state-icon">
@@ -52,6 +52,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/file_pagination.js') }}" defer></script>
 <script>
 // View switching - Override the base function for this page
 function switchView(view) {

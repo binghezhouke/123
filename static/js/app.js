@@ -34,17 +34,18 @@ document.addEventListener('DOMContentLoaded', () => {
  * Bind download button events
  */
 function bindDownloadButtons() {
-    const downloadButtons = document.querySelectorAll('.download-btn');
-    downloadButtons.forEach(button => {
-        button.addEventListener('click', handleDownloadClick);
+    document.addEventListener('click', event => {
+        const button = event.target.closest('.download-btn');
+        if (!button) return;
+        event.preventDefault();
+        handleDownloadClick(event, button);
     });
 }
 
 /**
  * Handle download button click
  */
-function handleDownloadClick(e) {
-    const button = e.currentTarget;
+function handleDownloadClick(e, button = e.currentTarget) {
     const fileId = button.dataset.fileId;
     const fileName = button.dataset.fileName || '文件';
 
@@ -185,17 +186,10 @@ function initSearchEnhancement() {
  * Item single click to open
  */
 function initItemClick() {
-    const fileItems = document.querySelectorAll('.file-item');
-    fileItems.forEach(item => {
-        item.addEventListener('click', (e) => {
-            // Don't navigate if clicking buttons or links directly
-            if (e.target.closest('.btn') || e.target.tagName === 'A') return;
-
-            const link = item.querySelector('a');
-            if (link) {
-                window.location.href = link.href;
-            }
-        });
+    document.addEventListener('click', event => {
+        if (event.target.closest('.btn, a')) return;
+        const link = event.target.closest('.file-item')?.querySelector('a');
+        if (link) window.location.href = link.href;
     });
 }
 
