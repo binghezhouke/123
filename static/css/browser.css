@@ -182,3 +182,40 @@ button:disabled { opacity: .4; cursor: default; }
 @media (hover: hover) and (pointer: fine) { .favorite-marker:hover { background: #e9edf4; } }
 
 .archive-browser tr:target { background: #edf3fc; outline: 2px solid #a8bfdf; outline-offset: -2px; }
+
+/* Number the rendered order so appended pages continue without resetting. */
+.file-grid { counter-reset: grid-number; }
+.file-grid > .file-grid-item { position: relative; counter-increment: grid-number; }
+.file-grid > .file-grid-item::before {
+    content: counter(grid-number);
+    position: absolute;
+    top: 8px;
+    left: 10px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    pointer-events: none;
+}
+.file-list, .archive-browser tbody { counter-reset: row-number; }
+.file-list-row, .archive-browser tbody > tr { counter-increment: row-number; }
+.file-list-name::before, .archive-browser tbody td:first-child:not([colspan])::before {
+    content: counter(row-number);
+    display: inline-block;
+    min-width: 3ch;
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+.file-list-header > :first-child { display: flex; align-items: center; gap: 10px; }
+.file-list-header > :first-child::before, .archive-browser thead th:first-child::before {
+    content: '序号';
+    display: inline-block;
+    min-width: 3ch;
+    flex-shrink: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+.archive-browser tbody td:first-child:not([colspan])::before,
+.archive-browser thead th:first-child::before { margin-right: 12px; }
