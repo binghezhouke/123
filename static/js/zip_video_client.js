@@ -7,6 +7,7 @@
     const status = byId('status');
     const progress = byId('progress');
     let active = null;
+    let streaming = null;
     let cache = null;
     let generation = 0;
     let selectedButton = null;
@@ -18,6 +19,8 @@
         byId('download').hidden = true;
     }
     function stopActive() {
+        streaming?.dispose();
+        streaming = null;
         if (!active) return;
         active.controller?.abort();
         active.worker?.terminate();
@@ -52,7 +55,7 @@
     }
     async function prepare(button, token) {
         const url = button.dataset.url;
-        const task = {token, controller: new AbortController(), worker: null};
+        const task = {token, url, controller: new AbortController(), worker: null};
         active = task;
         byId('cancel').hidden = false;
         byId('retry').hidden = true;
@@ -74,16 +77,31 @@
             try { worker = new Worker(dialog.dataset.workerUrl); }
             catch (_) { throw new Error('无法启动视频解压 Worker'); }
             task.worker = worker;
+            if (typeof MediaSource === 'function') {
+                try {
+                    const {createVideoStream} = await import('./zip_video_stream.mjs');
+                    if (token !== generation || active !== task) return;
+                    streaming = createVideoStream(player, () => {
+                        status.textContent = '此视频需要完整准备后播放，正在继续解压…';
+                    });
+                } catch { /* Blob playback remains available when MSE cannot load. */ }
+            }
+            if (token !== generation || active !== task) return;
             status.textContent = '正在下载并校验视频…';
             worker.onmessage = event => {
                 if (token !== generation || active !== task) return;
                 const message = event.data || {};
-                if (message.type === 'progress') {
+                if (message.type === 'chunk') {
+                    const stream = streaming;
+                    Promise.resolve(stream?.append(message.buffer)).finally(() => {
+                        if (token === generation && active === task) worker.postMessage({type: 'ack'});
+                    });
+                } else if (message.type === 'progress') {
                     const total = Number(message.size || info.size);
                     progress.max = total > 0 ? total : 1;
                     progress.value = Math.min(Number(message.produced) || 0, progress.max);
                     const received = Number(message.received) || 0;
-                    status.textContent = `正在下载并校验视频… ${formatBytes(received)} / ${formatBytes(Number(info.compressed_size) || 0)}，已解压 ${formatBytes(Number(message.produced) || 0)} / ${formatBytes(Number(info.size) || 0)}`;
+                    status.textContent = `${streaming?.usable ? '可开始播放，继续解压（完整性待校验）' : '正在准备视频'}… ${formatBytes(received)} / ${formatBytes(Number(info.compressed_size) || 0)}，已解压 ${formatBytes(Number(message.produced) || 0)} / ${formatBytes(Number(info.size) || 0)}`;
                 } else if (message.type === 'done') {
                     if (!(message.blob instanceof Blob) || message.blob.size !== info.size || message.blob.size > 64 * 1024 * 1024) {
                         fail(new Error('解压 Worker 未返回有效视频数据'));
@@ -93,14 +111,28 @@
                     cache = {key: info.key, urlKey: button.dataset.url, objectUrl};
                     active = null;
                     worker.terminate();
-                    showCached({...info, name: button.dataset.name});
+                    if (streaming?.usable) {
+                        const stream = streaming;
+                        stream.finish().then(() => {
+                            if (token !== generation) return;
+                            if (!stream.usable) {showCached({...info, name: button.dataset.name}); return;}
+                            byId('download').href = objectUrl;
+                            byId('download').download = info.filename || button.dataset.name;
+                            byId('download').hidden = false;
+                            byId('cancel').hidden = true;
+                            byId('retry').hidden = true;
+                            progress.max = 1;
+                            progress.value = 1;
+                            status.textContent = '视频已完整解压并通过校验。';
+                        });
+                    } else showCached({...info, name: button.dataset.name});
                 } else if (message.type === 'error') {
                     fail(new Error(message.message || '视频解压或校验失败'));
                 }
             };
             worker.onerror = () => fail(new Error('视频解压组件运行失败，请刷新页面或更换浏览器重试'));
             worker.postMessage({type: 'start', url: info.raw_url, size: info.size,
-                compressedSize: info.compressed_size, crc32: info.crc32, mimetype: info.mimetype});
+                compressedSize: info.compressed_size, crc32: info.crc32, mimetype: info.mimetype, stream: !!streaming});
             function fail(error) {
                 if (token !== generation || active !== task) return;
                 stopActive();
@@ -128,7 +160,7 @@
         detachPlayer();
         if (!cache || cache.urlKey !== keyHint) releaseCache();
         clearProgress();
-        status.textContent = '首次准备完成后播放，当前页面保留一个视频。';
+        status.textContent = '正在准备直接播放，当前页面保留一个视频。';
         byId('retry').hidden = true;
         byId('cancel').hidden = true;
         const gallery = document.getElementById('zip-gallery');
@@ -147,6 +179,12 @@
         if (active) active.url = button.dataset.url;
     }));
     player.addEventListener('error', () => {
+        if (streaming) {
+            streaming.fallback();
+            streaming = null;
+            if (cache) showCached({filename: selectedButton?.dataset.name});
+            return;
+        }
         if (!cache || !dialog.open || player.src !== cache.objectUrl) return;
         status.textContent = '准备已完成，但浏览器不支持此视频编码或视频损坏';
         byId('cancel').hidden = true;

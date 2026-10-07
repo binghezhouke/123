@@ -11,8 +11,10 @@ function userError(message) {
     error.userMessage = message;
     return error;
 }
-let started = false;
+let started = false, acknowledge = null;
+
 self.onmessage = async ({data}) => {
+    if (data?.type === 'ack') {acknowledge?.(); return;}
     if (data?.type !== 'start' || started) return;
     started = true;
     const controller = new AbortController();
@@ -45,7 +47,7 @@ self.onmessage = async ({data}) => {
             || !response.headers.get('Content-Type')?.startsWith('application/octet-stream')) {
             throw userError('视频响应与目录信息不一致，请刷新目录后重试。');
         }
-        let received = 0, produced = 0, crc = 0xffffffff, lastProgress = 0;
+        let received = 0, produced = 0, sent = 0, crc = 0xffffffff, lastProgress = 0;
         const progress = force => {
             const now = Date.now();
             if (force || now - lastProgress >= 150) {
@@ -78,6 +80,23 @@ self.onmessage = async ({data}) => {
             if (inflater.err) throw userError('压缩数据损坏或不完整，请重试。');
             if (inflater.strm.avail_in !== 0) throw userError('压缩流结束后存在多余数据，请刷新目录后重试。');
             progress(false);
+            if (data.stream) {
+                // One transferred chunk at a time; SourceBuffer must consume it before
+                // more output crosses the worker boundary. The full output remains
+                // bounded for CRC verification and fallback playback.
+                while (sent < produced) {
+                    const end = Math.min(sent + 256 * 1024, produced);
+                    const chunk = output.slice(sent, end).buffer;
+                    clearTimeout(timer);
+                    await new Promise((resolve, reject) => {
+                        acknowledge = () => {clearTimeout(timer); acknowledge = null; resolve();};
+                        timer = setTimeout(() => {acknowledge = null; reject(userError('播放器响应超时，请重试。'));}, 30000);
+                        self.postMessage({type: 'chunk', buffer: chunk}, [chunk]);
+                    });
+                    sent = end;
+                    touch();
+                }
+            }
         }
         if (!inflater.ended || inflater.err || inflater.strm.total_in !== compressedSize) {
             throw userError('压缩数据不完整，请重试。');

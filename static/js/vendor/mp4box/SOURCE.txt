@@ -1,0 +1,4 @@
+MP4Box.js 2.4.1
+https://github.com/gpac/mp4box.js
+https://registry.npmjs.org/mp4box/-/mp4box-2.4.1.tgz
+sha512-0HGX7nXoDIX6FKLVl4a3wtYjBlwqsN3xuQC3GXzNtKp98FXUOhDSq623azsz8DG5ptd9ZXcXodDkgbdMZOjWvw==

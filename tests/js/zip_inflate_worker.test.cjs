@@ -7,12 +7,15 @@ const vm = require('node:vm');
 const content = Buffer.from('hello world');
 const compressed = deflateRawSync(content);
 async function run({payload = compressed, size = 11, compressedSize = payload.length, crc32 = 0x0d4a1185,
-                    libraryAvailable = true, status = 200, declareLength = true, url = '/raw', readError = false} = {}) {
+                    stream = false, libraryAvailable = true, status = 200, declareLength = true, url = '/raw', readError = false} = {}) {
     const messages = [];
     let fetches = 0, closed = false, signal;
     const self = {
         location: {href: 'http://test/static/worker.js', origin: 'http://test'},
-        postMessage: message => messages.push(message),
+        postMessage: message => {
+            messages.push(message);
+            if (message.type === 'chunk') queueMicrotask(() => self.onmessage({data: {type: 'ack'}}));
+        },
         close: () => {closed = true;},
     };
     const fetch = async (url, options) => {
@@ -35,7 +38,7 @@ async function run({payload = compressed, size = 11, compressedSize = payload.le
         setTimeout, clearTimeout, Uint8Array, Uint32Array,
     });
     vm.runInContext(fs.readFileSync('static/js/zip_inflate_worker.js', 'utf8'), context);
-    await self.onmessage({data: {type: 'start', url, size, compressedSize, crc32}});
+    await self.onmessage({data: {type: 'start', url, size, compressedSize, crc32, stream}});
     assert.equal(closed, true);
     if (signal) assert.equal(signal.aborted, true);
     return {messages, fetches};
@@ -99,5 +102,17 @@ test('HTTP and network errors never publish a Blob', async () => {
         const {messages} = await run(options);
         assert.equal(messages.at(-1).type, 'error');
         assert.equal(messages.some(message => message.type === 'done'), false);
+    }
+});
+
+
+test('progressive chunks precede completion, but a CRC failure never creates the final cache', async () => {
+    for (const crc32 of [0x0d4a1185, 0]) {
+        const {messages} = await run({stream: true, crc32});
+        const chunks = messages.filter(m => m.type === 'chunk');
+        assert.equal(chunks.length, 1);
+        assert.equal(Buffer.from(chunks[0].buffer).toString(), 'hello world');
+        assert.equal(messages.at(-1).type, crc32 ? 'done' : 'error');
+        if (!crc32) assert.match(messages.at(-1).message, /CRC/);
     }
 });
