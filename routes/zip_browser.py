@@ -21,6 +21,7 @@ from flask import (
 )
 
 from api import Pan123APIError
+from api.archive_names import member_name, decode_archive_text
 from api.split_archive import SPLIT_7Z, discover_volumes
 from api.zip_preview import ZipPreviewError, ChangedArchive, ArchivePasswordRequired
 from api.archive_preview import read_archive_member
@@ -89,15 +90,12 @@ def browse(file_id, member_id=None):
                     abort(404)
                 entry = entries[member_id]
                 data = read_archive_member(archive, source, entry)
-                filename = entry.filename.replace("\\", "/").rsplit("/", 1)[-1]
+                filename = member_name(entry).rsplit("/", 1)[-1]
                 suffix = PurePosixPath(filename).suffix.lower()
                 download = request.args.get("download") == "1"
                 mimetype = PREVIEW_TYPES.get(suffix)
                 if suffix in TEXT_EXTENSIONS and not download:
-                    try:
-                        data = data.decode("utf-8-sig").encode("utf-8")
-                    except UnicodeDecodeError:
-                        data = data.decode("gb18030", errors="replace").encode("utf-8")
+                    data = decode_archive_text(data).encode("utf-8")
                     mimetype = "text/plain; charset=utf-8"
                 response = send_file(
                     io.BytesIO(data),
@@ -117,7 +115,7 @@ def browse(file_id, member_id=None):
                 prefix += "/"
             folders, files = set(), []
             for index, entry in enumerate(entries):
-                name = entry.filename
+                name = member_name(entry)
                 if not name.startswith(prefix):
                     continue
                 remainder = name[len(prefix) :]
@@ -137,7 +135,7 @@ def browse(file_id, member_id=None):
                             "preview": suffix in TEXT_EXTENSIONS or suffix in PREVIEW_TYPES,
                         }
                     )
-            if prefix and not folders and not files and not any(e.filename == prefix for e in entries):
+            if prefix and not folders and not files and not any(member_name(e) == prefix for e in entries):
                 abort(404)
             parent = prefix.rstrip("/").rsplit("/", 1)[0] + "/" if "/" in prefix.rstrip("/") else ""
             return render_template(
