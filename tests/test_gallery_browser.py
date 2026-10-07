@@ -11,7 +11,8 @@ from test_favorites import launch_chromium
 app = test_file_browser.app
 
 
-def test_directory_gallery_reopens_and_resumes_after_reload(app, monkeypatch):
+@pytest.mark.parametrize("mobile", [False, True])
+def test_directory_gallery_reopens_and_resumes_after_reload(app, monkeypatch, mobile):
     sync_api = pytest.importorskip('playwright.sync_api')
     files = {1: test_file_browser.make_file(1, '2.png'), 2: test_file_browser.make_file(2, '10.png')}
     client = test_file_browser.BrowserClient(files)
@@ -27,7 +28,9 @@ def test_directory_gallery_reopens_and_resumes_after_reload(app, monkeypatch):
     try:
         with sync_api.sync_playwright() as playwright:
             browser = launch_chromium(playwright)
-            page = browser.new_page()
+            context = browser.new_context(viewport={"width": 390 if mobile else 1100, "height": 844},
+                                          is_mobile=mobile, has_touch=mobile)
+            page = context.new_page()
             page.route('https://**/*', lambda route: route.abort())
             errors = []
             page.on('pageerror', lambda error: errors.append(str(error)))
@@ -35,6 +38,27 @@ def test_directory_gallery_reopens_and_resumes_after_reload(app, monkeypatch):
             page.locator('#fileContainer [data-file-id="1"] a').click()
             page.wait_for_function('document.querySelector("#zip-gallery-stage img")?.naturalWidth > 0')
             assert page.locator('#zip-gallery-counter').inner_text() == '1 / 2'
+            if mobile:
+                cdp = context.new_cdp_session(page)
+                box = page.locator('#zip-gallery-stage').bounding_box()
+                y = box['y'] + box['height'] / 2
+                def touch(kind, xs):
+                    cdp.send('Input.dispatchTouchEvent', {'type': kind, 'touchPoints':
+                             [{'x': x, 'y': y, 'id': i} for i, x in enumerate(xs)]})
+                touch('touchStart', [150, 230])
+                touch('touchMove', [120, 260])
+                touch('touchMove', [80, 300])
+                touch('touchEnd', [])
+                page.wait_for_function('parseInt(document.querySelector("#zip-gallery-zoom-level").textContent)>100')
+                touch('touchStart', [280])
+                touch('touchMove', [190])
+                touch('touchMove', [90])
+                touch('touchEnd', [])
+                assert page.locator('#zip-gallery-counter').inner_text() == '1 / 2'
+                # The CDP-injected multitouch sequence suppresses Chromium's synthesized click.
+                page.locator('#zip-gallery-zoom-reset').click()
+                page.wait_for_function('document.querySelector("#zip-gallery-zoom-level").textContent==="100%"')
+
             page.locator('#zip-gallery-close').click()
             page.locator('#fileContainer [data-file-id="2"] a').click()
             page.wait_for_function('document.querySelector("#zip-gallery-stage img")?.naturalWidth > 0')

@@ -16,7 +16,7 @@ window.createArchiveImageViewport = function (dialog) {
         const base = image.style.transform.replace(/\s*rotate\(\d+deg\)/g, '');
         image.style.transform = `${base} rotate(${rotation}deg)`;
     }
-    function reset() { originalSize = false; stage.classList.remove('gallery-original'); panzoom?.setOptions({panOnlyWhenZoomed:true}); applyRotation(); panzoom?.reset({animate:false}); updateZoom(); }
+    function reset() { const wasOriginalSize=originalSize; originalSize = false; stage.classList.remove('gallery-original'); if(wasOriginalSize)panzoom?.setOptions({panOnlyWhenZoomed:true}); applyRotation(); panzoom?.reset({animate:false}); updateZoom(); }
     function onPanzoomChange() { applyRotation(); updateZoom(); }
     function detach() { image?.removeEventListener('panzoomchange', onPanzoomChange); panzoom?.destroy(); panzoom?.resetStyle(); panzoom=null; image=null; rotation=0; originalSize=false; stage.classList.remove('gallery-original'); updateZoom(); }
     function setExpanded(value) { expanded=value; dialog.classList.toggle('gallery-expanded', value); el('fullscreen').textContent=value?'退出全屏':'全屏'; el('fullscreen').setAttribute('aria-pressed',String(value)); reset(); }
