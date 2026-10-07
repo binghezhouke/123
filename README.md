@@ -322,3 +322,7 @@ CI（`.github/workflows/ci.yml`）在 push/PR 时跑这两条命令。
 这是磁盘准备流程，不是边解压边随机浏览；默认最多暂存 64 GiB 内层压缩包、展开 24 GiB 数据，受可用磁盘及总缓存预算约束。任务登记在当前服务进程内，服务重启后原任务链接不再可用。
 
 配置项：`ARCHIVE_PREP_CACHE_DIR` 指定缓存目录，`ARCHIVE_PREP_CACHE_BYTES` 设置总预算（默认 64 GiB），`ARCHIVE_PREP_CACHE_TTL_SECONDS` 设置有效期（默认 6 小时）；`ARCHIVE_PREP_MAX_MEMBER_BYTES` 设置内层压缩包大小上限，`ARCHIVE_PREP_TIMEOUT_SECONDS` 设置准备读取期限（默认 6 小时）。修改配置后重启服务。
+
+## Linux 只读挂载
+
+新增独立 Go 工具 [`mount123`](mount123/README.md)：通过开放平台 API 将网盘挂载到本地，支持 ZIP 映射目录、按需读取与可指定目录/容量的磁盘缓存。无需运行网页服务，构建与使用方式见工具文档。
