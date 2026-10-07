@@ -3,57 +3,29 @@
 {% block title %}{% if parent_id != 0 %}文件夹 - {% endif %}CloudArchive{% endblock %}
 
 {% block content %}
-<!-- File Grid View -->
+<header class="browser-heading">
+    <div><p class="eyebrow">资料库</p><h1>{{ breadcrumbs[-1].name if breadcrumbs|default([]) else '我的文件' }}</h1></div>
+    <span class="item-count">{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
+</header>
 {% if files %}
 <div class="file-grid" id="fileContainer">
     {% for file in files %}
-    <div class="file-grid-item file-item" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
-        <div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}">
-            <i class="{{ file.icon }}"></i>
-        </div>
-        <div class="file-grid-name">
-            {% if file.is_folder %}
-                <a href="{{ url_for('main.index', parent_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
-                    {{ file.filename }}
-                </a>
-            {% else %}
-                <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
-                    {{ file.filename }}
-                </a>
-            {% endif %}
-        </div>
-    </div>
+    <a class="file-grid-item file-item" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+        <div class="file-grid-icon {{ 'folder' if file.is_folder else file.category|lower }}"><i class="{{ file.icon }}" aria-hidden="true"></i></div>
+        <div class="file-grid-name">{{ file.filename }}</div>
+        <span class="file-grid-meta">{{ '文件夹' if file.is_folder else file.size_formatted }}</span>
+    </a>
     {% endfor %}
 </div>
-
-<!-- File List View (Hidden by default) -->
 <div class="file-list" id="fileListView" style="display: none;">
-    <div class="file-list-header">
-        <div>名称</div>
-        <div>大小</div>
-        <div>类型</div>
-        <div>修改日期</div>
-    </div>
+    <div class="file-list-header"><div>名称</div><div>大小</div><div>类型</div><div>修改日期</div></div>
     {% for file in files %}
-    <div class="file-list-row file-item" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
-        <div class="file-list-name">
-            <span class="file-list-icon {{ 'folder' if file.is_folder else file.category|lower }}">
-                <i class="{{ file.icon }}"></i>
-            </span>
-            {% if file.is_folder %}
-                <a href="{{ url_for('main.index', parent_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
-                    {{ file.filename }}
-                </a>
-            {% else %}
-                <a href="{{ url_for('main.file_detail', file_id=file.fileId) }}" style="color: inherit; text-decoration: none;">
-                    {{ file.filename }}
-                </a>
-            {% endif %}
-        </div>
-        <div class="file-list-meta">{{ file.size_formatted if not file.is_folder else '--' }}</div>
+    <a class="file-list-row file-item" href="{{ url_for('main.index', parent_id=file.fileId) if file.is_folder else url_for('main.file_detail', file_id=file.fileId) }}" data-file-id="{{ file.fileId }}" data-file-type="{{ 'folder' if file.is_folder else 'file' }}">
+        <div class="file-list-name"><span class="file-list-icon"><i class="{{ file.icon }}" aria-hidden="true"></i></span>{{ file.filename }}</div>
+        <div class="file-list-meta">{{ file.size_formatted if not file.is_folder else '—' }}</div>
         <div class="file-list-meta">{{ file.category_name }}</div>
-        <div class="file-list-date">{{ file.createAt }}</div>
-    </div>
+        <div class="file-list-date">{{ file.get('updateAt') or file.get('createAt') or '—' }}</div>
+    </a>
     {% endfor %}
 </div>
 
@@ -100,6 +72,8 @@ function switchView(view) {
         if (listView) listView.style.display = 'block';
     }
 
+    iconBtn.setAttribute('aria-pressed', String(view === 'icons'));
+    listBtn.setAttribute('aria-pressed', String(view === 'list'));
     // Save preference
     localStorage.setItem('finderViewMode', view);
 }
@@ -107,25 +81,6 @@ function switchView(view) {
 // Single click to open files and folders
 document.addEventListener('DOMContentLoaded', function() {
     const fileItems = document.querySelectorAll('.file-item');
-
-    fileItems.forEach(item => {
-        // Single click to open
-        item.addEventListener('click', function(e) {
-            // Don't open if clicking buttons
-            if (e.target.closest('.btn')) return;
-
-            const link = this.querySelector('a');
-            if (link) {
-                window.location.href = link.href;
-            }
-        });
-
-        // Selection on hover (visual feedback only)
-        item.addEventListener('mouseenter', function() {
-            fileItems.forEach(i => i.classList.remove('selected'));
-            this.classList.add('selected');
-        });
-    });
 
     // Restore view preference
     const savedView = localStorage.getItem('finderViewMode');
@@ -136,7 +91,7 @@ document.addEventListener('DOMContentLoaded', function() {
     // Update status bar with file count
     const statusCount = document.getElementById('statusCount');
     if (statusCount && fileItems.length > 0) {
-        statusCount.textContent = fileItems.length + ' 个项目';
+        statusCount.textContent = document.querySelectorAll('#fileContainer .file-item').length + ' 个项目';
     }
 
     // Update status text on hover

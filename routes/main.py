@@ -3,7 +3,10 @@ Main routes blueprint - Page routes (index, search, file_detail, demo_webdav)
 """
 from flask import Blueprint, render_template, request, flash, redirect, url_for, current_app
 from api import Pan123APIError
-from .utils import get_client
+from api.split_archive import SPLIT_7Z
+from .utils import get_client, folder_breadcrumbs
+from pathlib import PurePosixPath
+from routes.zip_browser import TEXT_EXTENSIONS, PREVIEW_TYPES
 
 main_bp = Blueprint('main', __name__)
 
@@ -17,14 +20,25 @@ def index():
         limit = request.args.get('limit', 20, type=int)
         last_file_id = request.args.get('last_file_id', type=int)
 
-        file_list, next_last_file_id = client.list_files(
-            parent_id=parent_id,
-            limit=limit,
-            last_file_id=last_file_id
-        )
+        limit = min(max(limit, 1), 100)
+        refresh = request.args.get('refresh') == '1'
+        cache = current_app.extensions['directory_pages']
+        key = (parent_id, limit, last_file_id)
+        if refresh:
+            cache.invalidate_directory(parent_id)
+        result = cache.get(key)
+        if result is None:
+            result = client.list_files(parent_id=parent_id, limit=limit, last_file_id=last_file_id)
+            cache.put(key, result)
+            current_app.logger.info('目录页缓存未命中: parent_id=%s', parent_id)
+        else:
+            current_app.logger.info('目录页缓存命中: parent_id=%s', parent_id)
+        file_list, next_last_file_id = result
+        breadcrumbs = folder_breadcrumbs(client, parent_id, refresh=refresh)
 
         return render_template('files.html',
                                files=file_list,
+                               breadcrumbs=breadcrumbs,
                                parent_id=parent_id,
                                next_last_file_id=next_last_file_id,
                                limit=limit)
@@ -83,6 +97,20 @@ def file_detail(file_id):
         if not file_info:
             flash('文件不存在', 'error')
             return redirect(url_for('main.index'))
+
+        if request.args.get('info') != '1':
+            if file_info.is_folder:
+                return redirect(url_for('main.index', parent_id=file_id))
+            suffix = PurePosixPath(file_info.filename).suffix.lower()
+            if suffix in ('.zip', '.7z', '.rar') or SPLIT_7Z.fullmatch(file_info.filename):
+                return redirect(url_for('zip.browse', file_id=file_id))
+            media = {'.mp4': 'video', '.webm': 'video', '.mov': 'video',
+                     '.mp3': 'audio', '.wav': 'audio', '.ogg': 'audio', '.m4a': 'audio'}
+            kind = ('image' if PREVIEW_TYPES.get(suffix, '').startswith('image/') else
+                    'pdf' if suffix == '.pdf' else 'text' if suffix in TEXT_EXTENSIONS else media.get(suffix))
+            if kind:
+                return render_template('file_preview.html', file=file_info, kind=kind,
+                                       breadcrumbs=folder_breadcrumbs(client, file_info.get('parentFileId', 0)))
 
         download_url = None
         if not file_info.is_folder:

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% block title %}{{ file.filename }} · 压缩包浏览 - CloudArchive{% endblock %}
+{% block content %}
+<div class="card archive-browser">
+    <div class="card-header browser-heading">
+        <div><p class="eyebrow">压缩包</p><h1>{{ file.filename }}</h1></div>
+        {% if not password_required %}<span class="item-count">{{ total }} 个条目</span>{% endif %}
+    </div>
+    <div class="card-body">
+        <nav aria-label="压缩包目录" class="archive-path">
+            <a href="{{ url_for('main.file_detail', file_id=file.fileId, info=1) }}">文件详情</a>
+            <a href="{{ url_for('zip.browse', file_id=file.fileId) }}">压缩包根目录</a>
+            {% if prefix %}<a href="{{ url_for('zip.browse', file_id=file.fileId, path=parent) }}">上一级</a>{% endif %}
+            {% for crumb in archive_crumbs %}<span>/</span><a href="{{ url_for('zip.browse', file_id=file.fileId, path=crumb.path) }}">{{ crumb.name }}</a>{% endfor %}
+        </nav>
+        {% if solid %}<p role="status">此文件采用固实压缩，当前仅支持浏览目录；预览或提取请下载原压缩包。</p>{% endif %}
+        {% if has_encrypted or password_required or password_set %}
+        <section class="archive-password-panel" aria-label="压缩包密码" id="archive-password-entry">
+            {% if password_required %}<p role="alert">{{ password_error or '请输入压缩包密码' }}</p>{% endif %}
+            {% if has_encrypted or password_required %}
+            <form method="post" class="zip-password-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="password">
+                <input type="hidden" name="path" value="{{ prefix }}">
+                {% if password_required and member_id is not none %}<input type="hidden" name="member_id" value="{{ member_id }}"><input type="hidden" name="v" value="{{ archive_version }}"><input type="hidden" name="download" value="{{ request.args.get('download', '') }}">{% endif %}
+                <label for="zip-password-entry">{% if password_set %}重新输入压缩包密码{% else %}压缩包密码{% endif %}</label>
+                <input id="zip-password-entry" type="password" name="password" required maxlength="1024" autocomplete="current-password">
+                <button class="btn btn-primary" type="submit">{% if password_required %}重新提交密码{% elif password_set %}修改密码{% else %}解锁压缩包{% endif %}</button>
+            </form>
+            {% endif %}
+            {% if password_set %}
+            <form method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="clear">
+                <input type="hidden" name="path" value="{{ prefix }}">
+                <button class="btn btn-secondary" type="submit">清除已保存密码</button>
+            </form>
+            {% endif %}
+        </section>
+        {% endif %}
+        {% if not password_required %}
+        <div class="table-responsive">
+            <table class="table">
+                <thead><tr><th>名称</th><th>解压后大小</th><th>操作</th></tr></thead>
+                <tbody>
+                {% for folder in folders %}
+                    <tr><td><a href="{{ url_for('zip.browse', file_id=file.fileId, path=prefix ~ folder ~ '/') }}"><i class="fas fa-folder" aria-hidden="true"></i> {{ folder }}/</a></td><td>—</td><td></td></tr>
+                {% endfor %}
+                {% for entry in files %}
+                    <tr>
+                        <td style="overflow-wrap: anywhere;">{{ entry.name }}{% if entry.encrypted %} <span class="badge bg-secondary">加密</span>{% endif %}</td>
+                        <td>{{ '{:,}'.format(entry.size) }} B</td>
+                        <td>
+                            {% if solid %}固实压缩：请下载原文件
+                            {% elif entry.encrypted and not password_set %}<a href="#archive-password-entry">输入密码</a>
+                            {% elif entry.size > 33554432 %}请下载原压缩包
+                            {% else %}
+                                {% if entry.image %}<button type="button" class="btn btn-sm btn-primary zip-image" data-url="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, v=archive_version) }}" data-name="{{ entry.name }}">浏览图片</button>
+                                {% elif entry.preview %}<a class="btn btn-sm btn-primary" target="_blank" rel="noopener" href="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, v=archive_version) }}">打开预览</a>{% endif %}
+                                <a class="btn btn-sm btn-secondary" href="{{ url_for('zip.browse', file_id=file.fileId, member_id=entry.id, download=1, v=archive_version) }}">下载</a>
+                            {% endif %}
+                        </td>
+                    </tr>
+                {% endfor %}
+                {% if not folders and not files %}<tr><td colspan="3">此目录为空</td></tr>{% endif %}
+                </tbody>
+            </table>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+
+<dialog id="zip-gallery" aria-labelledby="zip-gallery-title">
+    <div class="zip-gallery-toolbar">
+        <h2 id="zip-gallery-title">图片预览</h2>
+        <span id="zip-gallery-counter"></span>
+        <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
+        <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
+    </div>
+    <div id="zip-gallery-stage"></div>
+    <p id="zip-gallery-status" role="status" aria-live="polite"></p>
+    <div class="zip-gallery-toolbar gallery-controls">
+        <button id="zip-gallery-prev" class="btn btn-secondary" type="button">← 上一张</button>
+        <button id="zip-gallery-retry" class="btn btn-secondary" type="button" hidden>重试</button>
+        <button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
+    </div>
+</dialog>
+<script src="{{ url_for('static', filename='js/zip_gallery.js') }}" defer></script>
+{% endblock %}

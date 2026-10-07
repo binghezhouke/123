@@ -9,9 +9,6 @@ document.addEventListener('DOMContentLoaded', () => {
     // Bind download buttons
     bindDownloadButtons();
 
-    // Initialize card animations
-    initCardAnimations();
-
     // Search enhancement
     initSearchEnhancement();
 
@@ -155,17 +152,6 @@ function getDownloadLink(fileId) {
  */
 function copyDownloadLink() {
     copyDownloadUrl();
-}
-
-/**
- * Initialize card animations
- */
-function initCardAnimations() {
-    const fileCards = document.querySelectorAll('.file-card, .file-grid-item, .file-list-row');
-    fileCards.forEach((card, index) => {
-        card.style.animationDelay = `${index * 0.03}s`;
-        card.classList.add('fade-in');
-    });
 }
 
 /**

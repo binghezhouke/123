@@ -156,6 +156,11 @@
                             <i class="fas fa-folder-open" style="margin-right: 6px;"></i> 打开文件夹
                         </a>
                     {% else %}
+                        {% if file.filename.lower().endswith(('.zip', '.7z', '.rar', '.7z.001')) %}
+                        <a href="{{ url_for('zip.browse', file_id=file.fileId) }}" class="btn btn-primary">
+                            <i class="fas fa-file-archive" style="margin-right: 6px;"></i> 浏览压缩包内容
+                        </a>
+                        {% endif %}
                         {% if download_url %}
                             <a href="{{ download_url }}" class="btn btn-primary" target="_blank">
                                 <i class="fas fa-download" style="margin-right: 6px;"></i> 直接下载

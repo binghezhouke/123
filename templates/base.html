@@ -12,6 +12,7 @@
     <!-- 自定义CSS -->
     <link href="{{ url_for('static', filename='css/style.css') }}" rel="stylesheet">
 
+    <link href="{{ url_for('static', filename='css/browser.css') }}" rel="stylesheet">
     {% block extra_head %}{% endblock %}
 </head>
 <body>
@@ -19,56 +20,17 @@
     <div class="finder-window">
         <!-- Sidebar -->
         <aside class="finder-sidebar">
-            <!-- Favorites Section -->
+            <a class="browser-brand" href="{{ url_for('main.index') }}"><span class="brand-mark"><i class="fas fa-layer-group" aria-hidden="true"></i></span>CloudArchive</a>
             <div class="sidebar-section">
-                <div class="sidebar-header">收藏</div>
-                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint == 'main.index' and not request.args.get('parent_id') %}active{% endif %}">
-                    <span class="sidebar-icon favorites"><i class="fas fa-home"></i></span>
-                    <span class="sidebar-label">首页</span>
+                <div class="sidebar-header">资料库</div>
+                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint != 'main.search' %}active{% endif %}">
+                    <span class="sidebar-icon"><i class="fas fa-hdd" aria-hidden="true"></i></span><span>我的文件</span>
                 </a>
                 <a href="{{ url_for('main.search') }}" class="sidebar-item {% if request.endpoint == 'main.search' %}active{% endif %}">
-                    <span class="sidebar-icon search"><i class="fas fa-search"></i></span>
-                    <span class="sidebar-label">搜索</span>
+                    <span class="sidebar-icon"><i class="fas fa-search" aria-hidden="true"></i></span><span>搜索</span>
                 </a>
             </div>
-
-            <!-- Locations Section -->
-            <div class="sidebar-section">
-                <div class="sidebar-header">位置</div>
-                <a href="{{ url_for('main.index') }}" class="sidebar-item {% if request.endpoint == 'main.index' and not request.args.get('parent_id') %}active{% endif %}">
-                    <span class="sidebar-icon documents"><i class="fas fa-hdd"></i></span>
-                    <span class="sidebar-label">123云盘</span>
-                </a>
-            </div>
-
-            <!-- Tags Section (for future use) -->
-            <div class="sidebar-section">
-                <div class="sidebar-header">标签</div>
-                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
-                    <span class="sidebar-icon" style="color: var(--accent-red);"><i class="fas fa-tag"></i></span>
-                    <span class="sidebar-label">红色</span>
-                </a>
-                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
-                    <span class="sidebar-icon" style="color: var(--accent-orange);"><i class="fas fa-tag"></i></span>
-                    <span class="sidebar-label">橙色</span>
-                </a>
-                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
-                    <span class="sidebar-icon" style="color: var(--accent-yellow);"><i class="fas fa-tag"></i></span>
-                    <span class="sidebar-label">黄色</span>
-                </a>
-                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
-                    <span class="sidebar-icon" style="color: var(--accent-green);"><i class="fas fa-tag"></i></span>
-                    <span class="sidebar-label">绿色</span>
-                </a>
-                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
-                    <span class="sidebar-icon" style="color: var(--accent-blue);"><i class="fas fa-tag"></i></span>
-                    <span class="sidebar-label">蓝色</span>
-                </a>
-                <a href="#" class="sidebar-item" onclick="showToast('标签功能即将推出', 'info'); return false;">
-                    <span class="sidebar-icon" style="color: var(--accent-purple);"><i class="fas fa-tag"></i></span>
-                    <span class="sidebar-label">紫色</span>
-                </a>
-            </div>
+            <div class="sidebar-footer"><span class="connection-dot"></span>123 云盘</div>
         </aside>
 
         <!-- Main Content Area -->
@@ -77,36 +39,24 @@
             <div class="finder-toolbar">
                 <div class="toolbar-left">
                     <!-- Navigation Controls -->
-                    <div class="toolbar-btn" onclick="history.back()" title="后退">
-                        <i class="fas fa-chevron-left"></i>
-                    </div>
-                    <div class="toolbar-btn" onclick="history.forward()" title="前进">
-                        <i class="fas fa-chevron-right"></i>
-                    </div>
+                    <button type="button" class="toolbar-btn" onclick="history.back()" title="后退" aria-label="后退">
+                        <i class="fas fa-chevron-left" aria-hidden="true"></i>
+                    </button>
+                    <button type="button" class="toolbar-btn" onclick="history.forward()" title="前进" aria-label="前进">
+                        <i class="fas fa-chevron-right" aria-hidden="true"></i>
+                    </button>
                     <div class="toolbar-separator"></div>
 
-                    <!-- Path Bar -->
-                    <div class="path-bar">
-                        <a href="{{ url_for('main.index') }}" class="path-item">
-                            <i class="fas fa-hdd" style="margin-right: 4px;"></i> 123云盘
-                        </a>
-                        {% if request.args.get('parent_id') %}
-                        <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
-                        <span class="path-current">文件夹 {{ request.args.get('parent_id') }}</span>
-                        {% elif request.endpoint == 'main.search' %}
-                        <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
-                        <span class="path-current">搜索</span>
-                        {% endif %}
-                    </div>
+                    <span class="toolbar-location">{% if request.endpoint == 'main.search' %}搜索{% elif breadcrumbs|default([]) %}{{ breadcrumbs[-1].name }}{% else %}我的文件{% endif %}</span>
                 </div>
 
                 <div class="toolbar-right">
                     <!-- View Toggle -->
-                    <div class="view-toggle">
-                        <button type="button" class="view-toggle-btn active" id="iconViewBtn" title="图标视图" onclick="switchView('icons')">
+                    <div class="view-toggle" {% if request.endpoint != 'main.index' %}hidden{% endif %}>
+                        <button type="button" class="view-toggle-btn active" id="iconViewBtn" title="图标视图" aria-label="图标视图" onclick="switchView('icons')">
                             <i class="fas fa-th-large"></i>
                         </button>
-                        <button type="button" class="view-toggle-btn" id="listViewBtn" title="列表视图" onclick="switchView('list')">
+                        <button type="button" class="view-toggle-btn" id="listViewBtn" title="列表视图" aria-label="列表视图" onclick="switchView('list')">
                             <i class="fas fa-list"></i>
                         </button>
                     </div>
@@ -115,18 +65,40 @@
                     <!-- Search in Toolbar -->
                     <div class="toolbar-search">
                         <i class="fas fa-search toolbar-search-icon"></i>
-                        <input type="search" placeholder="搜索" id="toolbarSearch" onkeypress="if(event.key==='Enter'){location.href='{{ url_for('main.search') }}?q='+this.value;}">
+                        <input type="search" placeholder="搜索文件…" aria-label="搜索文件" id="toolbarSearch" onkeypress="if(event.key==='Enter'){location.href='{{ url_for('main.search') }}?q='+encodeURIComponent(this.value);}">
                     </div>
 
                     <!-- Action Buttons -->
-                    <button type="button" class="toolbar-btn" onclick="refreshFiles()" title="刷新">
+                    <button type="button" class="toolbar-btn" onclick="refreshFiles()" title="刷新" aria-label="刷新文件">
                         <i class="fas fa-sync-alt"></i>
                     </button>
-                    <button type="button" class="toolbar-btn" title="操作" onclick="showToast('更多功能即将推出', 'info')">
-                        <i class="fas fa-ellipsis-h"></i>
-                    </button>
+
                 </div>
             </div>
+
+            <nav class="browser-path" aria-label="文件路径">                    <!-- Path Bar -->
+                    <div class="path-bar" style="min-width: 0; overflow-x: auto; white-space: nowrap;">
+                        <a href="{{ url_for('main.index') }}" class="path-item">
+                            <i class="fas fa-hdd" style="margin-right: 4px;"></i> 123云盘
+                        </a>
+                        {% if breadcrumbs|default([]) or request.args.get('parent_id') %}
+                            {% for crumb in breadcrumbs|default([]) %}
+                                <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
+                                {% if not loop.last or request.endpoint != 'main.index' %}
+                                <a class="path-item" href="{{ url_for('main.index', parent_id=crumb.file_id) }}">{{ crumb.name }}</a>
+                                {% else %}
+                                <span class="path-current">{{ crumb.name }}</span>
+                                {% endif %}
+                            {% endfor %}
+                            {% if not breadcrumbs|default([]) %}
+                                <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
+                                <span class="path-current">文件夹 {{ request.args.get('parent_id') }}</span>
+                            {% endif %}
+                        {% elif request.endpoint == 'main.search' %}
+                        <span class="path-separator"><i class="fas fa-chevron-right"></i></span>
+                        <span class="path-current">搜索</span>
+                        {% endif %}
+                    </div></nav>
 
             <!-- Flash Messages -->
             {% with messages = get_flashed_messages(with_categories=true) %}
@@ -260,7 +232,9 @@
                 btn.classList.add('fa-spin');
                 setTimeout(() => btn.classList.remove('fa-spin'), 500);
             }
-            window.location.reload();
+            const url = new URL(window.location.href);
+            url.searchParams.set('refresh', '1');
+            window.location.href = url.toString();
         }
     </script>
 

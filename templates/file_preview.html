@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}{{ file.filename }} - CloudArchive{% endblock %}
+{% block content %}
+<div style="display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 16px;">
+    <h2 style="font-size: 18px; flex: 1; overflow-wrap: anywhere;">{{ file.filename }}</h2>
+    <a class="btn btn-secondary" href="{{ url_for('main.index', parent_id=file.get('parentFileId', 0)) }}">返回文件夹</a>
+    <a class="btn btn-secondary" href="{{ url_for('main.file_detail', file_id=file.fileId, info=1) }}">文件信息</a>
+    <a class="btn btn-primary" href="{{ url_for('preview.content', file_id=file.fileId, download=1) }}">下载</a>
+</div>
+<div class="file-preview-stage" style="min-height: 60vh; display: flex; justify-content: center; align-items: center; background: var(--bg-secondary, #f5f5f7); border-radius: 12px; padding: 12px;">
+{% set source = url_for('preview.content', file_id=file.fileId) %}
+{% if kind == 'image' %}
+<img src="{{ source }}" alt="{{ file.filename }}" style="max-width: 100%; max-height: 75vh; object-fit: contain;" onerror="document.getElementById('preview-error').hidden=false;">
+{% elif kind == 'video' %}
+<video src="{{ source }}" controls preload="metadata" style="max-width: 100%; max-height: 75vh;"></video>
+{% elif kind == 'audio' %}
+<audio src="{{ source }}" controls preload="metadata" style="width: min(100%, 600px);"></audio>
+{% else %}
+<iframe src="{{ source }}" title="{{ file.filename }}" sandbox style="width: 100%; height: 75vh; border: 0; background: white;"></iframe>
+{% endif %}
+</div>
+<p id="preview-error" role="status" hidden>文件预览失败，请刷新重试或下载文件。</p>
+{% endblock %}

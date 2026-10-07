@@ -9,6 +9,11 @@ import logging
 import os
 from flask import Flask, render_template
 from routes import main_bp, api_bp
+from routes.zip_browser import zip_bp
+from routes.browser_cache import PageCache
+from api.archive_cache import ArchiveCache
+from api.archive_passwords import ArchivePasswordVault
+from routes.preview import preview_bp
 
 
 def load_config(config_path='config.json'):
@@ -35,13 +40,19 @@ def create_app(config_path='config.json'):
 
     # 从配置读取SECRET_KEY
     app.secret_key = config.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+    app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 
     # 存储完整配置供蓝图使用
     app.config['PAN123_CONFIG'] = config
+    app.extensions['directory_pages'] = PageCache()
+    app.extensions['archive_cache'] = ArchiveCache()
+    app.extensions['archive_passwords'] = ArchivePasswordVault()
 
     # 注册蓝图
     app.register_blueprint(main_bp)
     app.register_blueprint(api_bp)
+    app.register_blueprint(zip_bp)
+    app.register_blueprint(preview_bp)
 
     # 配置日志
     logging.basicConfig(
@@ -91,7 +102,7 @@ if __name__ == '__main__':
     # 监听地址/端口/调试开关都可以用环境变量覆盖
     debug = os.environ.get('FLASK_DEBUG', '').lower() in ('1', 'true', 'yes')
     host = os.environ.get('FLASK_HOST', '0.0.0.0')
-    port = int(os.environ.get('FLASK_PORT', '8080'))
+    port = int(os.environ.get('FLASK_PORT', '8081'))
 
     print("启动Flask服务器...")
     print(f"访问地址: http://{'localhost' if host == '0.0.0.0' else host}:{port}")
