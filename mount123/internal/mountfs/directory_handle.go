@@ -13,8 +13,8 @@ import (
 )
 
 // directoryHandle keeps the names returned by one OpendirHandle call. The
-// resolver points at the immutable metadata snapshot (or, for progressive
-// RAR, the append-only index) instead of copying the archive index per handle.
+// resolver points at an immutable snapshot or a completed shared index. A
+// progressive RAR freezes only its current directory's discovered entries.
 type directoryHandle struct {
 	mu      sync.Mutex
 	parent  *Node
