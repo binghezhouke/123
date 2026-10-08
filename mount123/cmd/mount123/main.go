@@ -55,7 +55,7 @@ func run() error {
 		defer stop()
 		return runUnlock(ctx, os.Args[2:], os.Stdin, os.Stderr, os.Stdout)
 	}
-	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "wait-index" || os.Args[1] == "io-stats") {
+	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "wait-index" || os.Args[1] == "io-stats" || os.Args[1] == "refresh") {
 		ctx, stop := notifyContext()
 		defer stop()
 		return runControlCommand(ctx, os.Args[1:], os.Stderr, os.Stdout)
@@ -68,7 +68,8 @@ func run() error {
 	mountpoint := flag.String("mountpoint", "", "empty local directory to mount")
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
-	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
+	cacheGiB := flag.Int64("cache-gib", 50, "maximum disk cache size in GiB")
+	statsInterval := flag.Duration("stats-interval", 30*time.Second, "append aggregate I/O statistics to io-stats.jsonl (0 disables)")
 	cacheDurability := flag.String("cache-durability", "durable", "cache durability: durable or ephemeral")
 	downloadRequests := flag.Int("download-requests", 32, "maximum simultaneous HTTP range responses")
 	downloadBytesMiB := flag.Int64("download-bytes-mib", 128, "global in-flight HTTP response byte budget in MiB")
@@ -77,8 +78,8 @@ func run() error {
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
 	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and archive index cache budget in MiB")
 	archiveEntries := flag.Int("archive-max-entries", 100000, "maximum members per archive index")
-	directoryTTL := flag.Duration("directory-ttl", 30*time.Second, "directory snapshot freshness interval")
-	sourceTTL := flag.Duration("source-ttl", 30*time.Second, "remote reader reuse interval across opens")
+	directoryTTL := flag.Duration("directory-ttl", 24*time.Hour, "directory snapshot freshness interval")
+	sourceTTL := flag.Duration("source-ttl", 144*time.Hour, "remote reader reuse interval across opens")
 	fileInfo := flag.Bool("file-info", false, "refresh metadata for looked-up cloud files (adds a batched API request)")
 	archivePageCache := flag.Bool("archive-page-cache", true, "allow the kernel to cache fully materialized archive members")
 	streamMembers := flag.Bool("stream-members", true, "stream large compressed archive members while they are being verified")
@@ -106,7 +107,7 @@ func run() error {
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
 	}
-	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 {
+	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *statsInterval < 0 {
 		return fmt.Errorf("invalid cache size, freshness interval or root ID")
 	}
 	mountAbs, err := filepath.Abs(*mountpoint)
@@ -200,6 +201,8 @@ func run() error {
 	}
 	defer control.close()
 	go control.serve(ctx)
+	statsSampler := startStatsSampler(ctx, filepath.Join(cacheAbs, statsFileName), *statsInterval, root.IOStats, log.Printf)
+	defer statsSampler.Close()
 	log.Printf("read-only mount ready: %s (cache: %s, control: %s)", mountAbs, cacheAbs, socketPath)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)

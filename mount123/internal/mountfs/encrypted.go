@@ -140,7 +140,6 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 	if !ok {
 		return nil, syscall.EACCES
 	}
-	key := fmt.Sprintf("password:%d:%s:%d:%d:%s", archive.id, archive.version, archive.size, archive.parentID, archive.name)
 	directory, err := t.cloudDirectory(ctx, archive.parentID)
 	if err != nil {
 		if errors.Is(err, errDuplicateCloudName) {
@@ -148,6 +147,10 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 		}
 		return nil, err
 	}
+	// Tie password discovery to the immutable parent listing it inspected.
+	// A refresh can then install a new flight without waiting for or accepting
+	// a result built from the previous directory snapshot.
+	key := fmt.Sprintf("password:%d:%s:%d:%d:%s:g%d", archive.id, archive.version, archive.size, archive.parentID, archive.name, directory.generation)
 	value, err := t.loadRefreshingMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		wanted := archive.name + ".pwd"
 		if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {

@@ -72,6 +72,10 @@ type Cache struct {
 	syncFile            func(*os.File) error
 	ephemeral           bool
 	closed              bool
+	statsReady          bool
+	telemetry           cacheTelemetry
+	ghost               map[string]*list.Element
+	ghostLRU            *list.List
 }
 
 // NewCache opens an exclusive cache directory with the requested byte limit.
@@ -111,7 +115,7 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	indexBudget := min(maxBytes/8, int64(64<<20))
-	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
+	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel, ghost: make(map[string]*list.Element), ghostLRU: list.New()}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -120,6 +124,7 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 		c.Close()
 		return nil, err
 	}
+	c.statsReady = true
 	return c, nil
 }
 
@@ -442,6 +447,7 @@ func (c *Cache) evictLocked(need int64) error {
 			}
 		}
 		if victim == nil {
+			c.recordENOSPCLocked()
 			return syscall.ENOSPC
 		}
 		id := victim.Value.(string)
@@ -449,6 +455,7 @@ func (c *Cache) evictLocked(need int64) error {
 		if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
+		c.recordCapacityEvictionLocked(id, e)
 		c.removeEntryLocked(id, e)
 	}
 	return nil
@@ -582,10 +589,16 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 }
 
 func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64, targetPath string, class cacheClass, progress *rangeProgress, fill func(context.Context, io.Writer) error) (*Handle, error) {
+	id := cacheID(key)
 	if size < 0 || size > c.max {
+		c.mu.Lock()
+		if size >= 0 {
+			c.consumeCacheGhostLocked(id)
+		}
+		c.recordENOSPCLocked()
+		c.mu.Unlock()
 		return nil, syscall.ENOSPC
 	}
-	id := cacheID(key)
 	for {
 		c.mu.Lock()
 		if c.closed {
@@ -610,6 +623,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			c.removeEntryLocked(id, e)
 		} else if e != nil {
 			if e.pins != 0 {
+				c.recordENOSPCLocked()
 				c.mu.Unlock()
 				return nil, syscall.ENOSPC
 			}
@@ -617,6 +631,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			c.removeEntryLocked(id, e)
 		}
 		if growing := c.growing[id]; growing != nil {
+			c.recordExistingFillWaitLocked()
 			done := growing.done
 			c.mu.Unlock()
 			select {
@@ -627,6 +642,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			}
 		}
 		if f := c.flights[id]; f != nil {
+			c.recordExistingFillWaitLocked()
 			done := f.done
 			c.mu.Unlock()
 			select {
@@ -651,6 +667,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			class = cacheProbation
 			targetPath = c.pathForKey(key, class)
 		}
+		c.consumeCacheGhostLocked(id)
 		if err := c.evictLocked(size); err != nil {
 			c.mu.Unlock()
 			return nil, err
@@ -718,6 +735,13 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			_ = os.Remove(targetPath)
 		}
 		delete(c.flights, id)
+		if c.statsReady {
+			if acquired != nil {
+				c.telemetry.fillSuccesses++
+			} else {
+				c.telemetry.fillFailures++
+			}
+		}
 		close(f.done)
 		c.mu.Unlock()
 		if f.err != nil {

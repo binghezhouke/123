@@ -176,6 +176,7 @@ func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, en
 		}
 		if start >= active.start && start < active.end {
 			active.refs++
+			c.recordExistingFillWaitLocked()
 			c.mu.Unlock()
 			if !workqueue.IsBackground(ctx) {
 				c.promotePriority(active.priority)

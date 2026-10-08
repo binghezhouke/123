@@ -43,6 +43,7 @@ type controlRequest struct {
 
 type controlResponse struct {
 	Status  *mountfs.ArchiveIndexStatus `json:"status,omitempty"`
+	Refresh *mountfs.RefreshResult      `json:"refresh,omitempty"`
 	IOStats *iostats.Snapshot           `json:"io_stats,omitempty"`
 	Error   string                      `json:"error,omitempty"`
 }
@@ -146,20 +147,21 @@ func (s *controlServer) handle(ctx context.Context, conn *net.UnixConn) {
 		_ = json.NewEncoder(conn).Encode(controlResponse{IOStats: &snapshot})
 		return
 	}
-	if request.Command != "" && request.Command != "status" {
+	if request.Command != "" && request.Command != "status" && request.Command != "refresh" {
 		_ = json.NewEncoder(conn).Encode(controlResponse{Error: "unsupported control command"})
 		return
 	}
-	archivePath := request.Path
-	if filepath.IsAbs(archivePath) {
-		absolute := filepath.Clean(archivePath)
-		if s.mount != "" && isWithin(absolute, s.mount) {
-			if relative, err := filepath.Rel(s.mount, absolute); err == nil {
-				archivePath = filepath.ToSlash(relative)
-			}
-		} else {
-			archivePath = strings.TrimLeft(archivePath, string(filepath.Separator))
+	archivePath := s.mountRelativePath(request.Path)
+	if request.Command == "refresh" {
+		refreshCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+		defer cancel()
+		result, err := s.root.RefreshDirectory(refreshCtx, archivePath)
+		if err != nil {
+			_ = json.NewEncoder(conn).Encode(controlResponse{Error: safeRefreshError(err)})
+			return
 		}
+		_ = json.NewEncoder(conn).Encode(controlResponse{Refresh: &result})
+		return
 	}
 	status, err := s.root.StatusArchiveIndex(ctx, archivePath)
 	if err != nil {
@@ -167,6 +169,36 @@ func (s *controlServer) handle(ctx context.Context, conn *net.UnixConn) {
 		return
 	}
 	_ = json.NewEncoder(conn).Encode(controlResponse{Status: &status})
+}
+
+func safeRefreshError(err error) string {
+	switch {
+	case errors.Is(err, syscall.ENOENT):
+		return "path not found in this mount"
+	case errors.Is(err, syscall.ENOTDIR):
+		return "path parent is not a directory"
+	case errors.Is(err, syscall.EINVAL):
+		return "refresh supports cloud directories only; archive and ISO directories cannot be refreshed"
+	case errors.Is(err, context.Canceled):
+		return "mount is shutting down"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "refresh timed out; try again"
+	default:
+		return "could not refresh cloud directory"
+	}
+}
+
+func (s *controlServer) mountRelativePath(value string) string {
+	if filepath.IsAbs(value) {
+		absolute := filepath.Clean(value)
+		if s.mount != "" && isWithin(absolute, s.mount) {
+			if relative, err := filepath.Rel(s.mount, absolute); err == nil {
+				return filepath.ToSlash(relative)
+			}
+		}
+		return strings.TrimLeft(absolute, string(filepath.Separator))
+	}
+	return value
 }
 
 func sameUserPeer(conn *net.UnixConn) bool {
@@ -201,6 +233,8 @@ func safeControlError(err error) string {
 		return "archive password is unavailable or invalid"
 	case errors.Is(err, context.Canceled):
 		return "mount is shutting down"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "refresh timed out; try again"
 	default:
 		return "could not inspect archive index"
 	}
@@ -216,11 +250,22 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 	}
 	socketPath := flags.String("control-socket", filepath.Join(userCache, "mount123", "control.sock"), "running mount's local control socket")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait-index duration")
+	var statsInterval time.Duration
+	var statsCount int
+	if command == "io-stats" {
+		flags.DurationVar(&statsInterval, "interval", 0, "sample interval (0 returns one snapshot)")
+		flags.IntVar(&statsCount, "count", 0, "number of samples (0 continues until canceled; requires -interval)")
+	}
+	if command != "status" && command != "wait-index" && command != "refresh" && command != "io-stats" {
+		return errors.New("unsupported control command")
+	}
 	flags.Usage = func() {
 		if command == "io-stats" {
-			_, _ = fmt.Fprintf(stderr, "Usage: mount123 io-stats [-control-socket PATH]\n")
+			_, _ = fmt.Fprintf(stderr, "Usage: mount123 io-stats [-control-socket PATH] [-interval DURATION] [-count N]\n")
 		} else if command == "wait-index" {
 			_, _ = fmt.Fprintf(stderr, "Usage: mount123 %s [-control-socket PATH] [-timeout DURATION] <mounted archive path>\n", command)
+		} else if command == "refresh" {
+			_, _ = fmt.Fprintf(stderr, "Usage: mount123 refresh [-control-socket PATH] <mounted cloud directory path>\n")
 		} else {
 			_, _ = fmt.Fprintf(stderr, "Usage: mount123 %s [-control-socket PATH] <mounted archive path>\n", command)
 		}
@@ -236,6 +281,15 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 		if flags.NArg() != 0 {
 			return errors.New("io-stats does not take a path")
 		}
+		if statsInterval < 0 || statsCount < 0 {
+			return errors.New("io-stats interval and count must be non-negative")
+		}
+		if statsInterval > 0 {
+			return runIOStatsSampling(ctx, *socketPath, statsInterval, statsCount, stdout)
+		}
+		if statsCount != 0 {
+			return errors.New("io-stats -count requires -interval")
+		}
 		snapshot, err := requestControlIOStats(ctx, *socketPath)
 		if err != nil {
 			return err
@@ -246,6 +300,17 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 		return errors.New("expected one mounted archive path; flags must precede the path")
 	}
 	archivePath := flags.Arg(0)
+	if command == "refresh" {
+		result, err := requestControlRefresh(ctx, *socketPath, archivePath)
+		if err != nil {
+			if ctx.Err() != nil {
+				return &commandExitError{code: controlExitCanceled, err: ctx.Err()}
+			}
+			return err
+		}
+		_, err = fmt.Fprintf(stdout, "entries=%d\n", result.Entries)
+		return err
+	}
 	deadline := time.Now().Add(*timeout)
 	for {
 		requestCtx := ctx
@@ -292,6 +357,44 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 	}
 }
 
+func runIOStatsSampling(ctx context.Context, socketPath string, interval time.Duration, count int, stdout io.Writer) error {
+	if interval <= 0 || count < 0 {
+		return errors.New("invalid io-stats sampling interval or count")
+	}
+	encoder := json.NewEncoder(stdout)
+	var previous *iostats.Snapshot
+	for emitted := 0; count == 0 || emitted < count; emitted++ {
+		if err := ctx.Err(); err != nil {
+			return &commandExitError{code: controlExitCanceled, err: err}
+		}
+		snapshot, err := requestControlIOStats(ctx, socketPath)
+		if err != nil {
+			if ctx.Err() != nil {
+				err = ctx.Err()
+				return &commandExitError{code: controlExitCanceled, err: err}
+			}
+			return err
+		}
+		record := newStatsRecord(previous, snapshot)
+		if err := encoder.Encode(record); err != nil {
+			return err
+		}
+		current := snapshot
+		previous = &current
+		if count > 0 && emitted+1 >= count {
+			return nil
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return &commandExitError{code: controlExitCanceled, err: ctx.Err()}
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
 func requestControlStatus(ctx context.Context, socketPath, archivePath string) (mountfs.ArchiveIndexStatus, error) {
 	conn, err := dialControl(ctx, socketPath)
 	if err != nil {
@@ -315,6 +418,31 @@ func requestControlStatus(ctx context.Context, socketPath, archivePath string) (
 		return mountfs.ArchiveIndexStatus{}, errors.New("mount returned an empty archive status")
 	}
 	return *response.Status, nil
+}
+
+func requestControlRefresh(ctx context.Context, socketPath, directoryPath string) (mountfs.RefreshResult, error) {
+	conn, err := dialControl(ctx, socketPath)
+	if err != nil {
+		return mountfs.RefreshResult{}, err
+	}
+	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+	if err := json.NewEncoder(conn).Encode(controlRequest{Command: "refresh", Path: directoryPath}); err != nil {
+		return mountfs.RefreshResult{}, err
+	}
+	var response controlResponse
+	if err := json.NewDecoder(io.LimitReader(conn, 16<<10)).Decode(&response); err != nil {
+		return mountfs.RefreshResult{}, err
+	}
+	if response.Error != "" {
+		return mountfs.RefreshResult{}, errors.New(response.Error)
+	}
+	if response.Refresh == nil {
+		return mountfs.RefreshResult{}, errors.New("mount returned an empty refresh result")
+	}
+	return *response.Refresh, nil
 }
 
 func requestControlIOStats(ctx context.Context, socketPath string) (iostats.Snapshot, error) {

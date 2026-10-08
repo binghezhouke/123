@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
 	"github.com/binghezhouke/123/mount123/internal/panapi"
 	"github.com/binghezhouke/123/mount123/internal/storage"
+	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 type controlTestAPI struct {
@@ -70,6 +73,74 @@ func (a *controlTestAPI) List(context.Context, int64) ([]panapi.File, error) {
 	return append([]panapi.File(nil), a.files...), nil
 }
 func (a *controlTestAPI) DownloadURL(context.Context, int64) (string, error) { return a.url, nil }
+
+type controlRefreshAPI struct {
+	mu    sync.Mutex
+	files map[int64][]panapi.File
+}
+
+func (a *controlRefreshAPI) List(_ context.Context, parent int64) ([]panapi.File, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]panapi.File(nil), a.files[parent]...), nil
+}
+func (*controlRefreshAPI) DownloadURL(context.Context, int64) (string, error) { return "", nil }
+
+func TestActualFUSEManualRefreshControl(t *testing.T) {
+	if os.Getenv("MOUNT123_FUSE_TEST") != "1" {
+		t.Skip("set MOUNT123_FUSE_TEST=1 to test manual refresh over FUSE and control socket")
+	}
+	api := &controlRefreshAPI{files: map[int64][]panapi.File{
+		0:  {{ID: 10, ParentID: 0, Name: "folder", IsDir: true}},
+		10: {{ID: 11, ParentID: 10, Name: "before.txt", Size: 1, Version: "v1"}},
+	}}
+	root := mountfs.New(context.Background(), api, nil, 0, true)
+	mountpoint := t.TempDir()
+	server, err := fs.Mount(mountpoint, root, &fs.Options{MountOptions: fuse.MountOptions{Options: []string{"ro"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := server.Unmount(); err != nil {
+			t.Error(err)
+		}
+		server.Wait()
+	}()
+	folderPath := filepath.Join(mountpoint, "folder")
+	entries, err := os.ReadDir(folderPath)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "before.txt" {
+		t.Fatalf("initial mounted listing=%v err=%v", entries, err)
+	}
+	api.mu.Lock()
+	api.files[10] = []panapi.File{{ID: 12, ParentID: 10, Name: "after.txt", Size: 1, Version: "v2"}}
+	api.mu.Unlock()
+	socketDir := t.TempDir()
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(socketDir, "control.sock")
+	control, err := startControlServer(socketPath, root, mountpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServe := context.WithCancel(context.Background())
+	go control.serve(serveCtx)
+	defer func() { stopServe(); control.close() }()
+	var output bytes.Buffer
+	if err := runControlCommand(context.Background(), []string{"refresh", "-control-socket", socketPath, folderPath}, io.Discard, &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.String() != "entries=1\n" {
+		t.Fatalf("refresh output=%q", output.String())
+	}
+	entries, err = os.ReadDir(folderPath)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "after.txt" {
+		t.Fatalf("refreshed mounted listing=%v err=%v", entries, err)
+	}
+	if _, err := os.Stat(filepath.Join(folderPath, "before.txt")); !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("removed entry remained visible: %v", err)
+	}
+}
 
 func TestControlSocketStatusWaitTimeoutAndCompletion(t *testing.T) {
 	var data bytes.Buffer

@@ -13,6 +13,7 @@ const histogramBuckets = 64
 // Tracker aggregates metrics without retaining individual samples. Duration
 // histograms use fixed logarithmic buckets; byte counters are monotonic.
 type Tracker struct {
+	startedAt           time.Time
 	foregroundRead      duration
 	foregroundReadTime  duration
 	transferQueue       duration
@@ -49,6 +50,11 @@ type CounterSummary struct {
 
 // Snapshot contains process-lifetime aggregate measurements only.
 type Snapshot struct {
+	StartedAt             time.Time        `json:"started_at"`
+	CollectedAt           time.Time        `json:"collected_at"`
+	UptimeSeconds         float64          `json:"uptime_seconds"`
+	Cache                 CacheSummary     `json:"cache"`
+	Configuration         RuntimeConfig    `json:"configuration"`
 	ForegroundReadLatency DurationSummary  `json:"foreground_read_latency"`
 	ForegroundReadTime    DurationSummary  `json:"foreground_read_success_time"`
 	TransferQueueLatency  DurationSummary  `json:"transfer_queue_latency"`
@@ -97,7 +103,7 @@ type counter struct {
 
 // New creates a tracker. Its storage is fixed-size regardless of request
 // count or the number of files opened during the mount lifetime.
-func New() *Tracker { return &Tracker{} }
+func New() *Tracker { return &Tracker{startedAt: time.Now()} }
 
 func (t *Tracker) ObserveForegroundRead(d time.Duration) { t.foregroundRead.observe(d) }
 func (t *Tracker) ObserveTransferQueue(d time.Duration)  { t.transferQueue.observe(d) }
@@ -156,7 +162,12 @@ func (t *Tracker) RecordForegroundRead(n uint64, elapsed time.Duration) {
 // Snapshot returns a coherent-enough point-in-time view of atomic aggregates.
 // Individual counters can advance during the snapshot.
 func (t *Tracker) Snapshot() Snapshot {
+	now := time.Now()
 	return Snapshot{
+		StartedAt:             t.startedAt.UTC(),
+		CollectedAt:           now.UTC(),
+		UptimeSeconds:         max(0, now.Sub(t.startedAt).Seconds()),
+		Cache:                 CacheSummary{Status: "unknown"},
 		ForegroundReadLatency: t.foregroundRead.snapshot(),
 		ForegroundReadTime:    t.foregroundReadTime.snapshot(),
 		TransferQueueLatency:  t.transferQueue.snapshot(),

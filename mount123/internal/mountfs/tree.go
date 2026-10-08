@@ -80,10 +80,10 @@ func defaults(o Options) Options {
 		o.StreamMemberThreshold = 8 << 20
 	}
 	if o.DirectoryTTL <= 0 {
-		o.DirectoryTTL = 30 * time.Second
+		o.DirectoryTTL = 24 * time.Hour
 	}
 	if o.SourceTTL <= 0 {
-		o.SourceTTL = 30 * time.Second
+		o.SourceTTL = 6 * 24 * time.Hour
 	}
 	if o.MetadataBytes <= 0 {
 		o.MetadataBytes = 64 << 20
@@ -193,6 +193,12 @@ func (n *Node) IOStats() iostats.Snapshot {
 		return iostats.New().Snapshot()
 	}
 	snapshot := n.tree.cache.IOStats().Snapshot()
+	snapshot.Cache = n.tree.cache.Stats()
+	opts := n.tree.opts
+	snapshot.Configuration = iostats.RuntimeConfig{DirectoryTTLSeconds: opts.DirectoryTTL.Seconds(), SourceTTLSeconds: opts.SourceTTL.Seconds(), MetadataBytes: opts.MetadataBytes, ReadAheadMaxBytes: opts.ReadAheadMaxBytes, PrefetchFiles: opts.PrefetchFiles, PrefetchWorkers: opts.PrefetchWorkers, PrefetchBytes: opts.PrefetchBytes}
+	if opts.DisableReadAhead {
+		snapshot.Configuration.ReadAheadMaxBytes = 0
+	}
 	downloads := n.tree.cache.DownloadStats()
 	snapshot.SetDownloadScheduler(downloads.MaxRequests, downloads.MaxInFlightBytes, downloads.ActiveRequests, downloads.ActiveBytes, downloads.AvailableBackgroundBytes, downloads.WaitingForeground, downloads.WaitingBackground)
 	snapshot.DownloadScheduler.StagingActiveBytes = downloads.StagingActiveBytes

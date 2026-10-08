@@ -63,6 +63,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 		return nil, errors.New("cache fill callback is nil")
 	}
 	if size < 0 || size > c.max {
+		c.recordENOSPC()
 		return nil, syscall.ENOSPC
 	}
 	if lifetime == nil {
@@ -86,6 +87,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 		}
 		if e := c.entries[id]; e != nil && e.size != size {
 			if e.pins != 0 {
+				c.recordENOSPCLocked()
 				c.mu.Unlock()
 				return nil, syscall.ENOSPC
 			}
@@ -96,6 +98,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 			c.removeEntryLocked(id, e)
 		}
 		if f := c.flights[id]; f != nil {
+			c.recordExistingFillWaitLocked()
 			done := f.done
 			c.mu.Unlock()
 			select {
@@ -106,6 +109,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 			}
 		}
 		if f := c.growing[id]; f != nil {
+			c.recordExistingFillWaitLocked()
 			f.mu.Lock()
 			if f.state != growingRunning {
 				f.mu.Unlock()
@@ -135,6 +139,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 			c.mu.Unlock()
 			return reader, nil
 		}
+		c.consumeCacheGhostLocked(id)
 		if err := c.evictLocked(size); err != nil {
 			c.mu.Unlock()
 			return nil, err
@@ -220,6 +225,9 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 		f.state = growingComplete
 		f.err = nil
 		signalGrowingChange(f)
+		if c.statsReady {
+			c.telemetry.fillSuccesses++
+		}
 		close(f.done)
 		f.mu.Unlock()
 		c.mu.Unlock()
@@ -228,6 +236,9 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	}
 	c.reserved -= f.size
 	delete(c.growing, f.id)
+	if c.statsReady {
+		c.telemetry.fillFailures++
+	}
 	c.mu.Unlock()
 	_ = os.Remove(f.temp)
 	f.mu.Lock()

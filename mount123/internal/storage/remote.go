@@ -314,13 +314,13 @@ func (r *Remote) ReadAt(p []byte, off int64) (int, error) {
 // ReadAtContext reads from the remote while observing both ctx and the
 // lifetime context supplied when the Remote was constructed.
 func (r *Remote) ReadAtContext(operationCtx context.Context, p []byte, off int64) (int, error) {
-	return r.readAtContext(operationCtx, p, off, remoteBlockSize)
+	return r.readAtContext(operationCtx, p, off, remoteBlockSize, true)
 }
 
 // ReadMetadataAtContext reads sparse archive metadata through the same cached
 // pages as ordinary reads. A small request only downloads the pages it needs.
 func (r *Remote) ReadMetadataAtContext(ctx context.Context, p []byte, off int64) (int, error) {
-	return r.readAtContext(ctx, p, off, remoteCachePageSize)
+	return r.readAtContext(ctx, p, off, remoteCachePageSize, false)
 }
 
 // PrefetchRangeAtContext fetches and caches an exact range without retaining a
@@ -362,7 +362,7 @@ func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off 
 		return 0, io.EOF
 	}
 	want := min(int64(len(p)), r.size-off)
-	r.recordCacheHitBytes(off, off+want)
+	r.recordCacheHitBytes(ctx, off, off+want, false)
 	n, err := r.readRangeWithCache(ctx, p[:want], off)
 	if err != nil {
 		return n, err
@@ -373,7 +373,7 @@ func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off 
 	return n, nil
 }
 
-func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64, fetchSize int64) (int, error) {
+func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64, fetchSize int64, applicationRead bool) (int, error) {
 	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -392,7 +392,7 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 	if int64(want) > r.size-off {
 		want = int(r.size - off)
 	}
-	r.recordCacheHitBytes(off, off+int64(want))
+	r.recordCacheHitBytes(ctx, off, off+int64(want), applicationRead)
 	read := 0
 	for read < want {
 		if err := ctx.Err(); err != nil {
@@ -460,14 +460,11 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 	return read, nil
 }
 
-func (r *Remote) recordCacheHitBytes(start, end int64) {
+func (r *Remote) recordCacheHitBytes(ctx context.Context, start, end int64, applicationRead bool) {
 	if start >= end {
 		return
 	}
-	covered := end - start
-	for _, gap := range r.cache.missingRanges(r.rangeID, start, end) {
-		covered -= gap.end - gap.start
-	}
+	covered := r.cache.observeRangeRead(r.rangeID, start, end, workqueue.IsBackground(ctx), applicationRead)
 	if stats := r.cache.IOStats(); stats != nil {
 		stats.AddCacheHitBytes(uint64(max(covered, 0)))
 	}
@@ -480,6 +477,7 @@ func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error 
 		return nil
 	}
 	if end-start > r.cache.max {
+		r.cache.recordENOSPC()
 		return syscall.ENOSPC
 	}
 	firstPage, lastPage := start/remoteCachePageSize, (end-1)/remoteCachePageSize
@@ -698,6 +696,7 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 	}
 	for _, gap := range gaps {
 		if r.cache.max <= 0 {
+			r.cache.recordENOSPC()
 			return read, syscall.ENOSPC
 		}
 		counted := gap.start <= off+int64(read)
@@ -753,6 +752,7 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 					return read, pinErr
 				}
 				if !pinned {
+					r.cache.recordENOSPC()
 					return read, syscall.ENOSPC
 				}
 				n := int(coveredEnd - pos)

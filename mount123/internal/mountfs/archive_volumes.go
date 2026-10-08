@@ -77,7 +77,8 @@ func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *arc
 	if err != nil {
 		return nil, 0, "", err
 	}
-	value, err := t.loadMeta(ctx, fmt.Sprintf("volumes:%d:%s", a.id, a.version), t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
+	key := fmt.Sprintf("volumes:%d:%s:g%d", a.id, a.version, directory.generation)
+	value, err := t.loadMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		parts := map[int]panapi.File{}
 		for _, f := range directory.files {
 			if !strings.HasPrefix(f.Name, stem+".") {
