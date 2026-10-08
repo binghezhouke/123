@@ -139,6 +139,8 @@ type Tree struct {
 	passwordKey       [32]byte
 	passwordKeyValid  bool
 	cacheScope        string
+	cacheScopeStable  bool
+	directoryStats    directoryStatsCounters
 }
 type directoryPin struct {
 	refs        int
@@ -194,6 +196,22 @@ func (n *Node) IOStats() iostats.Snapshot {
 	}
 	snapshot := n.tree.cache.IOStats().Snapshot()
 	snapshot.Cache = n.tree.cache.Stats()
+	directory := n.DirectoryStats()
+	snapshot.DirectoryCache = iostats.DirectorySummary{
+		Status: "measured", MemoryHits: directory.MemoryHits,
+		DiskRestores: directory.DiskRestores, DiskRestoreAttempts: directory.DiskRestoreAttempts,
+		ListCalls: directory.ListCalls, ListErrors: directory.ListErrors,
+		StaleServed: directory.StaleServed, StaleFailures: directory.StaleFailures,
+		RetryBackoffs: directory.RetryBackoffs, PermanentFailures: directory.PermanentFailures,
+		CorruptSnapshots:    directory.CorruptSnapshots,
+		PersistenceFailures: directory.PersistenceFailures,
+	}
+	recovery := n.tree.cache.RemoteRecoveryStats()
+	snapshot.RemoteRecovery = iostats.RecoverySummary{
+		Status: "measured", Attempts: recovery.Attempts, Retries: recovery.Retries,
+		Recovered: recovery.Recovered, Exhausted: recovery.Exhausted,
+		Cancelled: recovery.Cancelled, SuffixBytes: recovery.SuffixBytes,
+	}
 	opts := n.tree.opts
 	snapshot.Configuration = iostats.RuntimeConfig{DirectoryTTLSeconds: opts.DirectoryTTL.Seconds(), SourceTTLSeconds: opts.SourceTTL.Seconds(), MetadataBytes: opts.MetadataBytes, ReadAheadMaxBytes: opts.ReadAheadMaxBytes, PrefetchFiles: opts.PrefetchFiles, PrefetchWorkers: opts.PrefetchWorkers, PrefetchBytes: opts.PrefetchBytes}
 	if opts.DisableReadAhead {
@@ -209,11 +227,15 @@ func (n *Node) IOStats() iostats.Snapshot {
 }
 
 type metaItem struct {
-	key     string
-	value   any
-	bytes   int64
-	expires time.Time
-	seq     uint64
+	key               string
+	value             any
+	bytes             int64
+	expires           time.Time
+	seq               uint64
+	fetchedAt         time.Time
+	staleFailures     uint8
+	stale             bool
+	staleBackoffUntil time.Time
 }
 type sourceCall struct {
 	partial *zipIndex
@@ -248,6 +270,7 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}, indexStatuses: newIndexStatusTracker()}
 	if identity, ok := api.(interface{ CacheIdentity() string }); ok {
 		t.cacheScope = identity.CacheIdentity()
+		t.cacheScopeStable = t.cacheScope != ""
 	} else {
 		// Test and adapter APIs can opt in to CacheIdentity. This fallback keeps
 		// unrelated adapter types from sharing plaintext cache entries.
@@ -361,11 +384,15 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 				t.metaBytes -= oldest.bytes
 			}
 			t.seq++
+			fetchedAt := time.Now()
+			if directory, ok := value.(*cloudDirectory); ok && !directory.fetchedAt.IsZero() {
+				fetchedAt = directory.fetchedAt
+			}
 			expires := time.Time{}
 			if ttl > 0 {
-				expires = time.Now().Add(ttl)
+				expires = fetchedAt.Add(ttl)
 			}
-			t.meta[key] = &metaItem{key: key, value: value, bytes: size, expires: expires, seq: t.seq}
+			t.meta[key] = &metaItem{key: key, value: value, bytes: size, expires: expires, seq: t.seq, fetchedAt: fetchedAt}
 			t.metaBytes += size
 		}
 		flight.value, flight.err = value, err

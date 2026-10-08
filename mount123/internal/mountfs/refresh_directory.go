@@ -94,10 +94,6 @@ func (t *Tree) refreshCloudDirectory(ctx context.Context, parentID int64, root *
 			continue
 		}
 		previous = t.meta[key]
-		if previous != nil {
-			delete(t.meta, key)
-			t.metaBytes -= previous.bytes
-		}
 		if t.sources == nil {
 			t.sources = make(map[string]*sourceCall)
 		}
@@ -124,29 +120,51 @@ func (t *Tree) refreshCloudDirectory(ctx context.Context, parentID int64, root *
 	if err == nil && (size < 0 || size > t.opts.MetadataBytes) {
 		err = fmt.Errorf("directory exceeds metadata budget; increase -metadata-mib")
 	}
+	if err == nil {
+		fresh.fetchedAt = time.Now()
+	}
 
 	t.mu.Lock()
-	if err == nil && !t.makeMetadataRoomLocked(key, 0, size) {
+	oldBytes := int64(0)
+	if t.meta[key] == previous && previous != nil {
+		oldBytes = previous.bytes
+	}
+	if err == nil && !t.makeMetadataRoomLocked(key, oldBytes, size) {
 		err = errors.New("metadata cache cannot fit refreshed directory")
 	}
+	shouldPersist := err == nil
 	if err == nil {
 		t.seq++
 		expires := time.Time{}
 		if t.opts.DirectoryTTL > 0 {
-			expires = time.Now().Add(t.opts.DirectoryTTL)
+			expires = fresh.fetchedAt.Add(t.opts.DirectoryTTL)
 		}
-		updated := &metaItem{key: key, value: fresh, bytes: size, expires: expires, seq: t.seq}
+		updated := &metaItem{key: key, value: fresh, bytes: size, expires: expires, seq: t.seq, fetchedAt: fresh.fetchedAt}
 		t.meta[key] = updated
-		t.metaBytes += size
+		t.metaBytes += size - oldBytes
 		flight.value = fresh
 	} else if previous != nil {
-		// Restore the old snapshot when API refresh or validation fails.
-		if t.makeMetadataRoomLocked(key, 0, previous.bytes) {
-			t.meta[key] = previous
-			t.metaBytes += previous.bytes
+		if t.meta[key] != previous {
+			// Restore the old snapshot when API refresh or validation fails.
+			if t.makeMetadataRoomLocked(key, 0, previous.bytes) {
+				t.meta[key] = previous
+				t.metaBytes += previous.bytes
+			}
 		}
 		flight.value = previous.value
 	}
+	t.mu.Unlock()
+
+	// Keep the per-directory flight open while disk I/O runs. Same-directory
+	// refreshes wait for this commit, while unrelated metadata operations can
+	// use the tree lock normally.
+	if shouldPersist {
+		if persistErr := t.persistCloudDirectory(ctx, parentID, fresh); persistErr != nil {
+			t.directoryStats.persistenceFailures.Add(1)
+		}
+	}
+
+	t.mu.Lock()
 	flight.err = err
 	delete(t.refreshing, key)
 	if t.sources[key] == flight {

@@ -17,6 +17,8 @@ type RuntimeConfig struct {
 // automatic change to capacity or concurrency.
 type TuningReport struct {
 	Status                      string              `json:"status"`
+	DirectoryCache              DirectorySummary    `json:"directory_cache"`
+	RemoteRecovery              RecoverySummary     `json:"remote_recovery"`
 	WindowSeconds               float64             `json:"window_seconds"`
 	CacheUtilization            *float64            `json:"cache_utilization"`
 	Foreground                  CacheRangeSummary   `json:"foreground"`
@@ -60,6 +62,8 @@ func Analyze(previous, current Snapshot) TuningReport {
 	r.WindowSeconds = current.CollectedAt.Sub(previous.CollectedAt).Seconds()
 	p, c := previous.Cache, current.Cache
 	valid := true
+	r.DirectoryCache = directoryDelta(previous.DirectoryCache, current.DirectoryCache, &valid)
+	r.RemoteRecovery = recoveryDelta(previous.RemoteRecovery, current.RemoteRecovery, &valid)
 	r.Foreground = rangeDelta(p.Foreground, c.Foreground, &valid)
 	r.Background = rangeDelta(p.Background, c.Background, &valid)
 	r.CapacityEvictions = deltaUint(p.CapacityEvictions, c.CapacityEvictions, &valid)
@@ -84,7 +88,7 @@ func Analyze(previous, current Snapshot) TuningReport {
 	consumed, unused := counterBytes(current.ReadAheadConsumed), counterBytes(current.ReadAheadWasted)
 	r.LifetimeReadAheadUseRatio = ratio(float64(consumed), float64(consumed)+float64(unused))
 	r.Status = "measured"
-	if r.Foreground.ReadRequests+r.Background.ReadRequests == 0 && r.DownloadedBytes == 0 && r.CapacityEvictions == 0 && r.ENOSPC == 0 && r.FillFailures == 0 {
+	if r.Foreground.ReadRequests+r.Background.ReadRequests == 0 && r.DownloadedBytes == 0 && r.CapacityEvictions == 0 && r.ENOSPC == 0 && r.FillFailures == 0 && r.DirectoryCache.ListCalls == 0 && r.DirectoryCache.DiskRestores == 0 && r.DirectoryCache.StaleServed == 0 && r.RemoteRecovery.Attempts == 0 {
 		r.Status = "idle"
 	} else if r.Foreground.ReadRequests < 32 || r.Foreground.RequestedBytes < 8<<20 || r.WindowSeconds < 10 {
 		r.Status = "insufficient_samples"

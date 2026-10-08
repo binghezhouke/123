@@ -334,6 +334,22 @@ func TestEncryptedMemberCacheSurvivesCacheReopenAndRejectsIdentityChanges(t *tes
 	api.version = "v2"
 	payloadBytes = 0
 	readOnce()
+	if payloadBytes != 0 {
+		t.Fatal("cached directory snapshot changed before its TTL or explicit refresh")
+	}
+	cache, err = storage.NewCache(cacheDir, 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = New(context.Background(), api, cache, 0, true)
+	if _, err := root.RefreshDirectory(context.Background(), "."); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payloadBytes = 0
+	readOnce()
 	if payloadBytes == 0 {
 		t.Fatal("changed archive version reused old decrypted bytes")
 	}

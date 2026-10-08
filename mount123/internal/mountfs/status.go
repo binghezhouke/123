@@ -17,11 +17,14 @@ import (
 // ArchiveIndexStatus is a point-in-time view of a mount-local archive scan.
 // DownloadBytes is nil when the storage reader does not expose an exact count.
 type ArchiveIndexStatus struct {
-	State         string `json:"state"`
-	Members       int    `json:"members"`
-	ScanOffset    int64  `json:"scan_offset"`
-	ArchiveSize   int64  `json:"archive_size"`
-	DownloadBytes *int64 `json:"download_bytes"`
+	State             string `json:"state"`
+	Members           int    `json:"members"`
+	ScanOffset        int64  `json:"scan_offset"`
+	ArchiveSize       int64  `json:"archive_size"`
+	DownloadBytes     *int64 `json:"download_bytes"`
+	FailureKind       string `json:"failure_kind,omitempty"`
+	FailureReason     string `json:"failure_reason,omitempty"`
+	RecommendedAction string `json:"recommended_action,omitempty"`
 }
 
 type indexStatusTracker struct {
@@ -59,6 +62,17 @@ func (t *indexStatusTracker) requeueCompleted(key string) {
 		close(state.change)
 		state.change = make(chan struct{})
 	}
+}
+
+func (t *indexStatusTracker) resetFailed(key string) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	state := t.states[key]
+	if state == nil || state.status.State != "failed" || t.starts[key] {
+		return false
+	}
+	delete(t.states, key)
+	return true
 }
 
 func (t *indexStatusTracker) done(key string) {
@@ -112,6 +126,16 @@ func (t *indexStatusTracker) snapshot(key string) (ArchiveIndexStatus, <-chan st
 // needed. The path is relative to the mounted cloud root; a leading slash is
 // accepted as a mount-relative path.
 func (n *Node) StatusArchiveIndex(ctx context.Context, archivePath string) (ArchiveIndexStatus, error) {
+	return n.statusArchiveIndex(ctx, archivePath, false)
+}
+
+// RetryArchiveIndex retries only a previously failed, inactive index build.
+// Existing work remains coalesced and completed indexes remain reusable.
+func (n *Node) RetryArchiveIndex(ctx context.Context, archivePath string) (ArchiveIndexStatus, error) {
+	return n.statusArchiveIndex(ctx, archivePath, true)
+}
+
+func (n *Node) statusArchiveIndex(ctx context.Context, archivePath string, retry bool) (ArchiveIndexStatus, error) {
 	for _, component := range strings.Split(archivePath, "/") {
 		if component == ".." {
 			return ArchiveIndexStatus{}, syscall.EINVAL
@@ -165,21 +189,24 @@ func (n *Node) StatusArchiveIndex(ctx context.Context, archivePath string) (Arch
 	}
 	target := &Node{tree: n.tree, item: item, parent: parent}
 	if archiveKind(archive.name) == ".zip" {
-		return target.startZIPIndexStatus(ctx, archive)
+		return target.startZIPIndexStatus(ctx, archive, retry)
 	}
-	return target.startOtherIndexStatus(ctx, archive)
+	return target.startOtherIndexStatus(ctx, archive, retry)
 }
 
-func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescriptor) (ArchiveIndexStatus, error) {
+func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescriptor, retry bool) (ArchiveIndexStatus, error) {
 	source, err := n.source(ctx)
 	if err != nil {
-		return ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size}, nil
+		return failedArchiveStatus(archive.size, err), nil
 	}
 	key := "status:zip:" + archiveIdentity(source, archive)
 	if idx := n.cachedZIP(ctx, source, archive); idx != nil {
 		status := ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archive.size, ArchiveSize: archive.size}
 		n.tree.indexStatuses.set(key, status)
 		return status, nil
+	}
+	if retry {
+		n.tree.indexStatuses.resetFailed(key)
 	}
 	n.tree.indexStatuses.requeueCompleted(key)
 	status, _ := n.tree.indexStatuses.snapshot(key)
@@ -204,7 +231,7 @@ func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescript
 				})
 			})
 			if err != nil {
-				n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size})
+				n.tree.indexStatuses.set(key, failedArchiveStatus(archive.size, err))
 				return
 			}
 			n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archive.size, ArchiveSize: archive.size})
@@ -236,20 +263,20 @@ func (n *Node) cachedZIP(ctx context.Context, source *storage.Remote, archive *a
 	return index
 }
 
-func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescriptor) (ArchiveIndexStatus, error) {
+func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescriptor, retry bool) (ArchiveIndexStatus, error) {
 	source, err := n.source(ctx)
 	if err != nil {
-		return ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size}, nil
+		return failedArchiveStatus(archive.size, err), nil
 	}
 	password, err := n.tree.otherPassword(ctx, archive)
 	if err != nil {
-		return ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size}, nil
+		return failedArchiveStatus(archive.size, err), nil
 	}
 	defer clear(password)
 	key := n.tree.archiveTaskKey(source, archive, password)
 	_, archiveSize, identity, err := n.tree.archiveSource(ctx, source, archive)
 	if err != nil {
-		return ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size}, nil
+		return failedArchiveStatus(archive.size, err), nil
 	}
 	cacheKey := "archive-index:" + archiveKind(archive.name) + ":" + identity + ":" + n.tree.passwordTag(archive, password)
 	n.tree.mu.Lock()
@@ -263,6 +290,9 @@ func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescri
 		status := ArchiveIndexStatus{State: "complete", Members: len(cached.members), ScanOffset: archiveSize, ArchiveSize: archiveSize}
 		n.tree.indexStatuses.set(key, status)
 		return status, nil
+	}
+	if retry {
+		n.tree.indexStatuses.resetFailed(key)
 	}
 	n.tree.indexStatuses.requeueCompleted(key)
 	status, _ := n.tree.indexStatuses.snapshot(key)
@@ -285,7 +315,7 @@ func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescri
 				return
 			}
 			if err != nil {
-				n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size})
+				n.tree.indexStatuses.set(key, failedArchiveStatus(archive.size, err))
 				return
 			}
 			n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archiveSize, ArchiveSize: archiveSize})

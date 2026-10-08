@@ -20,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/binghezhouke/123/mount123/internal/faults"
 )
 
 const defaultBaseURL = "https://open-api.123pan.com"
@@ -369,22 +371,29 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 }
 
 func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query url.Values, payload []byte, out any) error {
+	const maxReadRetries = 4
 	const maxThrottleRetries = 4
 	const maxCompletionRetries = 5
-	throttleRetries, completionRetries, authRetried := 0, 0, false
+	readOnly := method == http.MethodGet || endpoint == "/api/v1/file/infos"
+	requestCtx, cancel := ctx, func() {}
+	if readOnly {
+		requestCtx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	}
+	defer cancel()
+	readRetries, throttleRetries, completionRetries, authRetried := 0, 0, 0, false
 	for {
-		token, err := c.accessToken(ctx)
+		token, err := c.accessToken(requestCtx)
 		if err != nil {
 			return err
 		}
-		if err := c.waitRateLimit(ctx); err != nil {
+		if err := c.waitRateLimit(requestCtx); err != nil {
 			return err
 		}
 		u := c.baseURL + endpoint
 		if len(query) > 0 {
 			u += "?" + query.Encode()
 		}
-		req, err := http.NewRequestWithContext(ctx, method, u, strings.NewReader(string(payload)))
+		req, err := http.NewRequestWithContext(requestCtx, method, u, strings.NewReader(string(payload)))
 		if err != nil {
 			return errors.New("panapi: could not create request")
 		}
@@ -395,33 +404,65 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 		}
 		resp, err := c.http.Do(req)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if requestCtx.Err() != nil {
+				return requestCtx.Err()
 			}
-			return fmt.Errorf("panapi: request failed: %s", safeError(err.Error(), c.config))
+			if readOnly && isTransientTransportError(err) && readRetries < maxReadRetries {
+				readRetries++
+				if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
+					return err
+				}
+				continue
+			}
+			message := "panapi: request failed: " + safeError(err.Error(), c.config)
+			return &faults.Error{Kind: faults.Network, Message: message, Retryable: isTransientTransportError(err)}
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		resp.Body.Close()
 		if readErr != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if requestCtx.Err() != nil {
+				return requestCtx.Err()
 			}
-			return errors.New("panapi: could not read API response")
+			if readOnly && (faults.IsTransient(readErr) || errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF)) && readRetries < maxReadRetries {
+				readRetries++
+				if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
+					return err
+				}
+				continue
+			}
+			if faults.IsTransient(readErr) || errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF) {
+				return &faults.Error{Kind: faults.Network, Message: "panapi: could not read API response", Retryable: true}
+			}
+			return &faults.Error{Kind: faults.InvalidResponse, Message: "panapi: could not read API response"}
 		}
 		if resp.StatusCode == http.StatusUnauthorized && !authRetried && c.config.AccessToken == "" {
 			authRetried = true
 			c.invalidateTokenIf(token)
 			continue
 		}
-		if resp.StatusCode == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries {
+		statusErr := apiHTTPError(resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries && (!readOnly || readRetries < maxReadRetries) {
 			throttleRetries++
-			if err := waitThrottle(ctx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
+			if readOnly {
+				readRetries++
+			}
+			if err := waitThrottle(requestCtx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
+				if requestCtx.Err() != nil {
+					return requestCtx.Err()
+				}
+				return &faults.Error{Kind: faults.Throttled, Message: "panapi: API requests were throttled", Retryable: true}
+			}
+			continue
+		}
+		if readOnly && faults.IsTransient(statusErr) && readRetries < maxReadRetries {
+			readRetries++
+			if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
 				return err
 			}
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("panapi: API returned HTTP %d", resp.StatusCode)
+			return statusErr
 		}
 		var envelope apiEnvelope
 		if err := json.Unmarshal(data, &envelope); err != nil {
@@ -433,25 +474,38 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				c.invalidateTokenIf(token)
 				continue
 			}
-			if envelope.Code == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries {
+			if envelope.Code == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries && (!readOnly || readRetries < maxReadRetries) {
 				throttleRetries++
-				if err := waitThrottle(ctx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
+				if readOnly {
+					readRetries++
+				}
+				if err := waitThrottle(requestCtx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
+					if requestCtx.Err() != nil {
+						return requestCtx.Err()
+					}
+					return &faults.Error{Kind: faults.Throttled, Message: "panapi: API requests were throttled", Retryable: true}
+				}
+				continue
+			}
+			if readOnly && apiCodeRetryable(envelope.Code) && readRetries < maxReadRetries {
+				readRetries++
+				if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
 					return err
 				}
 				continue
 			}
 			if envelope.Code == 20103 && endpoint == "/upload/v2/file/upload_complete" && completionRetries < maxCompletionRetries {
 				completionRetries++
-				if err := waitCompletionRetry(ctx, completionRetries); err != nil {
+				if err := waitCompletionRetry(requestCtx, completionRetries); err != nil {
 					return err
 				}
 				continue
 			}
 			msg := safeError(envelope.Message, c.config, token)
 			if msg == "" {
-				return fmt.Errorf("panapi: API error code %d", envelope.Code)
+				return &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: API error code %d", envelope.Code), Retryable: apiCodeRetryable(envelope.Code)}
 			}
-			return fmt.Errorf("panapi: API error code %d: %s", envelope.Code, msg)
+			return &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: API error code %d: %s", envelope.Code, msg), Retryable: apiCodeRetryable(envelope.Code)}
 		}
 		if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
 			return errors.New("panapi: API response missing data")
@@ -461,6 +515,44 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 		}
 		return nil
 	}
+}
+
+func apiHTTPError(status int) error {
+	switch status {
+	case http.StatusTooManyRequests:
+		return &faults.Error{Kind: faults.Throttled, Message: "panapi: API returned HTTP 429", Retryable: true}
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return &faults.Error{Kind: faults.Unavailable, Message: fmt.Sprintf("panapi: API returned HTTP %d", status), Retryable: true}
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return &faults.Error{Kind: faults.Unauthorized, Message: fmt.Sprintf("panapi: API returned HTTP %d", status)}
+	case http.StatusNotFound, http.StatusGone:
+		return &faults.Error{Kind: faults.NotFound, Message: fmt.Sprintf("panapi: API returned HTTP %d", status)}
+	default:
+		return &faults.Error{Kind: faults.InvalidResponse, Message: fmt.Sprintf("panapi: API returned HTTP %d", status)}
+	}
+}
+
+func isTransientTransportError(err error) bool {
+	return faults.IsTransient(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func apiCodeKind(code int) faults.Kind {
+	switch code {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return faults.Unauthorized
+	case http.StatusNotFound, http.StatusGone:
+		return faults.NotFound
+	case http.StatusTooManyRequests:
+		return faults.Throttled
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return faults.Unavailable
+	default:
+		return faults.InvalidResponse
+	}
+}
+
+func apiCodeRetryable(code int) bool {
+	return code == http.StatusTooManyRequests || code == http.StatusBadGateway || code == http.StatusServiceUnavailable || code == http.StatusGatewayTimeout
 }
 
 func waitCompletionRetry(ctx context.Context, attempt int) error {
@@ -563,12 +655,22 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return "", fmt.Errorf("panapi: token request failed: %s", safeError(err.Error(), c.config))
+		message := "panapi: token request failed: " + safeError(err.Error(), c.config)
+		return "", &faults.Error{Kind: faults.Network, Message: message, Retryable: isTransientTransportError(err)}
 	}
 	defer resp.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("panapi: token endpoint returned HTTP %d", resp.StatusCode)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if faults.IsTransient(err) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			return "", &faults.Error{Kind: faults.Network, Message: "panapi: could not read token response", Retryable: true}
+		}
+		return "", &faults.Error{Kind: faults.InvalidResponse, Message: "panapi: could not read token response"}
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", apiHTTPError(resp.StatusCode)
 	}
 	var envelope struct {
 		Code int `json:"code"`
@@ -578,8 +680,14 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 			ExpiredAt string `json:"expiredAt"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(data, &envelope) != nil || envelope.Code != 0 || envelope.Data.Token == "" {
-		return "", errors.New("panapi: token response invalid")
+	if json.Unmarshal(data, &envelope) != nil {
+		return "", &faults.Error{Kind: faults.InvalidResponse, Message: "panapi: token response invalid"}
+	}
+	if envelope.Code != 0 {
+		return "", &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: token API error code %d", envelope.Code), Retryable: apiCodeRetryable(envelope.Code)}
+	}
+	if envelope.Data.Token == "" {
+		return "", &faults.Error{Kind: faults.InvalidResponse, Message: "panapi: token response invalid"}
 	}
 	expires := time.Now().Add(time.Duration(envelope.Data.ExpiresIn) * time.Second)
 	if envelope.Data.ExpiresIn <= 0 {

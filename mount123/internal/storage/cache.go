@@ -74,6 +74,7 @@ type Cache struct {
 	closed              bool
 	statsReady          bool
 	telemetry           cacheTelemetry
+	remoteRecovery      remoteRecoveryCounters
 	ghost               map[string]*list.Element
 	ghostLRU            *list.List
 }
@@ -172,28 +173,40 @@ func (c *Cache) OpenArchiveIndex(key string) (*Handle, error) {
 
 func (c *Cache) open(key string, archiveIndex bool) (*Handle, error) {
 	id := cacheID(key)
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
-		return nil, ErrClosed
-	}
-	e := c.entries[id]
-	if e == nil {
-		return nil, os.ErrNotExist
-	}
-	f, err := os.Open(e.path)
-	if err != nil {
-		if e.pins == 0 {
-			c.removeEntryLocked(id, e)
+	for {
+		c.mu.Lock()
+		if c.closed {
+			c.mu.Unlock()
+			return nil, ErrClosed
 		}
-		return nil, err
+		if active := c.flights[id]; active != nil {
+			done := active.done
+			c.mu.Unlock()
+			<-done
+			continue
+		}
+		e := c.entries[id]
+		if e == nil {
+			c.mu.Unlock()
+			return nil, os.ErrNotExist
+		}
+		f, err := os.Open(e.path)
+		if err != nil {
+			if e.pins == 0 {
+				c.removeEntryLocked(id, e)
+			}
+			c.mu.Unlock()
+			return nil, err
+		}
+		e.pins++
+		if archiveIndex {
+			c.classifyIndexLocked(id, e)
+		}
+		c.touchLRULocked(id, e)
+		h := &Handle{file: f, cache: c, key: id, size: e.size, promoteOnRead: !archiveIndex}
+		c.mu.Unlock()
+		return h, nil
 	}
-	e.pins++
-	if archiveIndex {
-		c.classifyIndexLocked(id, e)
-	}
-	c.touchLRULocked(id, e)
-	return &Handle{file: f, cache: c, key: id, size: e.size, promoteOnRead: !archiveIndex}, nil
 }
 
 // Store publishes data under key using the cache's regular byte budget,
@@ -235,6 +248,9 @@ func (c *Cache) Remove(key string) error {
 	e := c.entries[id]
 	if e == nil {
 		return nil
+	}
+	if c.flights[id] != nil {
+		return syscall.EBUSY
 	}
 	if e.pins != 0 {
 		return syscall.EBUSY
@@ -368,7 +384,7 @@ func (c *Cache) load() error {
 	var loaded []loadedEntry
 	for _, item := range items {
 		name := item.Name()
-		if strings.HasPrefix(name, ".fill-") {
+		if strings.HasPrefix(name, ".fill-") || strings.HasPrefix(name, ".metadata-") {
 			_ = os.Remove(filepath.Join(c.dir, name))
 			continue
 		}
@@ -604,6 +620,26 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 		if c.closed {
 			c.mu.Unlock()
 			return nil, ErrClosed
+		}
+		if f := c.flights[id]; f != nil {
+			c.recordExistingFillWaitLocked()
+			done := f.done
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+				if f.err != nil {
+					if errors.Is(f.err, context.Canceled) || errors.Is(f.err, context.DeadlineExceeded) {
+						if err := ctx.Err(); err != nil {
+							return nil, err
+						}
+						continue
+					}
+					return nil, f.err
+				}
+				continue
+			}
 		}
 		if e := c.entries[id]; e != nil && e.size == size {
 			f, err := os.Open(e.path)

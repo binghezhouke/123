@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/binghezhouke/123/mount123/internal/faults"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
@@ -72,26 +73,14 @@ func NewRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, k
 	if !workqueue.IsBackground(operationCtx) {
 		probePriority.promoted.Store(true)
 	}
-	resp, err := r.requestRangeScheduled(ctx, 0, 0, false, cacheID(key), probePriority)
+	probeETag, probeModified, err := r.probeRange(ctx, key, probePriority)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
-	if err = checkRangeResponse(resp, 0, 0, size); err != nil {
-		return nil, err
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 2))
-	if err != nil {
-		return nil, contextError(ctx, err, "remote range probe returned an invalid body")
-	}
-	if len(body) != 1 {
-		return nil, errors.New("remote range probe returned an invalid body")
-	}
-	r.etag = resp.Header.Get("ETag")
+	r.etag, r.modified = probeETag, probeModified
 	if strings.HasPrefix(strings.TrimSpace(r.etag), "W/") {
 		r.etag = ""
 	}
-	r.modified = resp.Header.Get("Last-Modified")
 	if r.etag == "" && r.modified == "" {
 		r.key = namespaceWithoutValidator(key)
 	} else if r.etag != "" {
@@ -158,6 +147,13 @@ func (r *Remote) refresh(ctx context.Context) error {
 	r.mu.Unlock()
 	link, err := r.cache.downloadLink(cctx, r.linkKey, previous, r.resolve)
 	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		var classified *faults.Error
+		if errors.As(err, &classified) {
+			return &faults.Error{Kind: classified.Kind, Message: "could not resolve remote download URL", Retryable: classified.Retryable}
+		}
 		return contextError(ctx, err, "could not resolve remote download URL")
 	}
 	r.mu.Lock()
@@ -176,6 +172,8 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 }
 
 func (r *Remote) requestRangeScheduled(ctx context.Context, start, end int64, conditional bool, file string, priority *downloadPriority) (*http.Response, error) {
+	retryBudget := recoveryBudgetFrom(ctx)
+	requestRecovery, _ := ctx.Value(remoteRequestRecoveryContextKey{}).(*remoteRequestRecoveryState)
 	for attempt := 0; attempt < 2; attempt++ {
 		requestCtx, stopCache := combineContexts(r.cache.lifetimeCtx, ctx)
 		r.mu.Lock()
@@ -214,21 +212,32 @@ func (r *Remote) requestRangeScheduled(ctx context.Context, start, end int64, co
 			return nil, err
 		}
 		requestStarted := time.Now()
+		r.cache.remoteRecovery.attempts.Add(1)
 		resp, err := r.client.Do(req)
 		if err != nil {
 			release()
 			cancel()
 			stopCache()
-			return nil, contextError(ctx, err, "remote range request failed")
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, &faults.Error{Kind: faults.Network, Message: "remote range request failed", Retryable: retryableTransportError(err)}
 		}
 		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: func() { cancel(); stopCache(); release() }, started: requestStarted, stats: r.cache.IOStats()}
 		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) && attempt == 0 {
+			if _, ok := retryBudget.takeRetry(); !ok {
+				return resp, nil
+			}
+			r.cache.remoteRecovery.retries.Add(1)
 			resp.Body.Close()
 			refreshCtx, stopRefresh := combineContexts(r.cache.lifetimeCtx, ctx)
 			err = r.refresh(refreshCtx)
 			stopRefresh()
 			if err != nil {
 				return nil, err
+			}
+			if requestRecovery != nil {
+				requestRecovery.authRefreshed = true
 			}
 			continue
 		}
@@ -523,6 +532,11 @@ func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error 
 
 func (r *Remote) runRangeFlight(flight *rangeFlight) {
 	var err error
+	// One range flight shares a single recovery deadline across any staging
+	// segments it needs to fill. Each segment's retry loop inherits this bound.
+	recoveryCtx, cancelRecovery := context.WithTimeout(flight.ctx, remoteRecoveryBudget)
+	defer cancelRecovery()
+	recoveryCtx = context.WithValue(recoveryCtx, remoteRecoveryBudgetContextKey{}, &remoteRecoveryBudgetState{})
 	// Recheck coverage in case an extent was published just before this flight
 	// was registered.
 	for _, gap := range r.cache.missingRanges(r.rangeID, flight.start, flight.end) {
@@ -536,13 +550,13 @@ func (r *Remote) runRangeFlight(flight *rangeFlight) {
 		}
 		for start := gap.start; start < gap.end; {
 			end := min(gap.end, start+limit)
-			release, stageErr := r.cache.staging.Acquire(flight.ctx, end-start, r.rangeID, flight.priority)
+			release, stageErr := r.cache.staging.Acquire(recoveryCtx, end-start, r.rangeID, flight.priority)
 			if stageErr != nil {
 				err = stageErr
 				break
 			}
 			class := foregroundClass(workqueue.IsBackground(flight.ctx))
-			h, fillErr := r.cache.AcquireRangeWithProgress(flight.ctx, r.rangeID, start, end, class, flight.progress, func(fetchCtx context.Context, w io.Writer) error {
+			h, fillErr := r.cache.AcquireRangeWithProgress(recoveryCtx, r.rangeID, start, end, class, flight.progress, func(fetchCtx context.Context, w io.Writer) error {
 				return r.fetchRangeTo(fetchCtx, start, end, w, flight.priority)
 			})
 			release()
@@ -826,35 +840,5 @@ func (r *Remote) fetchRangeTo(ctx context.Context, start, end int64, w io.Writer
 }
 
 func (r *Remote) fetchOneRange(ctx context.Context, start, end int64, w io.Writer, priority *downloadPriority) error {
-	resp, err := r.requestRangeScheduled(ctx, start, end-1, true, r.rangeID, priority)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusPreconditionFailed {
-		return errors.New("remote file changed")
-	}
-	if err = checkRangeResponse(resp, start, end-1, r.size); err != nil {
-		return err
-	}
-	if r.etag != "" && resp.Header.Get("ETag") != r.etag {
-		return errors.New("remote file changed")
-	}
-	if r.etag == "" && r.modified != "" && resp.Header.Get("Last-Modified") != r.modified {
-		return errors.New("remote file changed")
-	}
-	expected := end - start
-	_, err = io.CopyN(w, resp.Body, expected)
-	if err != nil {
-		return contextError(ctx, err, "could not read remote range")
-	}
-	var extra [1]byte
-	nExtra, extraErr := io.ReadFull(resp.Body, extra[:])
-	if nExtra != 0 {
-		return errors.New("remote range body length mismatch")
-	}
-	if extraErr != io.EOF {
-		return contextError(ctx, extraErr, "could not validate remote range length")
-	}
-	return nil
+	return r.fetchOneRangeWithRecovery(ctx, start, end, w, priority)
 }

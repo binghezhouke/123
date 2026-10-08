@@ -79,6 +79,137 @@ type controlRefreshAPI struct {
 	files map[int64][]panapi.File
 }
 
+type controlDoctorAPI struct {
+	files  []panapi.File
+	url    string
+	urlErr error
+}
+
+func (a *controlDoctorAPI) List(context.Context, int64) ([]panapi.File, error) {
+	return append([]panapi.File(nil), a.files...), nil
+}
+func (a *controlDoctorAPI) DownloadURL(context.Context, int64) (string, error) {
+	return a.url, a.urlErr
+}
+
+func TestDoctorCLIUsesSocketAndEmitsSafeStructuredReport(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"doctor-cli-v1"`)
+		http.ServeContent(w, r, "file", time.Unix(1, 0), bytes.NewReader([]byte("content")))
+	}))
+	defer httpServer.Close()
+	cache, err := storage.NewCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	root := mountfs.New(context.Background(), &controlDoctorAPI{files: []panapi.File{{ID: 44, Name: "plain.txt", Size: 7, Version: "v1"}}, url: httpServer.URL}, cache, 0, true)
+	socketDir := t.TempDir()
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(socketDir, "control.sock")
+	mountpoint := t.TempDir()
+	control, err := startControlServer(socketPath, root, mountpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServe := context.WithCancel(context.Background())
+	go control.serve(serveCtx)
+	defer func() { stopServe(); control.close() }()
+
+	var output bytes.Buffer
+	path := filepath.Join(mountpoint, "plain.txt")
+	if err := runControlCommand(context.Background(), []string{"doctor", "-control-socket", socketPath, "-timeout", "5s", path}, io.Discard, &output); err != nil {
+		t.Fatal(err)
+	}
+	var report mountfs.PathDiagnosis
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil {
+		t.Fatalf("doctor output is not JSON: %v (%s)", err, output.String())
+	}
+	if report.Path != "plain.txt" || report.State != "ok" || report.Stage != "sample_read" || report.FileID == nil || *report.FileID != 44 {
+		t.Fatalf("doctor report=%+v", report)
+	}
+
+	output.Reset()
+	missingErr := runControlCommand(context.Background(), []string{"doctor", "-control-socket", socketPath, "missing"}, io.Discard, &output)
+	var exitErr *commandExitError
+	if !errors.As(missingErr, &exitErr) || exitErr.code != controlExitFailed {
+		t.Fatalf("missing-path exit=%v", missingErr)
+	}
+	if err := json.Unmarshal(output.Bytes(), &report); err != nil || report.Reason != "path_not_found" {
+		t.Fatalf("missing-path report=%+v err=%v output=%q", report, err, output.String())
+	}
+}
+
+func TestDoctorCLIRedactsSourceErrors(t *testing.T) {
+	httpServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "secret remote body", http.StatusServiceUnavailable)
+	}))
+	defer httpServer.Close()
+	cache, err := storage.NewCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	api := &controlDoctorAPI{
+		files: []panapi.File{{ID: 45, Name: "private.bin", Size: 1, Version: "v1"}},
+		url:   httpServer.URL + "/token=hidden",
+	}
+	root := mountfs.New(context.Background(), api, cache, 0, true)
+	socketDir := t.TempDir()
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(socketDir, "control.sock")
+	control, err := startControlServer(socketPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServe := context.WithCancel(context.Background())
+	go control.serve(serveCtx)
+	defer func() { stopServe(); control.close() }()
+	var output bytes.Buffer
+	err = runControlCommand(context.Background(), []string{"doctor", "-control-socket", socketPath, "private.bin"}, io.Discard, &output)
+	if err == nil {
+		t.Fatal("doctor returned success for failed source probe")
+	}
+	var report mountfs.PathDiagnosis
+	if decodeErr := json.Unmarshal(output.Bytes(), &report); decodeErr != nil || report.Reason != "remote_unavailable" {
+		t.Fatalf("report=%+v decode=%v output=%q", report, decodeErr, output.String())
+	}
+	if bytes.Contains(output.Bytes(), []byte(httpServer.URL)) || bytes.Contains(output.Bytes(), []byte("hidden")) || bytes.Contains(output.Bytes(), []byte("secret remote body")) {
+		t.Fatalf("doctor output leaked remote details: %s", output.String())
+	}
+}
+
+func TestControlTimeoutBoundsKeepWaitIndexDefaultAndDoctorLimit(t *testing.T) {
+	missingSocket := filepath.Join(t.TempDir(), "no-control.sock")
+	for _, args := range [][]string{
+		{"wait-index", "-control-socket", missingSocket, "archive.zip"},
+		{"wait-index", "-control-socket", missingSocket, "-timeout", "1m", "archive.zip"},
+	} {
+		err := runControlCommand(context.Background(), args, io.Discard, io.Discard)
+		if err == nil || err.Error() == "expected one mounted archive path; flags must precede the path" {
+			t.Fatalf("wait-index args %v rejected before socket access: %v", args, err)
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		timeout    string
+		wantReject bool
+	}{{"25s accepted", "25s", false}, {"over 25s rejected", "25s1ns", true}, {"zero rejected", "0s", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"doctor", "-control-socket", missingSocket, "-timeout", tc.timeout, "archive.zip"}
+			err := runControlCommand(context.Background(), args, io.Discard, io.Discard)
+			parameterError := err != nil && err.Error() == "expected one mounted archive path; flags must precede the path"
+			if parameterError != tc.wantReject {
+				t.Fatalf("doctor timeout %s rejection=%v err=%v", tc.timeout, parameterError, err)
+			}
+		})
+	}
+}
+
 func (a *controlRefreshAPI) List(_ context.Context, parent int64) ([]panapi.File, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

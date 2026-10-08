@@ -268,7 +268,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 	})
 	reader, size, identity, err := t.archiveSource(ctx, source, a)
 	if err != nil {
-		t.indexStatuses.set(statusKey, ArchiveIndexStatus{State: "failed", ArchiveSize: a.size})
+		t.indexStatuses.set(statusKey, failedArchiveStatus(a.size, err))
 		return nil, err
 	}
 	if archiveKind(a.name) == ".rar" {
@@ -372,7 +372,9 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		close(idx.changed)
 		idx.mu.Unlock()
 		if err != nil {
-			t.indexStatuses.set(statusKey, ArchiveIndexStatus{State: "failed", Members: entries, ArchiveSize: size})
+			failure := failedArchiveStatus(size, archiveReadError(ctx, err, password))
+			failure.Members = entries
+			t.indexStatuses.set(statusKey, failure)
 		} else {
 			t.indexStatuses.set(statusKey, ArchiveIndexStatus{State: "complete", Members: entries, ScanOffset: size, ArchiveSize: size})
 		}

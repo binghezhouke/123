@@ -54,6 +54,8 @@ type Snapshot struct {
 	CollectedAt           time.Time        `json:"collected_at"`
 	UptimeSeconds         float64          `json:"uptime_seconds"`
 	Cache                 CacheSummary     `json:"cache"`
+	DirectoryCache        DirectorySummary `json:"directory_cache"`
+	RemoteRecovery        RecoverySummary  `json:"remote_recovery"`
 	Configuration         RuntimeConfig    `json:"configuration"`
 	ForegroundReadLatency DurationSummary  `json:"foreground_read_latency"`
 	ForegroundReadTime    DurationSummary  `json:"foreground_read_success_time"`
@@ -168,6 +170,8 @@ func (t *Tracker) Snapshot() Snapshot {
 		CollectedAt:           now.UTC(),
 		UptimeSeconds:         max(0, now.Sub(t.startedAt).Seconds()),
 		Cache:                 CacheSummary{Status: "unknown"},
+		DirectoryCache:        DirectorySummary{Status: "unknown"},
+		RemoteRecovery:        RecoverySummary{Status: "unknown"},
 		ForegroundReadLatency: t.foregroundRead.snapshot(),
 		ForegroundReadTime:    t.foregroundReadTime.snapshot(),
 		TransferQueueLatency:  t.transferQueue.snapshot(),

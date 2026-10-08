@@ -98,3 +98,22 @@ func TestTrackerTimestampsIdentifyOneProcessAcrossSnapshots(t *testing.T) {
 		t.Fatalf("inconsistent tracker timestamps: before=%+v after=%+v", before, after)
 	}
 }
+
+func TestAnalyzeIncludesDirectoryAndRecoveryActivity(t *testing.T) {
+	p, c := tuningSamples()
+	p.DirectoryCache = DirectorySummary{Status: "measured", ListCalls: 7, DiskRestores: 2}
+	c.DirectoryCache = DirectorySummary{Status: "measured", ListCalls: 8, DiskRestores: 3, StaleFailures: 1, RetryBackoffs: 1}
+	p.RemoteRecovery = RecoverySummary{Status: "measured", Attempts: 30, Retries: 3, Recovered: 2}
+	c.RemoteRecovery = RecoverySummary{Status: "measured", Attempts: 33, Retries: 4, Recovered: 3}
+	r := Analyze(p, c)
+	if r.Status == "idle" || r.DirectoryCache.ListCalls != 1 || r.DirectoryCache.DiskRestores != 1 || r.DirectoryCache.StaleFailures != 1 || r.RemoteRecovery.Attempts != 3 || r.RemoteRecovery.Retries != 1 || r.RemoteRecovery.Recovered != 1 {
+		t.Fatalf("metadata/recovery activity lost in interval: %+v", r)
+	}
+	if len(r.Recommendations) != 0 {
+		t.Fatalf("metadata-only activity generated data-cache tuning advice: %+v", r.Recommendations)
+	}
+	c.DirectoryCache.ListCalls = 1
+	if r := Analyze(p, c); r.Status != "reset" {
+		t.Fatalf("decreasing directory counter report = %+v", r)
+	}
+}
