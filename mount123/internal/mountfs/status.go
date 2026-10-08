@@ -49,6 +49,18 @@ func (t *indexStatusTracker) start(key string) bool {
 	return true
 }
 
+// A historical completion is not evidence that an evicted index is resident.
+// Requeue on a cache miss; a persisted snapshot can satisfy the new request.
+func (t *indexStatusTracker) requeueCompleted(key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if state := t.states[key]; state != nil && state.status.State == "complete" && !t.starts[key] {
+		state.status.State = "queued"
+		close(state.change)
+		state.change = make(chan struct{})
+	}
+}
+
 func (t *indexStatusTracker) done(key string) {
 	t.mu.Lock()
 	delete(t.starts, key)
@@ -169,8 +181,9 @@ func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescript
 		n.tree.indexStatuses.set(key, status)
 		return status, nil
 	}
+	n.tree.indexStatuses.requeueCompleted(key)
 	status, _ := n.tree.indexStatuses.snapshot(key)
-	if status.State == "complete" || status.State == "failed" {
+	if status.State == "failed" {
 		return status, nil
 	}
 	if status.State == "" {
@@ -216,7 +229,7 @@ func (n *Node) cachedZIP(ctx context.Context, source *storage.Remote, archive *a
 	n.tree.mu.Lock()
 	defer n.tree.mu.Unlock()
 	item := n.tree.meta[key]
-	if item == nil || time.Now().After(item.expires) {
+	if item == nil || (!item.expires.IsZero() && time.Now().After(item.expires)) {
 		return nil
 	}
 	index, _ := item.value.(*zipIndex)
@@ -234,23 +247,25 @@ func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescri
 	}
 	defer clear(password)
 	key := n.tree.archiveTaskKey(source, archive, password)
-	status, _ := n.tree.indexStatuses.snapshot(key)
-	if status.State == "complete" || status.State == "failed" {
-		return status, nil
+	_, archiveSize, identity, err := n.tree.archiveSource(ctx, source, archive)
+	if err != nil {
+		return ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size}, nil
 	}
-	cacheKey := "archive-index:" + archiveKind(archive.name) + ":" + archiveIdentity(source, archive) + ":" + n.tree.passwordTag(archive, password)
+	cacheKey := "archive-index:" + archiveKind(archive.name) + ":" + identity + ":" + n.tree.passwordTag(archive, password)
 	n.tree.mu.Lock()
 	item := n.tree.meta[cacheKey]
 	var cached *zipIndex
-	if item != nil && time.Now().Before(item.expires) {
+	if item != nil && (item.expires.IsZero() || time.Now().Before(item.expires)) {
 		cached, _ = item.value.(*zipIndex)
 	}
 	n.tree.mu.Unlock()
 	if cached != nil {
-		status := ArchiveIndexStatus{State: "complete", Members: len(cached.members), ScanOffset: archive.size, ArchiveSize: archive.size}
+		status := ArchiveIndexStatus{State: "complete", Members: len(cached.members), ScanOffset: archiveSize, ArchiveSize: archiveSize}
 		n.tree.indexStatuses.set(key, status)
 		return status, nil
 	}
+	n.tree.indexStatuses.requeueCompleted(key)
+	status, _ := n.tree.indexStatuses.snapshot(key)
 	if status.State == "" {
 		n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "queued", ArchiveSize: archive.size})
 		status.State = "queued"
@@ -273,7 +288,7 @@ func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescri
 				n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "failed", ArchiveSize: archive.size})
 				return
 			}
-			n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archive.size, ArchiveSize: archive.size})
+			n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archiveSize, ArchiveSize: archiveSize})
 		}()
 	}
 	status, _ = n.tree.indexStatuses.snapshot(key)

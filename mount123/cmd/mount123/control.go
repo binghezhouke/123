@@ -115,7 +115,7 @@ func (s *controlServer) serve(ctx context.Context) {
 	for {
 		conn, err := s.listener.AcceptUnix()
 		if err != nil {
-			if ctx.Err() != nil {
+			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return
 			}
 			continue
