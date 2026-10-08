@@ -121,8 +121,8 @@ class ArchiveAdapter:
     def infolist(self):
         return self.entries
 
-    def read(self, entry, max_size=FILE_LIMIT, output_file=False, output_path=None, on_progress=None):
-        if self.solid:
+    def read(self, entry, max_size=FILE_LIMIT, output_file=False, output_path=None, on_progress=None, validate_password=False):
+        if self.solid and not validate_password:
             raise ZipPreviewError("固实压缩包暂仅支持目录浏览，请下载原文件")
         if entry.directory:
             raise ZipPreviewError("请选择文件")
@@ -148,7 +148,10 @@ class ArchiveAdapter:
                 raise ZipPreviewError("暂不支持 7z 内的重复文件名")
             factory = Factory(self.source.deadline, None if output_file and max_size is None else output_limit,
                               getattr(self.source, "cancel_event", None), output_path, on_progress, output_limit)
-            self.archive.max_extract_size = output_limit
+            self.archive.max_extract_size = (sum(e.file_size for e in self.entries)
+                                             if self.solid else output_limit)
+            if self.solid:
+                self.source.remaining += self.source.size
             try:
                 self.archive.extract(targets=[f.filename], factory=factory)
                 if factory.writer.size() != entry.file_size:

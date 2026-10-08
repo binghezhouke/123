@@ -132,6 +132,18 @@ class Pan123Client:
         """获取单个文件信息"""
         return self.file_service.get_file_info_single(file_id, use_cache)
 
+    def get_file_detail(self, file_id: int):
+        """通过单文件 detail 接口获取文件信息"""
+        return self.file_service.get_file_detail(file_id)
+
+    def save_zip_password(self, file_id: int, password: str) -> dict:
+        """上传已验证 ZIP 的同目录明文 .pwd 侧车。"""
+        return self.file_service.save_zip_password(file_id, password)
+
+    def save_archive_password(self, file_id: int, password: str, archive_kind=None) -> dict:
+        """上传已验证压缩包的同目录明文 .pwd 文件。"""
+        return self.file_service.save_archive_password(file_id, password, archive_kind=archive_kind)
+
     def get_file_path(self, file_id: int, use_cache: bool = True):
         """获取文件完整路径"""
         return self.file_service.get_file_path(file_id, use_cache)

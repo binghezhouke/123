@@ -144,6 +144,10 @@ def test_real_split_7z_extracts_cross_volume_file_and_reuses_cache(transport, pa
 
     assert cache.run(1, ".7z", load, read, resolve_part=resolve, password=password) == expected
     assert cache.run(1, ".7z", load, read, resolve_part=resolve, password=password) == expected
+    if password:
+        from api.zip_password_validation import validate_archive_password
+        assert cache.run(1, ".7z", load, validate_archive_password,
+                         resolve_part=resolve, password=password) is None
     assert len(indexes) == 1
     assert len(links) == len(set(links))
 

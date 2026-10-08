@@ -164,6 +164,18 @@ class TokenManager:
             except Exception as e:
                 logger.warning("清除令牌缓存失败: %s", e)
 
+    def refresh_if_current(self, rejected_token: str) -> str:
+        """Refresh a rejected token once, sharing concurrent refreshes safely."""
+        with self._lock:
+            if self._access_token != rejected_token and self.is_token_valid():
+                return self._access_token
+            # A server rejected the in-memory token, so do not reload that same
+            # token from disk. Fetching replaces both memory and the shared cache.
+            self._access_token = None
+            self._token_expires_at = 0
+            self._fetch_new_token()
+            return self._access_token
+
     def is_token_valid(self) -> bool:
         """检查当前令牌是否有效"""
         return (self._access_token is not None and

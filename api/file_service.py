@@ -5,18 +5,21 @@ import hashlib
 import logging
 import os
 import re
+import tempfile
 import threading
 import time
 from typing import List, Dict, Any, Tuple, Optional
 from urllib.parse import quote  # 添加导入
 from .http_client import RequestHandler
 from .cache import FileCacheManager
-from .exceptions import ValidationError, Pan123APIError
+from .exceptions import ValidationError, Pan123APIError, FileUploadError
 from .models import File, FileList
 
 logger = logging.getLogger(__name__)
 
 WEBDAV_DEFAULT_PATH = "/webdav"
+# Conservative client-side payload bound; the API does not publish a maximum.
+FILE_INFO_BATCH_SIZE = 100
 
 
 def _mask_credentials(url: str) -> str:
@@ -257,7 +260,8 @@ class FileService:
                     etag: str,
                     size: int,
                     duplicate: int = 1,
-                    contain_dir: bool = False) -> Dict[str, Any]:
+                    contain_dir: bool = False,
+                    sensitive: bool = False) -> Dict[str, Any]:
         """
         创建文件（预上传）
 
@@ -306,7 +310,10 @@ class FileService:
 
             return {}
         except Exception as e:
-            logger.warning(f"预上传失败: {e}, 尝试检查文件是否已存在...")
+            if sensitive:
+                logger.warning("敏感文件预上传失败，检查文件是否已存在")
+            else:
+                logger.warning(f"预上传失败: {e}, 尝试检查文件是否已存在...")
             if duplicate != 1:
                 # duplicate=2 是覆盖上传，不能把"已存在的同名文件"当成完成
                 raise
@@ -314,7 +321,10 @@ class FileService:
                 remote_files_list, _ = self.list_files(
                     parent_id=parent_id, auto_fetch_all=True, use_cache=False)
             except Exception as list_error:
-                logger.error(f"检查已存在文件时出错: {list_error}")
+                if sensitive:
+                    logger.error("检查敏感文件是否已存在时失败")
+                else:
+                    logger.error(f"检查已存在文件时出错: {list_error}")
                 raise e
 
             existing_file = remote_files_list.find_by_name(filename)
@@ -336,7 +346,8 @@ class FileService:
                     filename: str = None,
                     duplicate: int = 1,
                     skip_if_exists: bool = False,
-                    try_sha1_reuse: bool = True) -> Optional[Dict[str, Any]]:
+                    try_sha1_reuse: bool = True,
+                    sensitive: bool = False) -> Optional[Dict[str, Any]]:
         """
         上传完整文件，处理预上传、分片上传和完成上传的整个流程。
 
@@ -378,7 +389,7 @@ class FileService:
                         f"  ! 文件 '{filename}' 已存在但大小不同 (本地: {size}, 远程: {existing_file.size})，继续上传。")
 
         # 2.2. 如果启用SHA1秒传，先尝试秒传
-        if try_sha1_reuse:
+        if try_sha1_reuse and not sensitive:
             logger.info(f"尝试SHA1秒传文件: '{filename}'...")
             try:
                 sha1_result = self.try_sha1_reuse(
@@ -401,8 +412,11 @@ class FileService:
 
         # 3. 计算MD5
         etag = self._calculate_md5(local_path)
-        logger.info(
-            f"开始上传文件: '{filename}', 大小: {size} bytes, MD5: {etag}")
+        if sensitive:
+            logger.info(f"开始上传敏感文件: '{filename}', 大小: {size} bytes")
+        else:
+            logger.info(
+                f"开始上传文件: '{filename}', 大小: {size} bytes, MD5: {etag}")
 
         # 4. 调用 create_file (预上传)
         try:
@@ -411,10 +425,14 @@ class FileService:
                 filename=filename,
                 etag=etag,
                 size=size,
-                duplicate=duplicate
+                duplicate=duplicate,
+                sensitive=sensitive,
             )
         except ValidationError as e:
-            logger.error(f"预上传失败: {e}")
+            if sensitive:
+                logger.error("敏感文件预上传参数无效")
+            else:
+                logger.error(f"预上传失败: {e}")
             return None
 
         # 5. 检查是否秒传
@@ -455,21 +473,27 @@ class FileService:
             estimated_parts = None
 
         if estimated_parts:
-            logger.info(
-                f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size} bytes, 预计分片数: {estimated_parts}")
+            if sensitive:
+                logger.info(f"敏感文件需要分片上传，分片大小: {slice_size} bytes，预计分片数: {estimated_parts}")
+            else:
+                logger.info(
+                    f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size} bytes, 预计分片数: {estimated_parts}")
         else:
-            logger.info(f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size}")
+            if sensitive:
+                logger.info(f"敏感文件需要分片上传，分片大小: {slice_size}")
+            else:
+                logger.info(f"需要分片上传. Pre-upload ID: {preupload_id}, 分片大小: {slice_size}")
 
         # 7. 上传分片
         upload_success = self._upload_chunks(
-            local_path, preupload_id, slice_size, servers)
+            local_path, preupload_id, slice_size, servers, sensitive=sensitive)
 
         if not upload_success:
             logger.error("分片上传失败")
             return None
 
         # 8. 完成上传
-        complete_info = self._complete_upload(preupload_id)
+        complete_info = self._complete_upload(preupload_id, sensitive=sensitive)
 
         if complete_info:
             logger.info("文件上传成功")
@@ -559,7 +583,8 @@ class FileService:
         logger.info(f"  ✓ 文件秒传成功！文件ID: {file_id}")
         return data
 
-    def _upload_chunks(self, local_path: str, preupload_id: str, slice_size: int, servers: List[str]) -> bool:
+    def _upload_chunks(self, local_path: str, preupload_id: str, slice_size: int,
+                       servers: List[str], sensitive: bool = False) -> bool:
         """
         读取文件并上传所有分片。
         """
@@ -594,8 +619,11 @@ class FileService:
                     "slice": chunk
                 }
 
-                logger.info(
-                    f"  上传分片 {part_number} (大小: {len(chunk)} bytes, MD5: {slice_md5}) 到 {endpoint}...")
+                if sensitive:
+                    logger.info(f"上传敏感文件分片 {part_number}（大小: {len(chunk)} bytes）")
+                else:
+                    logger.info(
+                        f"  上传分片 {part_number} (大小: {len(chunk)} bytes, MD5: {slice_md5}) 到 {endpoint}...")
 
                 try:
                     # 假设 http_client.post 可以通过 `data` 和 `files` 参数处理 multipart/form-data
@@ -603,17 +631,24 @@ class FileService:
                         endpoint, data=form_data, files=files_data)
 
                     if not result:
-                        logger.error(f"  上传分片 {part_number} 失败 (无返回结果)。")
+                        logger.error(f"敏感文件分片 {part_number} 上传失败（无返回结果）" if sensitive else
+                                     f"  上传分片 {part_number} 失败 (无返回结果)。")
                         return False
 
                     # 假设API成功时返回的json包含 code: 0
                     if result.get('code') != 0:
-                        logger.error(
-                            f"  上传分片 {part_number} 失败: {result.get('message', '未知错误')}")
+                        if sensitive:
+                            logger.error(f"敏感文件分片 {part_number} 上传失败")
+                        else:
+                            logger.error(
+                                f"  上传分片 {part_number} 失败: {result.get('message', '未知错误')}")
                         return False
 
                 except Exception as e:
-                    logger.error(f"  上传分片 {part_number} 时发生网络或客户端错误: {e}")
+                    if sensitive:
+                        logger.error(f"敏感文件分片 {part_number} 上传时发生网络或客户端错误")
+                    else:
+                        logger.error(f"  上传分片 {part_number} 时发生网络或客户端错误: {e}")
                     return False
 
                 logger.info(f"  分片 {part_number} 上传成功。")
@@ -622,12 +657,16 @@ class FileService:
         logger.info("所有分片上传成功。")
         return True
 
-    def _complete_upload(self, preupload_id: str, max_retries: int = 5, retry_delay: int = 2) -> Optional[Dict[str, Any]]:
+    def _complete_upload(self, preupload_id: str, max_retries: int = 5,
+                         retry_delay: int = 2, sensitive: bool = False) -> Optional[Dict[str, Any]]:
         """
         通知服务器所有分片已上传完毕。
         包含针对“文件校验中”错误的重试逻辑。
         """
-        logger.info(f"正在发送上传完成请求, preuploadID: {preupload_id}...")
+        if sensitive:
+            logger.info("正在完成敏感文件上传")
+        else:
+            logger.info(f"正在发送上传完成请求, preuploadID: {preupload_id}...")
 
         endpoint = "/upload/v2/file/upload_complete"
         json_data = {"preuploadID": preupload_id}
@@ -643,10 +682,16 @@ class FileService:
             logger.warning("完成上传请求返回未完成状态。")
             return None
         except Pan123APIError as e:
-            logger.error(f"完成上传请求失败: {e}")
+            if sensitive:
+                logger.error("完成敏感文件上传请求失败")
+            else:
+                logger.error(f"完成上传请求失败: {e}")
             return None
         except Exception as e:
-            logger.error(f"完成上传请求时发生未知异常: {e}")
+            if sensitive:
+                logger.error("完成敏感文件上传请求时发生未知异常")
+            else:
+                logger.error(f"完成上传请求时发生未知异常: {e}")
             return None
 
     def get_download_info(self, file_id: int) -> Dict[str, Any]:
@@ -660,6 +705,104 @@ class FileService:
         params = {"fileId": file_id}
 
         return self.http_client.get(endpoint, params=params)
+
+    def get_file_detail(self, file_id: int) -> Optional[File]:
+        """Fetch one file directly from the detail endpoint (without cache)."""
+        if not isinstance(file_id, int):
+            raise ValidationError("文件ID必须是整数")
+        result = self.http_client.get(
+            "/api/v1/file/detail", params={"fileID": file_id})
+        data = result.get("data") if isinstance(result, dict) else None
+        if not isinstance(data, dict) or not data:
+            return None
+        normalized = dict(data)
+        for source, target in (("fileID", "fileId"),
+                               ("parentFileID", "parentFileId")):
+            if target not in normalized and source in normalized:
+                normalized[target] = normalized[source]
+            value = normalized.get(target)
+            if isinstance(value, str) and value.isdecimal():
+                normalized[target] = int(value)
+        return File(normalized)
+
+    def save_zip_password(self, file_id: int, password: str) -> Dict[str, Any]:
+        return self.save_archive_password(file_id, password)
+
+    def save_archive_password(self, file_id: int, password: str, archive_kind=None) -> Dict[str, Any]:
+        """Save a pre-validated archive password as a sibling `<archive>.pwd`.
+
+        The caller must validate the password against the encrypted archive
+        before invoking this method. It stores the exact UTF-8 bytes in a
+        private temporary file, then uses the regular upload flow to replace
+        any existing sibling sidecar.
+        """
+        if not isinstance(file_id, int) or isinstance(file_id, bool) or file_id <= 0:
+            raise ValidationError("file_id 必须是正整数")
+        if not isinstance(password, str):
+            raise ValidationError("压缩包密码必须是文本")
+        try:
+            password_bytes = password.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValidationError("压缩包密码必须是有效UTF-8文本") from exc
+        if not password_bytes or len(password_bytes) > 4096:
+            raise ValidationError("压缩包密码长度必须为1到4096个UTF-8字节")
+
+        archive = self.get_file_detail(file_id)
+        from .split_archive import SPLIT_7Z
+        split = SPLIT_7Z.fullmatch(archive.filename) if archive is not None else None
+        supported = archive is not None and (split or archive.filename.lower().endswith((".zip", ".7z", ".7zz", ".rar")))
+        if archive_kind is not None:
+            supported = archive_kind in (".zip", ".7z", ".rar")
+        try:
+            archive_type = (int(archive.type) if archive is not None and
+                            not isinstance(archive.type, bool) else -1)
+        except (TypeError, ValueError):
+            archive_type = -1
+        if (archive is None or archive.file_id != file_id or archive_type != 0 or
+                _is_trashed({"trashed": archive.trashed}) or
+                not supported):
+            raise ValidationError("file_id 必须指向未删除的压缩包普通文件")
+        parent_id = archive.parent_file_id
+        if (not isinstance(parent_id, int) or isinstance(parent_id, bool) or
+                parent_id < 0):
+            raise ValidationError("压缩包文件缺少有效的父目录ID")
+        archive_name = archive.filename
+        if (not archive_name or os.path.basename(archive_name) != archive_name or
+                re.search(r'[\\/:*?"<>|]', archive_name)):
+            raise ValidationError("压缩包文件名无效")
+        sidecar_name = (split[1] if split else archive_name) + ".pwd"
+        if len(sidecar_name.encode("utf-8")) > 255:
+            raise ValidationError("密码侧车文件名超过255个UTF-8字节")
+
+        siblings, _ = self.list_files(
+            parent_id=parent_id, auto_fetch_all=True, use_cache=False)
+        matches = [item for item in siblings if item.filename == sidecar_name]
+        if len(matches) > 1:
+            raise ValidationError("同目录存在多个同名密码侧车，拒绝覆盖")
+        if matches and matches[0].is_folder:
+            raise ValidationError("同名密码侧车路径是目录，拒绝覆盖")
+
+        fd, temp_path = tempfile.mkstemp(prefix="pan123-zip-password-")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as password_file:
+                fd = -1
+                password_file.write(password_bytes)
+                password_file.flush()
+            result = self.upload_file(
+                temp_path, parent_id, filename=sidecar_name, duplicate=2,
+                skip_if_exists=False, try_sha1_reuse=False, sensitive=True)
+            if not isinstance(result, dict) or result.get("fileID") is None:
+                raise FileUploadError("密码侧车上传失败")
+            self._invalidate_dir_cache(parent_id)
+            return result
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
 
     def get_files_info(self, file_ids: List[int], use_cache: bool = True) -> FileList:
         """
@@ -677,12 +820,16 @@ class FileService:
             if not isinstance(file_id, int):
                 raise ValidationError(f"文件ID必须是整数，获得: {type(file_id)}")
 
+        # Deduplicate while preserving caller order; the infos endpoint accepts
+        # batches, so large inputs are split into bounded requests.
+        file_ids = list(dict.fromkeys(file_ids))
+
         # 如果不使用缓存或缓存不可用，直接调用API
         if not use_cache or not self.cache_manager:
             return self._fetch_files_info_from_api(file_ids)
 
         # 使用缓存逻辑
-        cached_files = []
+        cached_files = {}
         missing_file_ids = []
 
         # 检查每个文件ID的缓存状态
@@ -690,14 +837,14 @@ class FileService:
             should_use_cache, cached_data = self.cache_manager.should_use_cache(
                 file_id)
             if should_use_cache and cached_data:
-                cached_files.append(cached_data)
+                cached_files[file_id] = cached_data
                 logger.info(f"使用缓存获取文件信息: {file_id}")
             else:
                 missing_file_ids.append(file_id)
 
         # 如果所有文件都有缓存，直接返回
         if not missing_file_ids:
-            return FileList(cached_files)
+            return FileList([cached_files[file_id] for file_id in file_ids])
 
         # 从API获取缺失的文件信息
         logger.info(f"从API获取文件信息: {missing_file_ids}")
@@ -716,24 +863,28 @@ class FileService:
                     logger.info(f"文件信息已缓存: {file_id}")
 
         # 合并缓存和API结果
-        all_files_data = [f.to_dict()
-                          for f in cached_files] if cached_files else []
-        all_files_data.extend([f.to_dict() for f in api_files.files])
-
-        return FileList(all_files_data)
+        api_by_id = {f.file_id: f.to_dict() for f in api_files.files}
+        combined = {**cached_files, **api_by_id}
+        return FileList([combined[file_id] for file_id in file_ids if file_id in combined])
 
     def _fetch_files_info_from_api(self, file_ids: List[int]) -> FileList:
         """从API获取文件信息的内部方法"""
         endpoint = "/api/v1/file/infos"
-        json_data = {"fileIds": file_ids}
-
-        result = self.http_client.post(endpoint, json_data=json_data)
-
-        if result and 'data' in result and 'fileList' in result['data']:
-            files_data = result['data']['fileList']
-            return FileList(files_data)
-
-        return FileList([])
+        files_by_id = {}
+        for start in range(0, len(file_ids), FILE_INFO_BATCH_SIZE):
+            json_data = {"fileIds": file_ids[start:start + FILE_INFO_BATCH_SIZE]}
+            result = self.http_client.post(endpoint, json_data=json_data)
+            if result and 'data' in result and 'fileList' in result['data']:
+                for item in result['data']['fileList']:
+                    file_id = item.get('fileId', item.get('fileID'))
+                    if file_id is not None:
+                        if isinstance(file_id, str) and file_id.isdigit():
+                            file_id = int(file_id)
+                        item = dict(item, fileId=file_id)
+                        if "parentFileID" in item and "parentFileId" not in item:
+                            item = dict(item, parentFileId=item["parentFileID"])
+                        files_by_id[file_id] = item
+        return FileList([files_by_id[file_id] for file_id in file_ids if file_id in files_by_id])
 
     def get_file_info_single(self, file_id: int, use_cache: bool = True) -> Optional[File]:
         """

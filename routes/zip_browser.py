@@ -20,6 +20,7 @@ from flask import (
     url_for,
     make_response,
     jsonify,
+    flash,
 )
 
 from api import Pan123APIError
@@ -30,6 +31,7 @@ from api.archive_names import member_name, decode_archive_text
 from api.split_archive import SPLIT_7Z, discover_volumes
 from api.zip_preview import ZipPreviewError, ChangedArchive, ArchivePasswordRequired
 from api.archive_preview import read_archive_member, read_archive_member_file
+from api.zip_password_validation import validate_archive_password
 from .utils import get_client, folder_breadcrumbs
 from .listing import options, natural_key
 
@@ -79,13 +81,14 @@ def browse(file_id, member_id=None):
         refresh = request.args.get("refresh") == "1"
         if refresh and hasattr(client, "clear_file_cache"):
             client.clear_file_cache(file_id)
-        file = client.get_file_info_single(file_id, use_cache=not refresh)
+        file = client.get_file_info_single(file_id, use_cache=not refresh and request.method != "POST")
         if not file:
             abort(404)
         split = SPLIT_7Z.fullmatch(file.filename)
         kind = ".7z" if split else (detected_kind(session, file) or PurePosixPath(file.filename).suffix.lower())
         if file.is_folder or kind not in (".zip", ".7z", ".rar"):
             raise ZipPreviewError("请选择 ZIP、7z 或 RAR 文件")
+        can_save_password = kind in (".zip", ".7z", ".rar")
 
         def render_archive(archive, source):
             if request.args.get("v") and request.args["v"] != source.index_version:
@@ -233,6 +236,8 @@ def browse(file_id, member_id=None):
                 password_set=bool(password),
                 csrf_token=csrf,
                 password_required=False,
+                can_save_password=can_save_password,
+                password_filename=(split[1] if split else file.filename) + ".pwd",
                 member_id=None,
                 has_encrypted=any(bool(entry.flag_bits & 1) for entry in entries),
                 archive_version=source.index_version,
@@ -262,13 +267,35 @@ def browse(file_id, member_id=None):
             action = request.form.get("action")
             if action == "clear":
                 password_vault.clear(browser_token, key)
-            elif action == "password":
-                password = request.form.get("password", "")
+            elif action in ("password", "save_password"):
+                password = (request.form.get("password", "") if action == "password"
+                            else password_vault.get(browser_token, key))
                 if not password:
                     return no_store(render_template("error.html", error="请输入压缩包密码")), 400
                 if len(password) > 1024:
                     return no_store(render_template("error.html", error="压缩包密码不能超过 1024 个字符")), 400
+                save_password = action == "save_password" or request.form.get("save_password") == "1"
+                if save_password:
+                    if not can_save_password:
+                        return no_store(render_template("error.html", error="此压缩格式暂不支持保存密码文件")), 400
+                    current_app.extensions["archive_cache"].run(
+                        key, kind,
+                        lambda: ((discover_volumes(client, file), "split") if split
+                                 else client.get_final_download_url(file_id, prefer_webdav=False)),
+                        validate_archive_password, password=password,
+                        resolve_part=lambda part_id: client.get_final_download_url(part_id, prefer_webdav=False),
+                    )
                 password_vault.set(browser_token, key, password)
+                if save_password:
+                    try:
+                        client.save_archive_password(file_id, password, archive_kind=kind)
+                    except (Pan123APIError, requests.RequestException, OSError):
+                        current_app.logger.warning("压缩包密码文件保存失败，文件 ID: %s", file_id)
+                        flash("密码已验证，但保存到网盘失败。仍可在网页浏览；可点击“保存密码到网盘”重试。", "error")
+                    else:
+                        flash(f"已保存同级密码文件 {split[1] if split else file.filename}.pwd。", "success")
+                    return no_store(redirect(url_for("zip.browse", file_id=file_id,
+                                                     path=request.form.get("path", ""))))
             else:
                 return no_store(render_template("error.html", error="无效的密码操作")), 400
             target_member = request.form.get("member_id", "")
@@ -335,6 +362,8 @@ def browse(file_id, member_id=None):
                 breadcrumbs=folder_breadcrumbs(client, file.get("parentFileId", 0)),
                 archive_crumbs=archive_crumbs,
                 password_required=True,
+                can_save_password=kind in (".zip", ".7z", ".rar"),
+                password_filename=(split[1] if split else file.filename) + ".pwd",
                 password_set=bool(current_app.extensions["archive_passwords"].get(browser_token, key)),
                 has_encrypted=True,
                 csrf_token=csrf,

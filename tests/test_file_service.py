@@ -1,15 +1,241 @@
 """FileService 的行为测试：分页、预上传、秒传语义、目录缓存、WebDAV URL。"""
 
 import logging
+import hashlib
+import os
+import stat
 
 import pytest
 import requests
 
 from api.exceptions import Pan123APIError, ValidationError
 from conftest import make_file, make_page
+from api.models import File, FileList
+
+
+def test_file_infos_deduplicates_chunks_and_preserves_input_order(service, http_client):
+    from api.file_service import FILE_INFO_BATCH_SIZE
+
+    ids = list(range(1, FILE_INFO_BATCH_SIZE + 2)) + [1]
+    http_client.queue_post(
+        "/api/v1/file/infos",
+        {"code": 0, "data": {"fileList": [make_file(i, str(i)) for i in reversed(ids[:FILE_INFO_BATCH_SIZE])]}},
+        {"code": 0, "data": {"fileList": [make_file(ids[-2], str(ids[-2]))]}},
+    )
+    result = service.get_files_info(ids, use_cache=False)
+    assert [item.file_id for item in result] == list(range(1, FILE_INFO_BATCH_SIZE + 2))
+    batches = [call[2]["fileIds"] for call in http_client.calls]
+    assert [len(batch) for batch in batches] == [FILE_INFO_BATCH_SIZE, 1]
+
+
+@pytest.mark.parametrize("file_ids", [[], None])
+def test_file_infos_rejects_empty_or_missing_ids(service, file_ids):
+    with pytest.raises(ValidationError):
+        service.get_files_info(file_ids)
+
+
+def test_file_infos_mixed_cache_hit_and_miss_preserves_requested_order(service, http_client):
+    class Cache:
+        def should_use_cache(self, file_id, update_time=None):
+            if file_id == 2 and update_time is None:
+                return True, make_file(2, "cached")
+            return False, None
+
+        def set_cache(self, file_id, data):
+            pass
+
+    service.cache_manager = Cache()
+    http_client.queue_post("/api/v1/file/infos", {
+        "code": 0, "data": {"fileList": [make_file(3, "api-3"), make_file(1, "api-1")]}
+    })
+    result = service.get_files_info([3, 2, 1])
+    assert [(item.file_id, item.filename) for item in result] == [
+        (3, "api-3"), (2, "cached"), (1, "api-1")]
+
+
+def test_file_detail_normalizes_api_id_field_variants(service, http_client):
+    http_client.queue_get("/api/v1/file/detail", {
+        "code": 0,
+        "data": {"fileID": 7, "parentFileID": 4, "filename": "a.txt",
+                 "createAt": "today", "type": 0, "size": 12, "trashed": 0,
+                 "etag": "tag"},
+    })
+    detail = service.get_file_detail(7)
+    assert (detail.file_id, detail.parent_file_id, detail.filename) == (7, 4, "a.txt")
+    assert http_client.calls[-1] == ("GET", "/api/v1/file/detail", {"fileID": 7})
+
+
+def _zip_file(file_id=41, parent_id=8, filename="archive.zip", type_=0, trashed=0):
+    return File({"fileId": file_id, "parentFileId": parent_id, "filename": filename,
+                 "type": type_, "trashed": trashed, "size": 123})
+
+
+@pytest.mark.parametrize("name,sidecar", [("archive.zip", "archive.zip.pwd"),
+    ("archive.7z", "archive.7z.pwd"), ("archive.rar", "archive.rar.pwd"),
+    ("archive.7z.001", "archive.7z.pwd"), ("archive.7z.002", "archive.7z.pwd")])
+def test_save_zip_password_uploads_exact_private_temp_sidecar_and_invalidates_cache(
+        service, monkeypatch, caplog, name, sidecar):
+    password = "密碼🔑 "
+    expected = password.encode("utf-8")
+    service._dir_cache[(8, 100, 100)] = (FileList([]), None)
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: _zip_file(filename=name))
+    list_calls = []
+
+    def list_files(**kwargs):
+        list_calls.append(kwargs)
+        return FileList([_zip_file(77, 8, sidecar)]), None
+
+    monkeypatch.setattr(service, "list_files", list_files)
+    upload_calls = []
+
+    def upload_file(local_path, parent_id, **kwargs):
+        upload_calls.append((local_path, parent_id, kwargs))
+        assert os.path.exists(local_path)
+        assert stat.S_IMODE(os.stat(local_path).st_mode) == 0o600
+        assert open(local_path, "rb").read() == expected
+        return {"fileID": 90, "filename": kwargs["filename"], "size": len(expected)}
+
+    monkeypatch.setattr(service, "upload_file", upload_file)
+    result = service.save_archive_password(41, password)
+
+    assert result["fileID"] == 90
+    assert list_calls == [{"parent_id": 8, "auto_fetch_all": True, "use_cache": False}]
+    temp_path, parent_id, options = upload_calls[0]
+    assert parent_id == 8
+    assert options == {"filename": sidecar, "duplicate": 2,
+                       "skip_if_exists": False, "try_sha1_reuse": False,
+                       "sensitive": True}
+    assert not os.path.exists(temp_path)
+    assert service._dir_cache == {}
+    assert password not in caplog.text
+    assert hashlib.md5(expected).hexdigest() not in caplog.text
+
+
+@pytest.mark.parametrize("siblings", [
+    [make_file(88, "archive.zip.pwd", type_=1)],
+    [make_file(88, "archive.zip.pwd"), make_file(89, "archive.zip.pwd")],
+])
+def test_save_zip_password_rejects_conflicting_sibling_before_upload(
+        service, monkeypatch, siblings):
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: _zip_file())
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: (FileList(siblings), None))
+    monkeypatch.setattr(service, "upload_file", lambda *a, **kw: pytest.fail("must not upload"))
+
+    with pytest.raises(ValidationError):
+        service.save_zip_password(41, "secret")
+
+
+def test_save_zip_password_refuses_missing_parent_and_invalid_archive(service, monkeypatch):
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: pytest.fail("must not list"))
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: _zip_file(parent_id=None))
+    with pytest.raises(ValidationError, match="父目录"):
+        service.save_zip_password(41, "secret")
+
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: _zip_file(filename="archive.txt"))
+    with pytest.raises(ValidationError):
+        service.save_zip_password(41, "secret")
+
+
+@pytest.mark.parametrize("password", ["", "x" * 4097, "\ud800"])
+def test_save_zip_password_validates_utf8_and_byte_limit_before_api(service, monkeypatch, password):
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: pytest.fail("must not request detail"))
+    with pytest.raises(ValidationError):
+        service.save_zip_password(41, password)
+
+
+def test_save_zip_password_cleans_temp_file_when_upload_fails(service, monkeypatch):
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: _zip_file())
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: (FileList([]), None))
+    captured = {}
+
+    def fail_upload(local_path, *args, **kwargs):
+        captured["path"] = local_path
+        assert stat.S_IMODE(os.stat(local_path).st_mode) == 0o600
+        raise Pan123APIError("upload failed")
+
+    monkeypatch.setattr(service, "upload_file", fail_upload)
+    with pytest.raises(Pan123APIError):
+        service.save_zip_password(41, "secret")
+    assert captured["path"]
+    assert not os.path.exists(captured["path"])
+
+
+def test_sensitive_upload_does_not_log_secret_or_its_md5(service, tmp_path, monkeypatch, caplog):
+    password_bytes = "secret-内容".encode("utf-8")
+    password_file = tmp_path / "password.pwd"
+    password_file.write_bytes(password_bytes)
+    monkeypatch.setattr(service, "create_file", lambda **kwargs: {"reuse": True, "fileID": 10})
+
+    with caplog.at_level(logging.INFO):
+        result = service.upload_file(
+            str(password_file), 8, filename="archive.zip.pwd",
+            try_sha1_reuse=False, sensitive=True)
+
+    assert result["fileID"] == 10
+    assert password_bytes.decode("utf-8") not in caplog.text
+    assert hashlib.md5(password_bytes).hexdigest() not in caplog.text
+
+
+def test_sensitive_chunk_upload_hides_slice_hash_endpoint_and_preupload_id(
+        service, http_client, tmp_path, monkeypatch, caplog):
+    content = b"sidecar secret bytes"
+    password_file = tmp_path / "password.pwd"
+    password_file.write_bytes(content)
+    monkeypatch.setattr(service, "create_file", lambda **kwargs: {
+        "preuploadID": "private-preupload-id", "sliceSize": 5,
+        "servers": ["https://upload.example.test"],
+    })
+    http_client.queue_post(
+        "https://upload.example.test/upload/v2/file/slice",
+        *([{"code": 0}] * ((len(content) + 4) // 5)),
+    )
+    http_client.queue_post("/upload/v2/file/upload_complete", {
+        "code": 0, "data": {"completed": True, "fileID": 91},
+    })
+
+    with caplog.at_level(logging.INFO):
+        result = service.upload_file(
+            str(password_file), 8, filename="archive.zip.pwd",
+            try_sha1_reuse=False, sensitive=True)
+
+    assert result["fileID"] == 91
+    assert hashlib.md5(content[:5]).hexdigest() not in caplog.text
+    assert "upload.example.test" not in caplog.text
+    assert "private-preupload-id" not in caplog.text
+
+
+def test_sensitive_chunk_upload_hides_exception_detail(service, http_client, tmp_path, monkeypatch, caplog):
+    password_file = tmp_path / "password.pwd"
+    password_file.write_bytes(b"secret chunk")
+    monkeypatch.setattr(service, "create_file", lambda **kwargs: {
+        "preuploadID": "private-preupload-id", "sliceSize": 100,
+        "servers": ["upload.example.test"],
+    })
+    http_client.queue_post("http://upload.example.test/upload/v2/file/slice",
+                           Pan123APIError("secret exception detail"))
+
+    with caplog.at_level(logging.INFO):
+        result = service.upload_file(
+            str(password_file), 8, filename="archive.zip.pwd",
+            try_sha1_reuse=False, sensitive=True)
+
+    assert result is None
+    assert "secret exception detail" not in caplog.text
+    assert "upload.example.test" not in caplog.text
+    assert "private-preupload-id" not in caplog.text
 
 
 # ---------------------------------------------------------------- 分页
+
+def test_file_infos_normalizes_uppercase_integer_id(service, http_client):
+    http_client.queue_post("/api/v1/file/infos", {
+        "code": 0, "data": {"fileList": [
+            {"fileID": 42, "parentFileID": 7, "filename": "file.txt", "type": 0}
+        ]}
+    })
+    result = service.get_files_info([42], use_cache=False)
+    assert result[0].file_id == 42
+    assert result[0].parent_file_id == 7
 
 def test_pagination_keeps_going_when_a_page_is_all_trashed(service, http_client):
     """整页都是回收站记录时不能提前结束分页（曾经会静默丢文件）。"""

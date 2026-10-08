@@ -8,17 +8,20 @@ from api.http_client import RequestHandler
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200):
+    def __init__(self, payload, status_code=200, headers=None):
         self.payload = payload
         self.status_code = status_code
         self.content = b'{}'
         self.text = '{}'
-        self.headers = {}
+        self.headers = headers or {}
 
     def json(self):
         if isinstance(self.payload, Exception):
             raise self.payload
         return self.payload
+
+    def __bool__(self):
+        return self.status_code < 400
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -31,9 +34,11 @@ class FakeSession:
         self.headers = {}
         self.responses = list(responses)
         self.calls = []
+        self.request_kwargs = []
 
     def request(self, method, url, **kwargs):
         self.calls.append((method, url))
+        self.request_kwargs.append(kwargs)
         item = self.responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -44,7 +49,12 @@ class FakeSession:
 
 
 class FakeTokenManager:
-    access_token = "token"
+    def __init__(self):
+        self.access_token = "token"
+
+    def refresh_if_current(self, rejected_token):
+        assert rejected_token == "token"
+        self.access_token = "fresh"
 
 
 class FakeLimiter:
@@ -100,13 +110,96 @@ def test_retry_gives_up_and_raises():
 
 
 def test_non_retryable_business_code_fails_immediately():
-    handler = make_handler([FakeResponse({"code": 401, "message": "token 超限"})])
+    handler = make_handler([FakeResponse({"code": 401, "message": "token 超限"})] * 2)
 
     with pytest.raises(Pan123APIError) as excinfo:
         handler.get("/api/v1/user/info")
 
     assert excinfo.value.error_code == 401
-    assert len(handler.session.calls) == 1
+    assert len(handler.session.calls) == 2
+
+
+def test_body_401_refreshes_once_and_retries_with_new_header():
+    handler = make_handler([
+        FakeResponse({"code": 401, "message": "token expired"}),
+        FakeResponse({"code": 0, "data": {}}),
+    ])
+    handler.get("/api/v1/user/info")
+    assert len(handler.session.calls) == 2
+    assert handler.session.request_kwargs[0]["headers"]["Authorization"] == "Bearer token"
+    assert handler.session.request_kwargs[1]["headers"]["Authorization"] == "Bearer fresh"
+    assert "Authorization" not in handler.session.headers
+
+
+def test_http_429_honors_retry_after_seconds(monkeypatch):
+    delays = []
+    monkeypatch.setattr("api.http_client.time.sleep", delays.append)
+    handler = make_handler([
+        FakeResponse({}, status_code=429, headers={"Retry-After": "3"}),
+        FakeResponse({"code": 0, "data": {}}),
+    ])
+    handler.get("/api/v1/user/info")
+    assert delays == [3.0]
+
+
+def test_body_429_honors_retry_after(monkeypatch):
+    delays = []
+    monkeypatch.setattr("api.http_client.time.sleep", delays.append)
+    handler = make_handler([
+        FakeResponse({"code": 429, "message": "slow down"}, headers={"Retry-After": "2"}),
+        FakeResponse({"code": 0, "data": {}}),
+    ])
+    handler.get("/api/v1/user/info")
+    assert delays == [2.0]
+
+
+def test_body_429_accepts_http_date_retry_after(monkeypatch):
+    delays = []
+    monkeypatch.setattr("api.http_client.time.sleep", delays.append)
+    handler = make_handler([
+        FakeResponse({"code": 429}, headers={
+            "Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}),
+        FakeResponse({"code": 0, "data": {}}),
+    ])
+    handler.get("/api/v1/user/info")
+    assert delays == [0.0]
+
+
+def test_http_429_honors_http_date_retry_after(monkeypatch):
+    delays = []
+    monkeypatch.setattr("api.http_client.time.sleep", delays.append)
+    handler = make_handler([
+        FakeResponse({}, status_code=429,
+                     headers={"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}),
+        FakeResponse({"code": 0, "data": {}}),
+    ])
+    handler.get("/api/v1/user/info")
+    assert delays == [0.0]
+
+
+@pytest.mark.parametrize("retry_after", ["nan", "inf", "999999999"])
+def test_unusable_retry_after_fails_without_sleep(monkeypatch, retry_after):
+    delays = []
+    monkeypatch.setattr("api.http_client.time.sleep", delays.append)
+    handler = make_handler([
+        FakeResponse({}, status_code=429, headers={"Retry-After": retry_after}),
+        FakeResponse({"code": 0, "data": {}}),
+    ])
+    with pytest.raises(Pan123APIError, match="Retry-After|超过本地上限"):
+        handler.get("/api/v1/user/info")
+    assert delays == []
+
+
+def test_http_401_refreshes_once_then_raises_with_status():
+    handler = make_handler([
+        FakeResponse({"message": "expired"}, status_code=401),
+        FakeResponse({"message": "still expired"}, status_code=401),
+        FakeResponse({"code": 0}),
+    ])
+    with pytest.raises(Pan123APIError) as excinfo:
+        handler.get("/api/v1/user/info")
+    assert excinfo.value.status_code == 401
+    assert len(handler.session.calls) == 2
 
 
 def test_server_error_is_retried_then_raises():

@@ -25,15 +25,27 @@
                 {% if password_required and member_id is not none %}<input type="hidden" name="member_id" value="{{ member_id }}"><input type="hidden" name="v" value="{{ archive_version }}"><input type="hidden" name="download" value="{{ request.args.get('download', '') }}">{% if request.args.get("expected_path") is not none %}<input type="hidden" name="expected_path" value="{{ request.args['expected_path'] }}">{% endif %}{% endif %}
                 <label for="zip-password-entry">{% if password_set %}重新输入压缩包密码{% else %}压缩包密码{% endif %}</label>
                 <input id="zip-password-entry" type="password" name="password" required maxlength="1024" autocomplete="current-password">
+                {% if can_save_password %}
+                <label><input type="checkbox" name="save_password" value="1" checked> 验证后保存到网盘</label>
+                <p class="text-muted">将在同级保存明文密码文件 {{ password_filename }}。验证较大文件可能需要等待。</p>
+                {% endif %}
                 <button class="btn btn-primary" type="submit">{% if password_required %}重新提交密码{% elif password_set %}修改密码{% else %}解锁压缩包{% endif %}</button>
             </form>
             {% endif %}
             {% if password_set %}
+            {% if can_save_password %}
+            <form method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="action" value="save_password">
+                <input type="hidden" name="path" value="{{ prefix }}">
+                <button class="btn btn-secondary" type="submit">保存密码到网盘</button>
+            </form>
+            {% endif %}
             <form method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="action" value="clear">
                 <input type="hidden" name="path" value="{{ prefix }}">
-                <button class="btn btn-secondary" type="submit">清除已保存密码</button>
+                <button class="btn btn-secondary" type="submit">清除此浏览器的密码</button>
             </form>
             {% endif %}
         </section>
