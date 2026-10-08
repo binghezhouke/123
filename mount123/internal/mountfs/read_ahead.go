@@ -41,10 +41,15 @@ type readAheadSnapshot struct {
 	ForegroundReads uint64
 }
 
+type readAheadSource interface {
+	PrefetchRangeAtContext(context.Context, int64, int64) error
+	DownloadStats() storage.DownloadStats
+}
+
 type readAhead struct {
 	mu        sync.Mutex
 	parent    context.Context
-	remote    *storage.Remote
+	remote    readAheadSource
 	base      int64
 	size      uint64
 	maxWindow int64
@@ -70,7 +75,7 @@ type readAhead struct {
 	wg                 sync.WaitGroup
 }
 
-func newReadAhead(parent context.Context, remote *storage.Remote, base int64, size uint64, maxWindow int64) *readAhead {
+func newReadAhead(parent context.Context, remote readAheadSource, base int64, size uint64, maxWindow int64) *readAhead {
 	if maxWindow <= 0 {
 		maxWindow = maximumReadAheadBytes
 	}

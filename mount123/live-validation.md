@@ -136,3 +136,15 @@
 - 合并版本 `a93946e` 通过全量 `MOUNT123_FUSE_TEST=1 GOTOOLCHAIN=local GOPROXY=off /tmp/123-go-sdk/go/bin/go test -C mount123 -race -buildvcs=false -timeout=120s ./...`、`go vet -C mount123 -buildvcs=false ./...`、二进制构建及 `git diff --check`。命令行帮助确认新的下载参数与 `io-stats` 命令可用。
 - 测试使用本地 HTTP/API 样本及实际 Linux FUSE 临时挂载，覆盖普通文件、ZIP/7z/RAR、密码、渐进目录、共享下载取消、慢响应/慢发布、热点留存、超缓存容量读取与慢消费者。各项本地基线与测量范围见 `docs/netfs-*.md`，不据此宣称真实网盘吞吐提升比例。
 - 验收二进制写入 `/tmp/mount123-netfs-acceptance`；用户原挂载未重启，以上新行为需更新二进制并重新挂载后生效。本轮没有向网盘写入文件。
+
+## ISO 只读目录及真实 UDF 大文件验收（2026-10-08）
+
+- ISO9660、Joliet、Rock Ridge 和 UDF 镜像通过现有 FUSE 挂载映射成目录，独立开关为 `-iso-dirs`。目录元数据按访问加载；文件通过镜像 extent 映射复用直链、Range 缓存和下载调度，不提取完整镜像或成员。
+- 本地样本覆盖中文/长路径、UDF 2.50 元数据分区、非连续 extent、稀疏洞、实时文件类型 249，以及超过上游 16 层限制的分配描述符链。长链使用保留 BSD 许可证的本地 UDF 补丁迭代解析，同时验证循环和预算拒绝。另测真实 FUSE 只读、seek/EOF、目录快照、取消重试、多个句柄共享下载、列目录不读取远处视频数据及相邻图片预取。
+- 使用已有账号令牌，在独立临时 FUSE 挂载和空的 256 MiB 缓存中验证真实 ISO `34460142`，大小 `14328528896` 字节，UDF 2.50。关闭连续预读和相邻图片预取以限定测量；原运行挂载保持运行，没有向网盘写入。
+- 镜像根目录 3 项在 1.036 秒返回，STREAM 目录显示 8 项。成功打开其中 `9829656576` 字节的 M2TS 文件并两次读取尾部 4096 字节，内容一致，SHA-256 为 `a4ccbae7d15a9ac3443688e34e54f9cda32dbbc34d60b3f79c945644b5c695b0`，21 个预期位置上的 M2TS 同步字均正确；写方式打开返回只读错误。
+- 等待 Range 发布后累计下载 `2097153` 字节（两个 1 MiB 块及 1 字节源探测），远小于镜像或成员大小。这里验证指定布局的远端随机访问与重复读取，没有做整部影片播放或全文件校验，也不据此宣称固定吞吐提升。
+- 测试临时挂载和缓存已清理。ISO Level 3 多 extent、交错 ISO、Rock Ridge SF/ZF，以及 UDF virtual/sparable 分区仍有明确边界，见 `docs/design/mount-disc-images.md`。
+- 最终全量 `MOUNT123_FUSE_TEST=1 GOTOOLCHAIN=local GOPROXY=off /tmp/123-go-sdk/go/bin/go test -C mount123 -race -buildvcs=false -timeout=120s ./...`、`go vet`、本地 UDF 子模块构建检查及主二进制构建通过。
+- 已替换 `/home/binghe/mnt/123` 的运行版本，保留原缓存和参数，内核挂载仍为只读。实际挂载上的同一 9.8 GB 成员尾部读取与独立验收的 SHA-256 一致，写入被拒绝；下载并发仍为 32、在途预算仍为 128 MiB。
+- 重挂载后 `11.rar` 的完整索引恢复为 122259 个成员，无需重新扫描；原 `tmdb-movies2/2/all.json` 的 23010 字节内容和 SHA-256 不变，首次读取含索引恢复用时 0.337 秒。原终端如仍停留在旧挂载内，需要先 `cd /` 再重新进入。

@@ -1,0 +1,1 @@
+Joliet fixture: 中文目录 and Unicode long name.

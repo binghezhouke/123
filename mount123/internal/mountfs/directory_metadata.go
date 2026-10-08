@@ -37,7 +37,7 @@ func (n *Node) lookupCloud(ctx context.Context, name string) (map[string]*entry,
 		return nil, nil
 	}
 	copy := f
-	return map[string]*entry{name: {name: name, cloud: &copy, directory: f.IsDir || (n.tree.zipDirs && archiveKind(f.Name) != "")}}, nil
+	return map[string]*entry{name: {name: name, cloud: &copy, directory: n.tree.cloudIsDirectory(f)}}, nil
 }
 
 func (t *Tree) cloudDirectory(ctx context.Context, parentID int64) (*cloudDirectory, error) {
@@ -68,7 +68,7 @@ func (t *Tree) cloudDirectory(ctx context.Context, parentID int64) (*cloudDirect
 			}
 			file := f
 			directory.byName[f.Name] = f
-			directory.entries[f.Name] = &entry{name: f.Name, cloud: &file, directory: f.IsDir || (t.zipDirs && archiveKind(f.Name) != "")}
+			directory.entries[f.Name] = &entry{name: f.Name, cloud: &file, directory: t.cloudIsDirectory(f)}
 			directory.names = append(directory.names, f.Name)
 		}
 		sort.Strings(directory.names)

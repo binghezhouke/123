@@ -198,7 +198,9 @@ func (p *imagePrefetch) plan(n *Node, entries map[string]*entry) []*entry {
 	for i, examined := index+direction, 0; i >= 0 && i < len(names) && examined < count; i, examined = i+direction, examined+1 {
 		e := entries[names[i]]
 		var size uint64
-		if e.member != nil {
+		if e.disc != nil {
+			size = e.disc.size
+		} else if e.member != nil {
 			size = e.member.size
 		} else if e.cloud != nil && e.cloud.Size >= 0 {
 			size = uint64(e.cloud.Size)
@@ -264,6 +266,15 @@ func (p *imagePrefetch) run(ctx context.Context, n *Node, generation uint64) {
 	wg.Wait()
 }
 func prefetchImage(ctx context.Context, n *Node) {
+	if n.item.disc != nil && !n.item.directory {
+		source, imageSize, _, err := n.discSource(ctx)
+		if err != nil {
+			return
+		}
+		prefetch := &discPrefetchSource{source: source, imageSize: imageSize, path: n.item.disc.path, size: n.item.disc.size}
+		_ = prefetch.PrefetchRangeAtContext(ctx, 0, int64(n.item.disc.size))
+		return
+	}
 	h, _, errno := n.openRaw(ctx, syscall.O_RDONLY)
 	if errno != 0 {
 		return

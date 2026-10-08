@@ -4,7 +4,7 @@
 
 ## 构建和运行
 
-需要 Linux、Go 1.23 或更新版本、FUSE（例如 Debian/Ubuntu 的 `fuse3`），以及可访问的 `/dev/fuse`。使用普通用户运行。容器需要额外开放 FUSE 设备与挂载权限。
+需要 Linux、Go 1.26 或更新版本、FUSE（例如 Debian/Ubuntu 的 `fuse3`），以及可访问的 `/dev/fuse`。使用普通用户运行。容器需要额外开放 FUSE 设备与挂载权限。
 
 ```bash
 cd mount123
@@ -127,6 +127,14 @@ MOUNT123_FUSE_TEST=1 go test -race -run TestActualFUSEMount -v ./internal/mountf
 只有实际读取图片才触发，`ls`、`stat`、仅打开不读取及普通 `find` 不触发；缩略图程序实际读图可能触发，无法确定用户的界面排序。启用预取时图片保持 `DIRECT_IO`，让每次实际读取都进入 FUSE 并推进正向或反向预取窗口。新的前台打开若命中正在预取的目标则复用填充，否则取消旧预取，后台任务最多运行 30 秒，不递归触发更多预取。256 MiB 是每轮目标图片总大小预算，超预算图片只跳过预取，前台读取不受此限制；固实包的前序读取量可能更大。复用现有磁盘缓存与并发填充合并，预取失败不影响正常读取。`-prefetch-files=0` 可完全关闭。该功能是跨图片预测，与单文件字节级自适应预读分别控制。
 
 详细设计与参考资料见 [挂载图片预取设计](../docs/design/mount-prefetch.md)。
+
+## ISO 光盘镜像目录
+
+默认启用 `-iso-dirs=true`，云目录中的 `.iso` / `.ISO` 可直接作为只读目录进入。支持 ISO9660、Joliet 中文长文件名、Rock Ridge 和常见 UDF（含元数据分区）；桥接镜像优先使用 UDF。`-iso-dirs=false` 恢复原始文件读取，与 `-zip-dirs` 独立。
+
+进入时只读取卷与所需目录元数据，内部文件通过直链 Range 按需读取，并复用现有缓存、顺序预读及相邻图片预取。普通文件无需完整下载镜像，也无需 root、loop 设备或为每个镜像另行挂载。镜像内的归档或另一份镜像暂时作为普通文件呈现。
+
+本版尚不支持多 extent ISO Level 3、交错 ISO、Rock Ridge SF/zisofs ZF 数据和 UDF virtual/sparable 分区，遇到这些布局会报错；UDF 多区间文件、稀疏洞和 Blu-ray 实时文件（M2TS/SSIF）按分区映射读取。UDF 库的本地补丁支持有界的长分配链，已验证真实 9.8 GB 成员的尾部随机读取。不会解密 DVD/Blu-ray 内容保护。格式边界、缓存及库选型见 [只读光盘镜像设计](../docs/design/mount-disc-images.md)。
 
 ## 大型 RAR 首次列目录
 

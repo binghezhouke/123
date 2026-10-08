@@ -73,6 +73,10 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 	if !n.item.directory {
 		return nil, false, syscall.ENOTDIR
 	}
+	if n.isDisc() {
+		entries, err := n.lookupDisc(ctx, name)
+		return entries, false, err
+	}
 	idx, source, a, handled, err := n.progressiveRAR(ctx)
 	if handled {
 		if err != nil {
@@ -157,6 +161,9 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 // Reopening observes newer entries; an ordinary ls can always reach this
 // snapshot's EOF without waiting for a large archive to finish scanning.
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if n.isDisc() {
+		return n.opendirDisc(ctx)
+	}
 	idx, source, archive, handled, err := n.progressiveRAR(ctx)
 	if !handled {
 		if n.item.directory && n.item.cloud != nil && n.item.cloud.IsDir && n.item.source == nil {

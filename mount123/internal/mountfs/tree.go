@@ -50,6 +50,7 @@ type PasswordAPI interface {
 // Options sets mount-local metadata and source reuse lifetimes. Zero values
 // select documented defaults.
 type Options struct {
+	DisableISODirs          bool
 	ReadAheadMaxBytes       int64
 	DisableReadAhead        bool
 	PrefetchFiles           int
@@ -145,6 +146,7 @@ type directoryPin struct {
 	handleBytes int64
 }
 type entry struct {
+	disc        *discEntry
 	name        string
 	cloud       *panapi.File
 	member      *member
@@ -550,7 +552,7 @@ func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 	t := n.tree
 	key := t.cloudCacheKey(f)
 	ttl := t.opts.SourceTTL
-	if t.zipDirs && f.Version != "" && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z") {
+	if f.Version != "" && ((t.zipDirs && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z")) || n.isDisc()) {
 		ttl = max(ttl, 6*24*time.Hour)
 	}
 	value, err := t.loadMeta(ctx, "source:"+key, ttl, func(ctx context.Context) (any, int64, error) {
@@ -569,6 +571,9 @@ func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 	if !n.item.directory {
 		return nil, syscall.ENOTDIR
+	}
+	if n.isDisc() {
+		return n.listDisc(ctx)
 	}
 	if n.item.cloud != nil && !n.item.cloud.IsDir || n.item.source != nil {
 		source := n.item.source
@@ -920,7 +925,9 @@ func (n *Node) getattrEntry(_ context.Context, item *entry, out *fuse.AttrOut, r
 	out.Mode = modeForEntry(item)
 	out.Nlink = 1
 	if !item.directory {
-		if item.member != nil {
+		if item.disc != nil {
+			out.Size = item.disc.size
+		} else if item.member != nil {
 			out.Size = item.member.size
 		} else {
 			out.Size = uint64(item.cloud.Size)
@@ -932,6 +939,10 @@ func (n *Node) getattrEntry(_ context.Context, item *entry, out *fuse.AttrOut, r
 			file = n.tree.cachedCloudMetadata(file)
 		}
 		setFileTimes(&out.Attr, *file)
+	}
+	if item.disc != nil {
+		setFuseTime(&out.Mtime, &out.Mtimensec, item.disc.modified)
+		setFuseTime(&out.Ctime, &out.Ctimensec, item.disc.modified)
 	}
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
@@ -985,6 +996,9 @@ func stableAttrForEntry(parentIno uint64, e *entry) fs.StableAttr {
 	}
 	if e.member != nil {
 		fmt.Fprintf(hash, ":%s:%d:%d", e.member.name, e.member.crc, e.member.size)
+	}
+	if e.disc != nil {
+		fmt.Fprintf(hash, ":disc:%s:%d", e.disc.path, e.disc.size)
 	}
 	ino := hash.Sum64()
 	if ino < 2 {
@@ -1063,6 +1077,9 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 	}
 	if n.item.directory {
 		return nil, 0, syscall.EISDIR
+	}
+	if n.item.disc != nil {
+		return n.openDisc(ctx)
 	}
 	if n.item.member == nil {
 		source, err := n.source(ctx)

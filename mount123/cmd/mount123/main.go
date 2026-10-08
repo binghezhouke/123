@@ -83,6 +83,7 @@ func run() error {
 	archivePageCache := flag.Bool("archive-page-cache", true, "allow the kernel to cache fully materialized archive members")
 	streamMembers := flag.Bool("stream-members", true, "stream large compressed archive members while they are being verified")
 	zipDirs := flag.Bool("zip-dirs", true, "expose ZIP, 7z and RAR archives as directories")
+	isoDirs := flag.Bool("iso-dirs", true, "expose ISO9660 and UDF optical images as read-only directories")
 	prefetchFiles := flag.Int("prefetch-files", 9, "maximum adjacent images to prefetch (0 disables)")
 	prefetchWorkers := flag.Int("prefetch-workers", 2, "maximum background image reads")
 	prefetchMiB := flag.Int64("prefetch-mib", 256, "maximum target image bytes per prefetch window in MiB")
@@ -183,7 +184,7 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Fail authentication/list errors before installing a mount.
-	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableStreamMembers: !*streamMembers, DisableArchivePageCache: !*archivePageCache, ReadAheadMaxBytes: *readAheadMiB << 20, DisableReadAhead: *readAheadMiB == 0})
+	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{DisableISODirs: !*isoDirs, MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableStreamMembers: !*streamMembers, DisableArchivePageCache: !*archivePageCache, ReadAheadMaxBytes: *readAheadMiB << 20, DisableReadAhead: *readAheadMiB == 0})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}
