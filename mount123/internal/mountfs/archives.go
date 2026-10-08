@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"hash/crc32"
 	"io"
 	iofs "io/fs"
@@ -225,7 +226,7 @@ func (t *Tree) waitArchiveIndex(ctx context.Context, key string, wait time.Durat
 		call = &sourceCall{done: make(chan struct{}), updated: make(chan struct{})}
 		t.archiveTasks[key] = call
 		go func() {
-			ctx, cancel := context.WithTimeout(t.ctx, 30*time.Minute)
+			ctx, cancel := context.WithTimeout(workqueue.Background(t.ctx), 30*time.Minute)
 			defer cancel()
 			call.value, call.err = build(ctx)
 			t.mu.Lock()
@@ -434,12 +435,11 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	}
 	key := identity + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + passwordTag(t.passwordKey, a, password)
 	cached, err := t.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
-		select {
-		case t.builds <- struct{}{}:
-		case <-ctx.Done():
-			return ctx.Err()
+		release, err := t.acquireBuild(ctx)
+		if err != nil {
+			return err
 		}
-		defer func() { <-t.builds }()
+		defer release()
 		return archiveReadError(ctx, extractArchiveMember(ctx, reader, size, m, password, w), password)
 	})
 	if err != nil {

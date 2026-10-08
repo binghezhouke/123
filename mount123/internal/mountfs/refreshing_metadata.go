@@ -2,6 +2,7 @@ package mountfs
 
 import (
 	"context"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"time"
 )
 
@@ -29,17 +30,15 @@ func (t *Tree) loadRefreshingMeta(ctx context.Context, key string, ttl time.Dura
 		}
 		t.refreshing[key] = true
 		go func() {
-			refreshCtx, cancel := context.WithTimeout(t.ctx, 45*time.Second)
+			refreshCtx, cancel := context.WithTimeout(workqueue.Background(t.ctx), 45*time.Second)
 			defer cancel()
 			var fresh any
 			var size int64
 			var err error
-			select {
-			case t.builds <- struct{}{}:
+			release, err := t.acquireBuild(refreshCtx)
+			if err == nil {
 				fresh, size, err = build(refreshCtx)
-				<-t.builds
-			case <-refreshCtx.Done():
-				err = refreshCtx.Err()
+				release()
 			}
 			if err == nil {
 				err = refreshCtx.Err()

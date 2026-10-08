@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"io"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type flight struct {
 // Cache is a persistent, size-bounded cache. Its directory is exclusively
 // owned by one process for the lifetime of the Cache.
 type Cache struct {
+	downloadGate        *workqueue.Gate
 	links               map[string]cachedLink
 	linkFlights         map[string]chan struct{}
 	mu                  sync.Mutex
@@ -133,6 +135,10 @@ func (c *Cache) evictLocked(need int64) error {
 // Acquire returns a pinned handle for key, filling and atomically publishing it
 // on a miss. Concurrent misses for the same key share one fill operation.
 func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(context.Context, io.Writer) error) (*Handle, error) {
+	return c.acquire(ctx, key, size, c.filename(key), fill)
+}
+
+func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath string, fill func(context.Context, io.Writer) error) (*Handle, error) {
 	if size < 0 || size > c.max {
 		return nil, syscall.ENOSPC
 	}
@@ -196,11 +202,11 @@ func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(c
 		c.flights[id] = f
 		c.reserved += size
 		c.mu.Unlock()
-		f.err = c.fill(ctx, key, size, fill)
+		f.err = c.fill(ctx, targetPath, size, fill)
 		c.mu.Lock()
 		c.reserved -= size
 		if f.err == nil && !c.closed {
-			p := c.filename(key)
+			p := targetPath
 			st, err := os.Stat(p)
 			if err != nil || st.Size() != size {
 				f.err = fmt.Errorf("cache fill published invalid file")
@@ -209,7 +215,7 @@ func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(c
 				c.used += size
 			}
 		} else if f.err == nil {
-			_ = os.Remove(c.filename(key))
+			_ = os.Remove(targetPath)
 		}
 		delete(c.flights, id)
 		close(f.done)
@@ -220,7 +226,7 @@ func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(c
 	}
 }
 
-func (c *Cache) fill(ctx context.Context, key string, size int64, fill func(context.Context, io.Writer) error) error {
+func (c *Cache) fill(ctx context.Context, targetPath string, size int64, fill func(context.Context, io.Writer) error) error {
 	if fill == nil {
 		return errors.New("cache fill callback is nil")
 	}
@@ -250,7 +256,7 @@ func (c *Cache) fill(ctx context.Context, key string, size int64, fill func(cont
 	if err = tmp.Close(); err != nil {
 		return err
 	}
-	if err = os.Rename(temp, c.filename(key)); err != nil {
+	if err = os.Rename(temp, targetPath); err != nil {
 		return err
 	}
 	return nil

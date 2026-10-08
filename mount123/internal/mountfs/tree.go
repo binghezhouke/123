@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"hash/crc32"
 	"hash/fnv"
 	"io"
@@ -109,6 +110,8 @@ type Tree struct {
 	metaBytes        int64
 	seq              uint64
 	builds           chan struct{}
+	buildGate        *workqueue.Gate
+	buildOnce        sync.Once
 	sources          map[string]*sourceCall
 	archiveTasks     map[string]*sourceCall
 	refreshing       map[string]bool
@@ -274,14 +277,10 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 		var value any
 		var size int64
 		var err error
-		select {
-		case t.builds <- struct{}{}:
-			if err = ctx.Err(); err == nil {
-				value, size, err = build(ctx)
-			}
-			<-t.builds
-		case <-ctx.Done():
-			err = ctx.Err()
+		release, err := t.acquireBuild(ctx)
+		if err == nil {
+			value, size, err = build(ctx)
+			release()
 		}
 		if err == nil {
 			err = ctx.Err()
@@ -966,7 +965,14 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		defer clear(password)
 		tag := passwordTag(n.tree.passwordKey, n.item.archive, password)
 		key := src.Key() + ":encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
-		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error { return encryptedMember(ctx, src, full, password, w) })
+		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
+			release, err := n.tree.acquireBuild(ctx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			return encryptedMember(ctx, src, full, password, w)
+		})
 		if err != nil {
 			if isPasswordError(err) {
 				return nil, 0, syscall.EACCES
@@ -988,7 +994,14 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		return &handle{remote: src, base: offset, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
 	}
-	cached, err := n.tree.cache.Acquire(ctx, src.Key()+":member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error { return inflateMember(ctx, src, full, w) })
+	cached, err := n.tree.cache.Acquire(ctx, src.Key()+":member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
+		release, err := n.tree.acquireBuild(ctx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return inflateMember(ctx, src, full, w)
+	})
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}

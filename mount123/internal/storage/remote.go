@@ -174,12 +174,18 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 				req.Header.Set("If-Unmodified-Since", r.modified)
 			}
 		}
+		release, err := r.cache.acquireTransfer(cctx)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
 		resp, err := r.client.Do(req)
 		if err != nil {
+			release()
 			cancel()
 			return nil, contextError(ctx, err, "remote range request failed")
 		}
-		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: cancel}
+		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: func() { cancel(); release() }}
 		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) && attempt == 0 {
 			resp.Body.Close()
 			if err = r.refresh(ctx); err != nil {

@@ -2,6 +2,7 @@ package mountfs
 
 import (
 	"context"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"io"
 	"path"
 	"sort"
@@ -131,7 +132,7 @@ func (p *imagePrefetch) observe(n *Node) {
 	if p.cancel != nil {
 		p.cancel()
 	}
-	ctx, cancel := context.WithTimeout(p.tree.ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(workqueue.Background(p.tree.ctx), 30*time.Second)
 	p.cancel = cancel
 	p.generation++
 	generation := p.generation
