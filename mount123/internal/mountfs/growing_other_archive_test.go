@@ -64,26 +64,14 @@ func readGrowingOtherMember(t *testing.T, node *Node) []byte {
 
 func waitForGrowingCacheEntry(t *testing.T, ctx context.Context, node *Node, key string, growing *storage.GrowingHandle) {
 	t.Helper()
-	if waiter, ok := any(growing).(interface{ Wait(context.Context) error }); ok {
-		if err := waiter.Wait(ctx); err != nil {
-			t.Fatalf("wait for growing member: %v", err)
-		}
+	if err := growing.Wait(ctx); err != nil {
+		t.Fatalf("wait for growing member: %v", err)
 	}
-	for {
-		h, err := node.tree.cache.Open(key)
-		if err == nil {
-			_ = h.Close()
-			return
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("open materialized growing member: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("growing member was not materialized: %v", ctx.Err())
-		case <-time.After(time.Millisecond):
-		}
+	h, err := node.tree.cache.Open(key)
+	if err != nil {
+		t.Fatalf("open materialized growing member: %v", err)
 	}
+	_ = h.Close()
 }
 
 func TestGrowingOtherArchivesReadSplit7zAndSolidRAR(t *testing.T) {

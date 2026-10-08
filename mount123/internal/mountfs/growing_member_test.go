@@ -171,16 +171,9 @@ func TestLargeZIPCRCErrorIsReturnedAndNotCached(t *testing.T) {
 	defer h.(fs.FileReleaser).Release(context.Background())
 	waitCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	for {
-		result, readErrno := h.(fs.FileReader).Read(waitCtx, make([]byte, 4096), int64(len(content)-4096))
-		errno = readErrno
-		if result != nil {
-			result.Done()
-		}
-		if errno != 0 || waitCtx.Err() != nil {
-			break
-		}
-		time.Sleep(time.Millisecond)
+	result, errno := h.(fs.FileReader).Read(waitCtx, make([]byte, 4096), int64(len(content)-4096))
+	if result != nil {
+		result.Done()
 	}
 	if errno != syscall.EIO {
 		t.Fatalf("checksum failure Read errno=%v, want EIO", errno)
