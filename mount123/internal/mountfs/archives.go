@@ -465,6 +465,28 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 		return nil, 0, toErrno(err)
 	}
 	key := t.diskCacheScope() + ":" + identity + ":" + archiveKind(a.name) + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
+	streamPassword := append([]byte(nil), password...)
+	if growing, err := n.acquireGrowingMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+		defer clear(streamPassword)
+		// Bind the archive reader to the shared fill's lifetime, not this Open
+		// request. Volume discovery happens before taking a build slot.
+		fillReader, fillSize, _, err := t.archiveSource(fillCtx, n.item.source, a)
+		if err != nil {
+			return err
+		}
+		release, err := t.acquireBuild(fillCtx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return archiveReadError(fillCtx, extractArchiveMember(fillCtx, fillReader, fillSize, m, streamPassword, w), streamPassword)
+	}); err != nil {
+		clear(streamPassword)
+		return nil, 0, toErrno(err)
+	} else if growing != nil {
+		return &handle{growing: growing, closer: growing, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+	}
+	clear(streamPassword)
 	cached, err := t.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := t.acquireBuild(ctx)
 		if err != nil {

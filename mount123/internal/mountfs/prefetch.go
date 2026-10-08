@@ -2,7 +2,6 @@ package mountfs
 
 import (
 	"context"
-	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"io"
 	"path"
 	"sort"
@@ -11,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -269,13 +269,37 @@ func prefetchImage(ctx context.Context, n *Node) {
 		return
 	}
 	defer h.(fs.FileReleaser).Release(context.Background())
-	// Compressed/decrypted members are already materialized by Open. Direct
-	// cloud/Store handles need reads to populate the shared 1 MiB block cache.
+	// Growing members must be consumed to completion here; releasing the last
+	// reference early would cancel their shared fill. Direct cloud/Store handles
+	// are read to populate the shared 1 MiB block cache.
 	handle, ok := h.(*handle)
-	if !ok || handle.remote == nil {
+	if !ok {
 		return
 	}
 	buffer := make([]byte, 1<<20)
+	if growing := handle.growing; growing != nil {
+		for off := uint64(0); off < handle.size; {
+			if ctx.Err() != nil {
+				return
+			}
+			length := uint64(len(buffer))
+			if length > handle.size-off {
+				length = handle.size - off
+			}
+			count, err := growing.ReadAt(ctx, buffer[:length], int64(off))
+			off += uint64(count)
+			if err != nil && err != io.EOF {
+				return
+			}
+			if count == 0 {
+				return
+			}
+		}
+		return
+	}
+	if handle.remote == nil {
+		return
+	}
 	for off := uint64(0); off < handle.size; {
 		if ctx.Err() != nil {
 			return

@@ -51,6 +51,7 @@ type Cache struct {
 	ranges              map[string][]*cacheRange
 	rangeFlights        map[string][]*rangeFlight
 	flights             map[string]*flight
+	growing             map[string]*growingFlight
 	lock                *os.File
 	identityKey         [32]byte
 	durable             bool
@@ -82,7 +83,7 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), lock: lock, durable: true}
+	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -385,6 +386,16 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 			_ = os.Remove(e.path)
 			c.removeEntryLocked(id, e)
 		}
+		if growing := c.growing[id]; growing != nil {
+			done := growing.done
+			c.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-done:
+				continue
+			}
+		}
 		if f := c.flights[id]; f != nil {
 			done := f.done
 			c.mu.Unlock()
@@ -512,6 +523,10 @@ func (c *Cache) Close() error {
 		for _, f := range group {
 			pending = append(pending, f.done)
 		}
+	}
+	for _, f := range c.growing {
+		f.cancel()
+		pending = append(pending, f.done)
 	}
 	c.mu.Unlock()
 	for _, done := range pending {

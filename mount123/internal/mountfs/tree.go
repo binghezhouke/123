@@ -66,9 +66,17 @@ type Options struct {
 	MaxConcurrentBuilds     int
 	RefreshFileMetadata     bool
 	DisableArchivePageCache bool
+	// StreamMembers lets large compressed members become readable before the
+	// complete member has passed checksum validation. Small members retain the
+	// strict, fully-verified Open behavior.
+	DisableStreamMembers  bool
+	StreamMemberThreshold int64
 }
 
 func defaults(o Options) Options {
+	if o.StreamMemberThreshold <= 0 {
+		o.StreamMemberThreshold = 8 << 20
+	}
 	if o.DirectoryTTL <= 0 {
 		o.DirectoryTTL = 30 * time.Second
 	}
@@ -1035,6 +1043,25 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		defer clear(password)
 		tag := n.tree.passwordTag(n.item.archive, password)
 		key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
+		streamPassword := append([]byte(nil), password...)
+		if growing, err := n.acquireGrowingMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+			defer clear(streamPassword)
+			release, err := n.tree.acquireBuild(fillCtx)
+			if err != nil {
+				return err
+			}
+			defer release()
+			return encryptedMember(fillCtx, src, full, streamPassword, w)
+		}); err != nil {
+			clear(streamPassword)
+			if isPasswordError(err) {
+				return nil, 0, syscall.EACCES
+			}
+			return nil, 0, toErrno(err)
+		} else if growing != nil {
+			return &handle{growing: growing, closer: growing, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+		}
+		clear(streamPassword)
 		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 			release, err := n.tree.acquireBuild(ctx)
 			if err != nil {
@@ -1064,7 +1091,20 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		return n.newRemoteHandle(src, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
 	}
-	cached, err := n.tree.cache.Acquire(ctx, n.tree.diskCacheScope()+":"+src.Key()+":.zip:member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
+	key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:member:" + m.name + fmt.Sprintf(":%08x:%d", m.crc, m.size)
+	if growing, err := n.acquireGrowingMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+		release, err := n.tree.acquireBuild(fillCtx)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return inflateMember(fillCtx, src, full, w)
+	}); err != nil {
+		return nil, 0, toErrno(err)
+	} else if growing != nil {
+		return &handle{growing: growing, closer: growing, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+	}
+	cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(ctx)
 		if err != nil {
 			return err
@@ -1091,6 +1131,20 @@ func (n *Node) newRemoteHandle(remote *storage.Remote, base int64, size uint64) 
 		h.readAhead = newReadAhead(n.tree.ctx, remote, base, size, n.tree.opts.ReadAheadMaxBytes)
 	}
 	return h
+}
+
+// acquireGrowingMember returns nil when strict full-member verification should
+// be preserved (small members or a strict-read mount).
+func (n *Node) acquireGrowingMember(ctx context.Context, key string, size uint64, fill func(context.Context, io.Writer) error) (*storage.GrowingHandle, error) {
+	if size > math.MaxInt64 || n.tree.opts.DisableStreamMembers || int64(size) < n.tree.opts.StreamMemberThreshold {
+		return nil, nil
+	}
+	lifetime := n.tree.ctx
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	h, err := n.tree.cache.AcquireGrowing(ctx, lifetime, key, int64(size), fill)
+	return h, err
 }
 
 type contextRemote struct {
@@ -1142,6 +1196,7 @@ type handle struct {
 	base      int64
 	size      uint64
 	readAhead *readAhead
+	growing   *storage.GrowingHandle
 }
 
 func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -1161,6 +1216,8 @@ func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 	var err error
 	if h.remote != nil {
 		n, err = h.remote.ReadAtContext(ctx, dest, h.base+off)
+	} else if h.growing != nil {
+		n, err = h.growing.ReadAt(ctx, dest, off)
 	} else {
 		n, err = h.reader.ReadAt(dest, off)
 	}
