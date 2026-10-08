@@ -79,9 +79,12 @@ func TestLargeZIPMemberStreamsBeforeLaterRangeAndWaitsForTail(t *testing.T) {
 	fs.NewNodeFS(root, &fs.Options{})
 	archiveNode := lookup(t, root, "large.zip")
 	member := lookup(t, archiveNode, "large.bin")
-	h, _, errno := member.Open(ctx, syscall.O_RDONLY)
+	h, flags, errno := member.Open(ctx, syscall.O_RDONLY)
 	if errno != 0 {
 		t.Fatalf("Open: %v", errno)
+	}
+	if flags != fuse.FOPEN_DIRECT_IO {
+		t.Fatalf("incomplete member flags = %x, want DIRECT_IO", flags)
 	}
 	defer h.(fs.FileReleaser).Release(context.Background())
 	select {

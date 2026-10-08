@@ -17,7 +17,6 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/bodgit/sevenzip"
 	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/nwaples/rardecode/v2"
 )
 
@@ -485,7 +484,7 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 		clear(streamPassword)
 		return nil, 0, toErrno(err)
 	} else if growing != nil {
-		return &handle{growing: growing, closer: growing, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+		return &handle{growing: growing, closer: growing, size: m.size}, n.tree.growingCacheOpenFlags(growing), 0
 	}
 	clear(streamPassword)
 	cached, err := t.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {

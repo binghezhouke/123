@@ -276,30 +276,16 @@ func prefetchImage(ctx context.Context, n *Node) {
 	if !ok {
 		return
 	}
-	buffer := make([]byte, 1<<20)
 	if growing := handle.growing; growing != nil {
-		for off := uint64(0); off < handle.size; {
-			if ctx.Err() != nil {
-				return
-			}
-			length := uint64(len(buffer))
-			if length > handle.size-off {
-				length = handle.size - off
-			}
-			count, err := growing.ReadAt(ctx, buffer[:length], int64(off))
-			off += uint64(count)
-			if err != nil && err != io.EOF {
-				return
-			}
-			if count == 0 {
-				return
-			}
-		}
+		// Wait through checksum validation and publication. Receiving the last
+		// output byte alone is not enough to keep the completed cache entry.
+		_ = growing.Wait(ctx)
 		return
 	}
 	if handle.remote == nil {
 		return
 	}
+	buffer := make([]byte, 1<<20)
 	for off := uint64(0); off < handle.size; {
 		if ctx.Err() != nil {
 			return

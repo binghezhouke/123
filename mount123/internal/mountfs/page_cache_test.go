@@ -151,7 +151,7 @@ func TestActualFUSEMaterializedArchivePageCacheAndVersionIsolation(t *testing.T)
 		time.Sleep(10 * time.Millisecond)
 	}
 	root.tree.mu.Lock()
-	listing := root.tree.meta["dir:0"].value.(map[string]*entry)
+	listing := root.tree.meta["dir:0"].value.(*cloudDirectory).entries
 	updated := listing["archive.zip"].cloud.Version == "v2"
 	root.tree.mu.Unlock()
 	if !updated {
@@ -176,5 +176,37 @@ func TestActualFUSEMaterializedArchivePageCacheAndVersionIsolation(t *testing.T)
 	}
 	if !bytes.Equal(current, newContent) {
 		t.Fatal(fmt.Sprintf("new handle returned %q instead of the new version", current[:1]))
+	}
+}
+
+// Prefetch must retain a growing member through checksum verification and
+// cache publication, so the next open can use the kernel page cache.
+func TestPrefetchedGrowingMemberReopensFromMaterializedCache(t *testing.T) {
+	root := fixtureArchive(t, pageCacheZIP(t, 'P'))
+	root.tree.opts.StreamMemberThreshold = 1
+	fs.NewNodeFS(root, &fs.Options{})
+	node := lookup(t, lookup(t, root, "photos.zip"), "payload.bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	prefetchImage(ctx, node)
+	if ctx.Err() != nil {
+		t.Fatal(ctx.Err())
+	}
+	h, flags, errno := node.Open(ctx, syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	defer h.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatalf("prefetched member flags = %x, want KEEP_CACHE", flags)
+	}
+	result, errno := h.(fs.FileReader).Read(ctx, make([]byte, 64<<10), 0)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	defer result.Done()
+	data, status := result.Bytes(nil)
+	if status != fuse.OK || !bytes.Equal(data, bytes.Repeat([]byte{'P'}, 64<<10)) {
+		t.Fatal("materialized prefetch content differs")
 	}
 }

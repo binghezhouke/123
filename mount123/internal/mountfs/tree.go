@@ -1059,7 +1059,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			}
 			return nil, 0, toErrno(err)
 		} else if growing != nil {
-			return &handle{growing: growing, closer: growing, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+			return &handle{growing: growing, closer: growing, size: m.size}, n.tree.growingCacheOpenFlags(growing), 0
 		}
 		clear(streamPassword)
 		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
@@ -1102,7 +1102,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 	}); err != nil {
 		return nil, 0, toErrno(err)
 	} else if growing != nil {
-		return &handle{growing: growing, closer: growing, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+		return &handle{growing: growing, closer: growing, size: m.size}, n.tree.growingCacheOpenFlags(growing), 0
 	}
 	cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(ctx)
@@ -1116,6 +1116,13 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		return nil, 0, toErrno(err)
 	}
 	return &handle{reader: cached, closer: cached, size: m.size}, n.tree.archiveCacheOpenFlags(), 0
+}
+
+func (t *Tree) growingCacheOpenFlags(h *storage.GrowingHandle) uint32 {
+	if h.Materialized() {
+		return t.archiveCacheOpenFlags()
+	}
+	return fuse.FOPEN_DIRECT_IO
 }
 
 func (t *Tree) archiveCacheOpenFlags() uint32 {
@@ -1142,6 +1149,9 @@ func (n *Node) acquireGrowingMember(ctx context.Context, key string, size uint64
 	lifetime := n.tree.ctx
 	if lifetime == nil {
 		lifetime = context.Background()
+	}
+	if workqueue.IsBackground(ctx) {
+		lifetime = workqueue.Background(lifetime)
 	}
 	h, err := n.tree.cache.AcquireGrowing(ctx, lifetime, key, int64(size), fill)
 	return h, err

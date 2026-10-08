@@ -14,6 +14,12 @@ func Background(ctx context.Context) context.Context {
 	return context.WithValue(ctx, backgroundKey{}, true)
 }
 
+// IsBackground reports the scheduling priority inherited by an operation.
+func IsBackground(ctx context.Context) bool {
+	bg, _ := ctx.Value(backgroundKey{}).(bool)
+	return bg
+}
+
 // Gate reserves one slot for foreground work when capacity is at least two.
 // Queued foreground work also takes precedence when a slot becomes free.
 // Running jobs are not forcibly interrupted.
@@ -34,7 +40,7 @@ func (g *Gate) notify() {
 
 // Acquire returns an idempotent release function. The wait observes ctx.
 func (g *Gate) Acquire(ctx context.Context) (func(), error) {
-	bg, _ := ctx.Value(backgroundKey{}).(bool)
+	bg := IsBackground(ctx)
 	g.mu.Lock()
 	if !bg {
 		g.waiting++
