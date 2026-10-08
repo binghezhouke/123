@@ -141,7 +141,7 @@ func TestActualFUSEMaterializedArchivePageCacheAndVersionIsolation(t *testing.T)
 		entries := root.tree.meta["dir:0"]
 		updated := false
 		if entries != nil {
-			listing := entries.value.(map[string]*entry)
+			listing := entries.value.(*cloudDirectory).entries
 			updated = listing["archive.zip"] != nil && listing["archive.zip"].cloud.Version == "v2"
 		}
 		root.tree.mu.Unlock()
