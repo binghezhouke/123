@@ -184,6 +184,7 @@ type infoRequest struct {
 }
 
 var errInfoNotFound = errors.New("file metadata not found or trashed")
+var errDuplicateCloudName = errors.New("cloud directory contains duplicate names")
 
 const infoBatchMax = 100
 const infoQueueMax = 400
@@ -554,7 +555,7 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 		}
 		return idx.children(n.item.zipPath, source, size, archive), nil
 	}
-	return n.listCloud(ctx, fmt.Sprintf("dir:%d", n.item.cloud.ID))
+	return n.listCloud(ctx)
 }
 
 func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64) (*zipIndex, error) {
@@ -569,42 +570,6 @@ func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64) (
 		return nil, err
 	}
 	return value.(*zipIndex), nil
-}
-
-func (n *Node) listCloud(ctx context.Context, key string) (map[string]*entry, error) {
-	value, err := n.tree.loadRefreshingMeta(ctx, key, n.tree.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
-		files, err := n.tree.api.List(ctx, n.item.cloud.ID)
-		if err != nil {
-			return nil, 0, err
-		}
-		if len(files) > n.tree.opts.MaxEntries {
-			return nil, 0, fmt.Errorf("directory exceeds %d entries", n.tree.opts.MaxEntries)
-		}
-		result := make(map[string]*entry, len(files))
-		size := int64(128)
-		for _, f := range files {
-			if err := ctx.Err(); err != nil {
-				return nil, 0, err
-			}
-			if !validName(f.Name) {
-				return nil, 0, errors.New("cloud directory contains an invalid filename")
-			}
-			if _, exists := result[f.Name]; exists {
-				return nil, 0, errors.New("cloud directory contains duplicate names")
-			}
-			size += int64(256 + len(f.Name) + len(f.Version))
-			if size > n.tree.opts.MetadataBytes {
-				return nil, 0, fmt.Errorf("directory exceeds metadata budget; increase -metadata-mib")
-			}
-			ff := f
-			result[f.Name] = &entry{name: f.Name, cloud: &ff, directory: f.IsDir || (n.tree.zipDirs && archiveKind(f.Name) != "")}
-		}
-		return result, size, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return value.(map[string]*entry), nil
 }
 
 // ZIP index paths are represented by slash-separated components on the Node.

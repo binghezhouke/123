@@ -141,11 +141,14 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 		return nil, syscall.EACCES
 	}
 	key := fmt.Sprintf("password:%d:%s:%d:%d:%s", archive.id, archive.version, archive.size, archive.parentID, archive.name)
-	value, err := t.loadRefreshingMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
-		files, err := t.api.List(ctx, archive.parentID)
-		if err != nil {
-			return nil, 0, err
+	directory, err := t.cloudDirectory(ctx, archive.parentID)
+	if err != nil {
+		if errors.Is(err, errDuplicateCloudName) {
+			return nil, syscall.EACCES
 		}
+		return nil, err
+	}
+	value, err := t.loadRefreshingMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		wanted := archive.name + ".pwd"
 		if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {
 			wanted = archive.name[:len(archive.name)-4] + ".pwd"
@@ -154,7 +157,7 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 			id   int64
 			size int64
 		}
-		for _, f := range files {
+		for _, f := range directory.files {
 			if f.Name == wanted && !f.IsDir {
 				if found != nil {
 					return nil, 0, syscall.EACCES

@@ -73,16 +73,13 @@ func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *arc
 		return contextRemote{ctx: ctx, source: source}, a.size, archiveIdentity(source, a), nil
 	}
 	stem := a.name[:len(a.name)-4]
+	directory, err := t.cloudDirectory(ctx, a.parentID)
+	if err != nil {
+		return nil, 0, "", err
+	}
 	value, err := t.loadMeta(ctx, fmt.Sprintf("volumes:%d:%s", a.id, a.version), t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
-		files, err := t.api.List(ctx, a.parentID)
-		if err != nil {
-			return nil, 0, err
-		}
-		if len(files) > t.opts.MaxEntries {
-			return nil, 0, syscall.EFBIG
-		}
 		parts := map[int]panapi.File{}
-		for _, f := range files {
+		for _, f := range directory.files {
 			if !strings.HasPrefix(f.Name, stem+".") {
 				continue
 			}

@@ -70,41 +70,87 @@ func indexEntry(d *zipDir, path, name string, source *storage.Remote, a *archive
 	return nil
 }
 func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entry, bool, error) {
+	if !n.item.directory {
+		return nil, false, syscall.ENOTDIR
+	}
 	idx, source, a, handled, err := n.progressiveRAR(ctx)
-	if !handled {
-		entries, err := n.list(ctx)
+	if handled {
+		if err != nil {
+			return nil, false, err
+		}
+		timer := time.NewTimer(time.Second)
+		defer timer.Stop()
+		for {
+			idx.mu.RLock()
+			e := indexEntry(idx.dirLocked(n.item.zipPath), n.item.zipPath, name, source, a)
+			done, scanErr, changed := idx.complete, idx.scanErr, idx.changed
+			started := len(idx.root.order) > 0
+			idx.mu.RUnlock()
+			if e != nil {
+				return map[string]*entry{name: e}, false, nil
+			}
+			if done {
+				return nil, false, scanErr
+			}
+			if started {
+				return nil, true, nil
+			}
+			select {
+			case <-changed:
+			case <-ctx.Done():
+				return nil, false, ctx.Err()
+			case <-n.tree.ctx.Done():
+				return nil, false, n.tree.ctx.Err()
+			case <-timer.C:
+				return nil, true, nil
+			}
+		}
+	}
+	if n.item.directory && n.item.cloud != nil && n.item.cloud.IsDir && n.item.source == nil {
+		entries, err := n.lookupCloud(ctx, name)
 		return entries, false, err
+	}
+	// A lookup in a packed directory only needs the named member. Readdir
+	// retains list()'s complete child map and ordering behavior.
+	archive := n.item.archive
+	if archive == nil && n.item.cloud != nil {
+		f := n.item.cloud
+		archive = &archiveDescriptor{id: f.ID, parentID: f.ParentID, name: f.Name, version: f.Version, size: f.Size}
+	}
+	if archive == nil {
+		return nil, false, syscall.ENOTDIR
+	}
+	if archiveKind(archive.name) == "" {
+		return nil, false, syscall.ENOTDIR
+	}
+	packedSource := n.item.source
+	if packedSource == nil {
+		packedSource, err = n.source(ctx)
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	var index *zipIndex
+	if archiveKind(archive.name) == ".zip" {
+		index, err = n.tree.getZIP(ctx, packedSource, archive.size)
+	} else {
+		password, passwordErr := n.tree.otherPassword(ctx, archive)
+		if passwordErr != nil {
+			return nil, false, passwordErr
+		}
+		index, err = n.tree.otherIndex(ctx, packedSource, archive, password)
+		clear(password)
 	}
 	if err != nil {
 		return nil, false, err
 	}
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	for {
-		idx.mu.RLock()
-		e := indexEntry(idx.dirLocked(n.item.zipPath), n.item.zipPath, name, source, a)
-		done, scanErr, changed := idx.complete, idx.scanErr, idx.changed
-		started := len(idx.root.order) > 0
-		idx.mu.RUnlock()
-		if e != nil {
-			return map[string]*entry{name: e}, false, nil
-		}
-		if done {
-			return nil, false, scanErr
-		}
-		if started {
-			return nil, true, nil
-		}
-		select {
-		case <-changed:
-		case <-ctx.Done():
-			return nil, false, ctx.Err()
-		case <-n.tree.ctx.Done():
-			return nil, false, n.tree.ctx.Err()
-		case <-timer.C:
-			return nil, true, nil
-		}
+	index.mu.RLock()
+	e := indexEntry(index.dirLocked(n.item.zipPath), n.item.zipPath, name, packedSource, archive)
+	index.mu.RUnlock()
+	if e == nil {
+		return nil, false, nil
 	}
+	return map[string]*entry{name: e}, false, nil
 }
 
 // OpendirHandle freezes the currently discovered entries for this listing.
