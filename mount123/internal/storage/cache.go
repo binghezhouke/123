@@ -94,10 +94,76 @@ func (c *Cache) StableDigest(namespace, value string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// Open returns a pinned cache object without creating or filling it.
+func (c *Cache) Open(key string) (*Handle, error) {
+	id := cacheID(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, ErrClosed
+	}
+	e := c.entries[id]
+	if e == nil {
+		return nil, os.ErrNotExist
+	}
+	f, err := os.Open(e.path)
+	if err != nil {
+		if e.pins == 0 {
+			delete(c.entries, id)
+			c.used -= e.size
+		}
+		return nil, err
+	}
+	e.pins++
+	e.used = time.Now()
+	_ = os.Chtimes(e.path, e.used, e.used)
+	return &Handle{file: f, cache: c, key: id, size: e.size}, nil
+}
+
+// Store publishes data under key using the cache's regular byte budget,
+// private file mode and atomic fill semantics.
+func (c *Cache) Store(ctx context.Context, key string, data []byte) error {
+	h, err := c.Acquire(ctx, key, int64(len(data)), func(ctx context.Context, w io.Writer) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := w.Write(data)
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	return h.Close()
+}
+
+// Remove discards an unpinned cache object, such as an invalid persisted
+// metadata record. Missing objects are ignored.
+func (c *Cache) Remove(key string) error {
+	id := cacheID(key)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return ErrClosed
+	}
+	e := c.entries[id]
+	if e == nil {
+		return nil
+	}
+	if e.pins != 0 {
+		return syscall.EBUSY
+	}
+	if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	delete(c.entries, id)
+	c.used -= e.size
+	return nil
+}
+
 func (c *Cache) loadIdentityKey() error {
 	path := filepath.Join(c.dir, ".identity-hmac-key")
 	read := func() error {
-		f, err := os.Open(path)
+		f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if err != nil {
 			return err
 		}
@@ -129,7 +195,14 @@ func (c *Cache) loadIdentityKey() error {
 	if err != nil {
 		return err
 	}
-	if _, err = f.Write(c.identityKey[:]); err == nil {
+	n := 0
+	if n, err = f.Write(c.identityKey[:]); err == nil && n != len(c.identityKey) {
+		err = io.ErrShortWrite
+	}
+	if err == nil {
+		err = f.Chmod(0600)
+	}
+	if err == nil {
 		err = f.Sync()
 	}
 	closeErr := f.Close()

@@ -209,6 +209,142 @@ func zipReadAt(r io.ReaderAt, p []byte, off int64) error {
 	return io.ErrUnexpectedEOF
 }
 
+// zipLocalHeaderOffsets returns central-directory local-header offsets in
+// archive/zip's entry order. The records contain the offsets needed to rebuild
+// the mount index without retaining zip.File's reader pointer.
+func zipLocalHeaderOffsets(r io.ReaderAt, size int64, maxEntries int) ([]int64, error) {
+	if size < zipEOCDLen {
+		return nil, errors.New("ZIP end record is missing")
+	}
+	tailLen := int64(zipEOCDMaxTail)
+	if size < tailLen {
+		tailLen = size
+	}
+	tail := make([]byte, int(tailLen))
+	if err := zipReadAt(r, tail, size-tailLen); err != nil {
+		return nil, err
+	}
+	var eocdPos int64 = -1
+	var eocd []byte
+	for i := len(tail) - zipEOCDLen; i >= 0; i-- {
+		if binary.LittleEndian.Uint32(tail[i:]) != zipEOCDSignature {
+			continue
+		}
+		commentLen := int(binary.LittleEndian.Uint16(tail[i+20:]))
+		if i+zipEOCDLen+commentLen > len(tail) {
+			continue
+		}
+		eocdPos, eocd = size-tailLen+int64(i), tail[i:i+zipEOCDLen]
+		break
+	}
+	if eocdPos < 0 {
+		return nil, errors.New("ZIP end record is missing or malformed")
+	}
+	entries := uint64(binary.LittleEndian.Uint16(eocd[10:]))
+	cdSize := uint64(binary.LittleEndian.Uint32(eocd[12:]))
+	cdOffset := uint64(binary.LittleEndian.Uint32(eocd[16:]))
+	directoryEnd := eocdPos
+	if entries == 0xffff || cdSize == 0xffffffff || cdOffset == 0xffffffff {
+		var locator [zip64LocatorLen]byte
+		if eocdPos < zip64LocatorLen || zipReadAt(r, locator[:], eocdPos-zip64LocatorLen) != nil || binary.LittleEndian.Uint32(locator[:]) != zip64LocatorSignature {
+			return nil, errors.New("ZIP64 locator is invalid")
+		}
+		zip64Offset := int64(binary.LittleEndian.Uint64(locator[8:]))
+		end, valid, err := readZIP64End(r, size, zip64Offset, eocdPos-zip64LocatorLen)
+		if err != nil {
+			return nil, err
+		}
+		if !valid {
+			zip64Offset = eocdPos - zip64LocatorLen - zip64EOCDMinLen
+			end, valid, err = readZIP64End(r, size, zip64Offset, eocdPos-zip64LocatorLen)
+			if err != nil || !valid {
+				return nil, errors.New("ZIP64 end record is invalid")
+			}
+		}
+		entries = binary.LittleEndian.Uint64(end[32:])
+		cdSize = binary.LittleEndian.Uint64(end[40:])
+		cdOffset = binary.LittleEndian.Uint64(end[48:])
+		directoryEnd = zip64Offset
+	}
+	if entries > uint64(maxEntries) || cdOffset > uint64(^uint64(0)>>1) || cdSize > uint64(^uint64(0)>>1) || uint64(directoryEnd) < cdOffset+cdSize {
+		return nil, errors.New("ZIP central directory offsets are invalid")
+	}
+	base := uint64(directoryEnd) - cdOffset - cdSize
+	start := int64(base + cdOffset)
+	limit := start + int64(cdSize)
+	if limit > size {
+		return nil, errors.New("ZIP central directory exceeds archive")
+	}
+	offsets := make([]int64, 0, int(entries))
+	pos := start
+	for i := uint64(0); i < entries; i++ {
+		var h [zipCentralHdrLen]byte
+		if err := zipReadAt(r, h[:], pos); err != nil || binary.LittleEndian.Uint32(h[:]) != zipCentralSignature {
+			return nil, errors.New("ZIP central directory record is invalid")
+		}
+		nameLen, extraLen, commentLen := int64(binary.LittleEndian.Uint16(h[28:])), int64(binary.LittleEndian.Uint16(h[30:])), int64(binary.LittleEndian.Uint16(h[32:]))
+		recordLen := int64(zipCentralHdrLen) + nameLen + extraLen + commentLen
+		if recordLen > limit-pos {
+			return nil, errors.New("ZIP central directory record is truncated")
+		}
+		extra := make([]byte, int(extraLen))
+		if extraLen > 0 {
+			if err := zipReadAt(r, extra, pos+zipCentralHdrLen+nameLen); err != nil {
+				return nil, err
+			}
+		}
+		local := uint64(binary.LittleEndian.Uint32(h[42:]))
+		if local == 0xffffffff {
+			var err error
+			local, err = zip64LocalHeaderOffset(extra, binary.LittleEndian.Uint32(h[24:]) == 0xffffffff, binary.LittleEndian.Uint32(h[20:]) == 0xffffffff)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if base > uint64(size) || local > uint64(size)-base || local > uint64(^uint64(0)>>1) {
+			return nil, errors.New("ZIP local header offset is invalid")
+		}
+		offsets = append(offsets, int64(base+local))
+		pos += recordLen
+	}
+	if pos != limit {
+		return nil, errors.New("ZIP central directory size does not match entries")
+	}
+	return offsets, nil
+}
+
+func zip64LocalHeaderOffset(extra []byte, needUncompressed, needCompressed bool) (uint64, error) {
+	for len(extra) >= 4 {
+		id, n := binary.LittleEndian.Uint16(extra), int(binary.LittleEndian.Uint16(extra[2:]))
+		extra = extra[4:]
+		if n > len(extra) {
+			return 0, errors.New("ZIP64 extra field is truncated")
+		}
+		data := extra[:n]
+		extra = extra[n:]
+		if id != 0x0001 {
+			continue
+		}
+		if needUncompressed {
+			if len(data) < 8 {
+				return 0, errors.New("ZIP64 size is truncated")
+			}
+			data = data[8:]
+		}
+		if needCompressed {
+			if len(data) < 8 {
+				return 0, errors.New("ZIP64 size is truncated")
+			}
+			data = data[8:]
+		}
+		if len(data) < 8 {
+			return 0, errors.New("ZIP64 local offset is missing")
+		}
+		return binary.LittleEndian.Uint64(data), nil
+	}
+	return 0, errors.New("ZIP64 local offset is missing")
+}
+
 func zipPreflightReadError(err error, fallback string) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled

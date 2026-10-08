@@ -252,13 +252,13 @@ func readAtFull(ctx context.Context, source *storage.Remote, p []byte, off int64
 }
 
 func encryptedMember(ctx context.Context, src *storage.Remote, m *member, password []byte, dst io.Writer) error {
-	if m.reader == nil || m.file == nil {
+	if m.reader == nil {
 		return errors.New("ZIP member index is unavailable")
 	}
 	if m.compressed > uint64(^uint64(0)>>1) || m.size > uint64(^uint64(0)>>1) {
 		return syscall.EFBIG
 	}
-	offset, err := m.reader.dataOffset(ctx, m.file)
+	offset, err := m.dataOffset(ctx)
 	if err != nil {
 		return err
 	}
@@ -276,7 +276,7 @@ func encryptedMember(ctx context.Context, src *storage.Remote, m *member, passwo
 	plainHeader := crypto.Decrypt(header[:])
 	check := byte(m.crc >> 24)
 	if m.flags&8 != 0 {
-		check = byte(m.file.ModifiedTime >> 8)
+		check = byte(m.modifiedTime >> 8)
 	}
 	if plainHeader[11] != check {
 		return ErrWrongZIPPassword

@@ -6,6 +6,7 @@ import (
 	"compress/flate"
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
@@ -70,9 +71,6 @@ func defaults(o Options) Options {
 	}
 	if o.SourceTTL <= 0 {
 		o.SourceTTL = 30 * time.Second
-	}
-	if o.ZIPIndexTTL <= 0 {
-		o.ZIPIndexTTL = 30 * time.Second
 	}
 	if o.MetadataBytes <= 0 {
 		o.MetadataBytes = 64 << 20
@@ -139,6 +137,8 @@ type member struct {
 	file             *zip.File
 	reader           *contextZIPReaderAt
 	name             string
+	headerOffset     int64
+	modifiedTime     uint16
 	method           uint16
 	flags            uint16
 	crc              uint32
@@ -258,7 +258,7 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 		}
 		t.mu.Lock()
 		if item := t.meta[key]; item != nil {
-			if time.Now().Before(item.expires) {
+			if item.expires.IsZero() || time.Now().Before(item.expires) {
 				t.seq++
 				item.seq = t.seq
 				value := item.value
@@ -313,7 +313,11 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 				t.metaBytes -= oldest.bytes
 			}
 			t.seq++
-			t.meta[key] = &metaItem{key: key, value: value, bytes: size, expires: time.Now().Add(ttl), seq: t.seq}
+			expires := time.Time{}
+			if ttl > 0 {
+				expires = time.Now().Add(ttl)
+			}
+			t.meta[key] = &metaItem{key: key, value: value, bytes: size, expires: expires, seq: t.seq}
 			t.metaBytes += size
 		}
 		flight.value, flight.err = value, err
@@ -497,10 +501,13 @@ func (t *Tree) finishInfoQueue(err error) {
 }
 
 func cloudKey(f *panapi.File) string { return fmt.Sprintf("cloud:%d:%s:%d", f.ID, f.Version, f.Size) }
+func (t *Tree) cloudCacheKey(f *panapi.File) string {
+	return t.diskCacheScope() + ":" + cloudKey(f)
+}
 func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 	f := n.item.cloud
-	key := cloudKey(f)
 	t := n.tree
+	key := t.cloudCacheKey(f)
 	ttl := t.opts.SourceTTL
 	if t.zipDirs && f.Version != "" && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z") {
 		ttl = max(ttl, 6*24*time.Hour)
@@ -548,7 +555,7 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 			defer clear(password)
 			idx, err = n.tree.otherIndex(ctx, source, archive, password)
 		} else {
-			idx, err = n.tree.getZIP(ctx, source, size)
+			idx, err = n.tree.getZIP(ctx, source, size, archive)
 		}
 		if err != nil {
 			return nil, err
@@ -558,12 +565,40 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 	return n.listCloud(ctx)
 }
 
-func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64) (*zipIndex, error) {
-	value, err := t.loadMeta(ctx, "zip:"+source.Key(), t.opts.ZIPIndexTTL, func(ctx context.Context) (any, int64, error) {
+func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor) (*zipIndex, error) {
+	identity := source.Key()
+	if archive != nil {
+		identity = archiveIdentity(source, archive)
+	}
+	var password []byte
+	if archive != nil {
+		if _, ok := t.api.(PasswordAPI); ok {
+			if value, err := t.archivePassword(ctx, archive); err == nil {
+				password = value
+			}
+		}
+	}
+	defer clear(password)
+	passwordIdentity := t.passwordTag(archive, password)
+	cacheKey := t.archiveIndexCacheKey(".zip", identity, archive, password)
+	identityDigest := ""
+	if t.cache != nil {
+		identityDigest = t.cache.StableDigest("archive-index-identity-v1", identity)
+	}
+	value, err := t.loadMeta(ctx, "zip:"+t.diskCacheScope()+":"+identity+":"+passwordIdentity, t.opts.ZIPIndexTTL, func(ctx context.Context) (any, int64, error) {
+		if idx, ok := t.loadPersistentArchiveIndex(ctx, cacheKey, ".zip", size, identityDigest); ok {
+			idx.attachZIPReader(source)
+			return idx, idx.bytes, nil
+		}
 		idx, err := buildZIP(ctx, t, source, size)
 		if err != nil {
 			return nil, 0, err
 		}
+		identityDigest := ""
+		if t.cache != nil {
+			identityDigest = t.cache.StableDigest("archive-index-identity-v1", identity)
+		}
+		t.persistArchiveIndex(ctx, cacheKey, ".zip", size, identityDigest, idx)
 		return idx, idx.bytes, nil
 	})
 	if err != nil {
@@ -650,6 +685,28 @@ func (r *contextZIPReaderAt) dataOffset(ctx context.Context, f *zip.File) (int64
 	err := r.withContext(ctx, func() error { var e error; off, e = f.DataOffset(); return e })
 	return off, err
 }
+func (m *member) dataOffset(ctx context.Context) (int64, error) {
+	if m.reader == nil || m.headerOffset < 0 {
+		return 0, errors.New("ZIP local header offset is unavailable")
+	}
+	var offset int64
+	err := m.reader.withContext(ctx, func() error {
+		var header [30]byte
+		if err := zipReadAt(m.reader, header[:], m.headerOffset); err != nil {
+			return err
+		}
+		if binary.LittleEndian.Uint32(header[:]) != 0x04034b50 {
+			return errors.New("ZIP local file header is invalid")
+		}
+		nameLen, extraLen := int64(binary.LittleEndian.Uint16(header[26:])), int64(binary.LittleEndian.Uint16(header[28:]))
+		if m.headerOffset > math.MaxInt64-30-nameLen-extraLen {
+			return syscall.EFBIG
+		}
+		offset = m.headerOffset + 30 + nameLen + extraLen
+		return nil
+	})
+	return offset, err
+}
 
 func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) (*zipIndex, error) {
 	adapter := &contextZIPReaderAt{source: source, ctx: ctx, gate: make(chan struct{}, 1)}
@@ -671,12 +728,24 @@ func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) 
 	if len(zr.File) > t.opts.MaxZIPEntries {
 		return nil, fmt.Errorf("ZIP exceeds %d entries", t.opts.MaxZIPEntries)
 	}
+	var localOffsets []int64
+	err = adapter.withIndexContext(ctx, func() error {
+		var e error
+		localOffsets, e = zipLocalHeaderOffsets(adapter, size, t.opts.MaxZIPEntries)
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(localOffsets) != len(zr.File) {
+		return nil, errors.New("ZIP local header index does not match central directory")
+	}
 	root := &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}
 	index := &zipIndex{root: root, members: map[string]*member{}}
 	bytes := int64(256)
 	nodes, names := 0, 0
 	seen := map[string]bool{}
-	for _, f := range zr.File {
+	for fileIndex, f := range zr.File {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -741,7 +810,7 @@ func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) 
 				if !f.Mode().IsRegular() || f.UncompressedSize64 > math.MaxInt64 {
 					return nil, errors.New("unsupported ZIP entry type or size")
 				}
-				m := &member{file: f, reader: adapter, name: f.Name, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
+				m := &member{file: f, reader: adapter, name: f.Name, headerOffset: localOffsets[fileIndex], modifiedTime: f.ModifiedTime, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
 				if hasAES {
 					m.aes = &aesInfo
 					m.method = aesInfo.method
@@ -760,6 +829,9 @@ func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) 
 		}
 	}
 	index.bytes = bytes
+	index.complete = true
+	index.changed = make(chan struct{})
+	close(index.changed)
 	return index, nil
 }
 func (r *contextZIPReaderAt) withIndexContext(ctx context.Context, fn func() error) error {
@@ -922,7 +994,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 	}
 	m := n.item.member
 	src := n.item.source
-	idx, err := n.tree.getZIP(ctx, src, n.item.archiveSize)
+	idx, err := n.tree.getZIP(ctx, src, n.item.archiveSize, n.item.archive)
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
@@ -937,7 +1009,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		defer clear(password)
 		tag := n.tree.passwordTag(n.item.archive, password)
-		key := n.tree.diskCacheScope() + ":" + src.Key() + ":encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
+		key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
 		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 			release, err := n.tree.acquireBuild(ctx)
 			if err != nil {
@@ -961,13 +1033,13 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		if m.compressed != m.size {
 			return nil, 0, syscall.EIO
 		}
-		offset, err := full.reader.dataOffset(ctx, full.file)
+		offset, err := full.dataOffset(ctx)
 		if err != nil {
 			return nil, 0, toErrno(err)
 		}
 		return &handle{remote: src, base: offset, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
 	}
-	cached, err := n.tree.cache.Acquire(ctx, n.tree.diskCacheScope()+":"+src.Key()+":member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
+	cached, err := n.tree.cache.Acquire(ctx, n.tree.diskCacheScope()+":"+src.Key()+":.zip:member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(ctx)
 		if err != nil {
 			return err
@@ -993,7 +1065,7 @@ func inflateMember(ctx context.Context, src *storage.Remote, m *member, w io.Wri
 	if m.compressed > math.MaxInt64 || m.size > math.MaxInt64 {
 		return errors.New("ZIP member size exceeds supported range")
 	}
-	offset, err := m.reader.dataOffset(ctx, m.file)
+	offset, err := m.dataOffset(ctx)
 	if err != nil {
 		return err
 	}

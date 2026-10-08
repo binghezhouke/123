@@ -59,6 +59,37 @@ func TestCachePinnedEvictionAndPersistence(t *testing.T) {
 	_ = h.Close()
 }
 
+func TestStableDigestPersistsAndKeyIsPrivate(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := c.StableDigest("password", "account\x00secret")
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(dir, ".identity-hmac-key")
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Fatalf("identity key mode = %o, want 600", info.Mode().Perm())
+	}
+	c, err = NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if got := c.StableDigest("password", "account\x00secret"); got != first {
+		t.Fatal("stable digest changed after cache reopen")
+	}
+	if got := c.StableDigest("password", "other-account\x00secret"); got == first {
+		t.Fatal("different account shared a stable digest")
+	}
+}
+
 func TestCacheFailedFillReleasesReservation(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 4)
 	if err != nil {

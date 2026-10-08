@@ -268,7 +268,16 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		reader = &metadataRemote{reader: source.NewMetadataReader(ctx), fileID: a.id, size: size, nextLog: time.Now().Add(30 * time.Second)}
 	}
 	key := "archive-index:" + archiveKind(a.name) + ":" + identity + ":" + t.passwordTag(a, password)
+	kind := archiveKind(a.name)
+	persistKey := t.archiveIndexCacheKey(kind, identity, a, password)
+	identityDigest := ""
+	if t.cache != nil {
+		identityDigest = t.cache.StableDigest("archive-index-identity-v1", identity)
+	}
 	value, err := t.loadMeta(ctx, key, 365*24*time.Hour, func(ctx context.Context) (any, int64, error) {
+		if idx, ok := t.loadPersistentArchiveIndex(ctx, persistKey, kind, size, identityDigest); ok {
+			return idx, idx.bytes, nil
+		}
 		started := time.Now()
 		log.Printf("archive index started: file_id=%d format=%s", a.id, archiveKind(a.name))
 		idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, changed: make(chan struct{})}
@@ -350,6 +359,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		if err != nil {
 			return nil, 0, archiveReadError(ctx, err, password)
 		}
+		t.persistArchiveIndex(ctx, persistKey, kind, size, identityDigest, idx)
 		return idx, idx.bytes, nil
 	})
 	if err != nil {
@@ -433,7 +443,7 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	key := t.diskCacheScope() + ":" + identity + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
+	key := t.diskCacheScope() + ":" + identity + ":" + archiveKind(a.name) + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
 	cached, err := t.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := t.acquireBuild(ctx)
 		if err != nil {

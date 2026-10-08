@@ -44,7 +44,7 @@ func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		}
 		if r.sources[i] == nil {
 			f := r.parts[i]
-			src, err := storage.NewRemoteContext(r.owner.ctx, r.ctx, r.owner.cache, cloudKey(&f), f.Size,
+			src, err := storage.NewRemoteContext(r.owner.ctx, r.ctx, r.owner.cache, r.owner.cloudCacheKey(&f), f.Size,
 				func(ctx context.Context) (string, error) { return r.owner.api.DownloadURL(ctx, f.ID) })
 			if err != nil {
 				return total, err
@@ -125,7 +125,7 @@ func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *arc
 		}
 		size += f.Size
 		reader.sizes = append(reader.sizes, f.Size)
-		keys = append(keys, cloudKey(&f))
+		keys = append(keys, t.cloudCacheKey(&f))
 	}
 	// The ordered parts and their pinned remote versions form the cache identity.
 	return reader, size, archiveIdentity(source, a) + ":" + strings.Join(keys, "|"), nil

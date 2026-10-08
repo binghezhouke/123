@@ -251,7 +251,7 @@ func TestImagePrefetchInflatesZIPMembersIntoSharedCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range []string{"2.jpg", "10.jpg"} {
-		key := root.tree.diskCacheScope() + ":" + source.Key() + ":member:" + name + fmt.Sprintf(":%08x:%d", crc32.ChecksumIEEE(content), len(content))
+		key := root.tree.diskCacheScope() + ":" + source.Key() + ":.zip:member:" + name + fmt.Sprintf(":%08x:%d", crc32.ChecksumIEEE(content), len(content))
 		cached, err := cache.Acquire(ctx, key, int64(len(content)), func(context.Context, io.Writer) error { t.Errorf("%s was not prefetched", name); return syscall.EIO })
 		if err != nil {
 			t.Fatal(err)

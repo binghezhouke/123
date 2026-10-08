@@ -11,6 +11,30 @@ type MemberLocator struct {
 	valid  bool
 }
 
+// LocatorRecord is the password-free, serializable part of a member location.
+type LocatorRecord struct {
+	Offset int64 `json:"offset"`
+	Solid  bool  `json:"solid"`
+	Valid  bool  `json:"valid"`
+}
+
+// ExportLocator returns immutable positioning metadata without reader or
+// password state.
+func ExportLocator(l MemberLocator) LocatorRecord {
+	return LocatorRecord{Offset: l.offset, Solid: l.solid, Valid: l.valid}
+}
+
+// ImportLocator validates persisted offsets against the current archive size.
+func ImportLocator(record LocatorRecord, archiveSize int64) (MemberLocator, error) {
+	if archiveSize <= 0 || record.Offset < 0 || record.Offset >= archiveSize {
+		return MemberLocator{}, ErrInvalidHeaderOff
+	}
+	if record.Valid && record.Offset < 7 {
+		return MemberLocator{}, ErrInvalidHeaderOff
+	}
+	return MemberLocator{offset: record.Offset, solid: record.Solid, valid: record.Valid}, nil
+}
+
 func (l MemberLocator) Direct() bool { return l.valid && !l.solid }
 
 // Walk visits headers without decoding member data or retaining all headers.
