@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -26,6 +27,10 @@ import (
 func main() {
 	if err := run(); err != nil {
 		log.Print(err)
+		var exitErr *commandExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.code)
+		}
 		os.Exit(1)
 	}
 }
@@ -35,6 +40,11 @@ func run() error {
 		defer stop()
 		return runUnlock(ctx, os.Args[2:], os.Stdin, os.Stderr, os.Stdout)
 	}
+	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "wait-index") {
+		ctx, stop := notifyContext()
+		defer stop()
+		return runControlCommand(ctx, os.Args[1:], os.Stderr, os.Stdout)
+	}
 	userCache, err := os.UserCacheDir()
 	if err != nil {
 		return err
@@ -42,6 +52,7 @@ func run() error {
 	configPath := flag.String("config", "config.json", "existing application config JSON (CLIENT_ID / CLIENT_SECRET)")
 	mountpoint := flag.String("mountpoint", "", "empty local directory to mount")
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
+	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
 	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and ZIP index cache budget in MiB")
@@ -85,6 +96,9 @@ func run() error {
 	if err = os.MkdirAll(*cacheDir, 0700); err != nil {
 		return err
 	}
+	if err = os.Chmod(*cacheDir, 0700); err != nil {
+		return err
+	}
 	cacheAbs, err := filepath.EvalSymlinks(*cacheDir)
 	if err != nil {
 		return err
@@ -99,6 +113,17 @@ func run() error {
 	}
 	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))) {
 		return fmt.Errorf("cache directory must be outside mountpoint")
+	}
+	socketPath := *controlSocket
+	if socketPath == "" {
+		socketPath = controlSocketPath(cacheAbs)
+	}
+	socketPath, err = filepath.Abs(socketPath)
+	if err != nil {
+		return err
+	}
+	if isWithin(socketPath, mountAbs) {
+		return fmt.Errorf("control socket must be outside mountpoint")
 	}
 	var config struct {
 		ClientID     string `json:"CLIENT_ID"`
@@ -135,7 +160,14 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("FUSE mount: %w", err)
 	}
-	log.Printf("read-only mount ready: %s (cache: %s)", mountAbs, cacheAbs)
+	control, err := startControlServer(socketPath, root, mountAbs)
+	if err != nil {
+		_ = server.Unmount()
+		return fmt.Errorf("start local control socket: %w", err)
+	}
+	defer control.close()
+	go control.serve(ctx)
+	log.Printf("read-only mount ready: %s (cache: %s, control: %s)", mountAbs, cacheAbs, socketPath)
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(signals)

@@ -86,6 +86,13 @@ func TestActualFUSERARProgressiveListing(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("scan did not reach blocked suffix")
 	}
+	status, err := root.StatusArchiveIndex(context.Background(), "archive.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.State != "scanning" || status.Members == 0 || status.Members >= 128 || status.ArchiveSize != data.size {
+		t.Fatalf("blocked index status = %#v, want partial scanning state", status)
+	}
 	// Entries already discovered must be directly accessible while the suffix waits.
 	if _, err := os.Stat(filepath.Join(point, "archive.rar", "0000.jpg")); err != nil {
 		t.Fatal(err)
@@ -120,6 +127,10 @@ func TestActualFUSERARProgressiveListing(t *testing.T) {
 	archive := lookup(t, root, "archive.rar")
 	if _, err := archive.list(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+	status, err = root.StatusArchiveIndex(context.Background(), "archive.rar")
+	if err != nil || status.State != "complete" || status.Members != 128 {
+		t.Fatalf("completed index status = %#v, err=%v", status, err)
 	}
 	// A handle has a stable snapshot even if its index grew in the meantime.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {

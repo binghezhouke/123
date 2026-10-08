@@ -112,6 +112,7 @@ type Tree struct {
 	buildOnce        sync.Once
 	sources          map[string]*sourceCall
 	archiveTasks     map[string]*sourceCall
+	indexStatuses    *indexStatusTracker
 	refreshing       map[string]bool
 	infoMu           sync.Mutex
 	infoPending      []*infoRequest
@@ -197,7 +198,7 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}}
+	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}, indexStatuses: newIndexStatusTracker()}
 	if identity, ok := api.(interface{ CacheIdentity() string }); ok {
 		t.cacheScope = identity.CacheIdentity()
 	} else {
@@ -566,6 +567,10 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 }
 
 func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor) (*zipIndex, error) {
+	return t.getZIPWithProgress(ctx, source, size, archive, nil)
+}
+
+func (t *Tree) getZIPWithProgress(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor, progress func(int64)) (*zipIndex, error) {
 	identity := source.Key()
 	if archive != nil {
 		identity = archiveIdentity(source, archive)
@@ -590,7 +595,7 @@ func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64, a
 			idx.attachZIPReader(source)
 			return idx, idx.bytes, nil
 		}
-		idx, err := buildZIP(ctx, t, source, size)
+		idx, err := buildZIPWithProgress(ctx, t, source, size, progress)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -653,11 +658,12 @@ func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int
 }
 
 type contextZIPReaderAt struct {
-	source  *storage.Remote
-	gate    chan struct{}
-	ctx     context.Context
-	bounded bool
-	left    int64
+	source   *storage.Remote
+	gate     chan struct{}
+	ctx      context.Context
+	bounded  bool
+	left     int64
+	progress func(int64)
 }
 
 func (r *contextZIPReaderAt) ReadAt(p []byte, off int64) (int, error) {
@@ -667,7 +673,11 @@ func (r *contextZIPReaderAt) ReadAt(p []byte, off int64) (int, error) {
 			return 0, errors.New("ZIP index exceeds 64 MiB read budget")
 		}
 	}
-	return r.source.ReadAtContext(r.ctx, p, off)
+	n, err := r.source.ReadAtContext(r.ctx, p, off)
+	if n > 0 && r.progress != nil {
+		r.progress(off + int64(n))
+	}
+	return n, err
 }
 func (r *contextZIPReaderAt) withContext(ctx context.Context, fn func() error) error {
 	select {
@@ -709,7 +719,11 @@ func (m *member) dataOffset(ctx context.Context) (int64, error) {
 }
 
 func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) (*zipIndex, error) {
-	adapter := &contextZIPReaderAt{source: source, ctx: ctx, gate: make(chan struct{}, 1)}
+	return buildZIPWithProgress(ctx, t, source, size, nil)
+}
+
+func buildZIPWithProgress(ctx context.Context, t *Tree, source *storage.Remote, size int64, progress func(int64)) (*zipIndex, error) {
+	adapter := &contextZIPReaderAt{source: source, ctx: ctx, gate: make(chan struct{}, 1), progress: progress}
 	var zr *zip.Reader
 	err := adapter.withIndexContext(ctx, func() error {
 		if err := preflightZIP(adapter, size, t.opts.MaxZIPEntries, 64<<20); err != nil {

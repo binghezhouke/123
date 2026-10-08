@@ -31,6 +31,15 @@ fusermount3 -u "$HOME/mnt/123"
 
 挂载点必须已存在且为空。缓存必须放在挂载点之外；同一缓存目录仅允许一个挂载进程使用。默认只对当前用户开放挂载，不开启 `allow_other`。
 
+挂载会在私有缓存目录创建权限为 `0600` 的 `control.sock`，卸载时删除。`status` 和 `wait-index` 通过该本地 Unix socket 查询运行中挂载的真实索引状态；socket 只接受当前用户连接，不返回下载 URL 或密码。默认 socket 路径是 `os.UserCacheDir()/mount123/control.sock`，挂载使用自定义缓存目录时，命令也要传相应的 `-control-socket`。
+
+```bash
+./mount123 status [-control-socket PATH] <挂载内归档路径>
+./mount123 wait-index [-control-socket PATH] [-timeout 10m] <挂载内归档路径>
+```
+
+路径可写相对挂载根的路径，也可写挂载点下的绝对路径。Go flag 规则要求选项写在路径之前。`status` 会在需要时启动索引并立即报告 `queued`、`scanning`、`complete` 或 `failed`；`wait-index` 持续等待直到完成，按 Ctrl+C 可取消。输出包含已发现成员数、扫描高水位和归档大小；无法精确统计时下载字节数显示为 `unknown`。退出码：`0` 表示查询成功或索引完成，`1` 表示用法、连接或路径错误，`2` 表示索引失败，`3` 表示等待超时，`130` 表示用户取消。
+
 ## 文件如何呈现
 
 ```text

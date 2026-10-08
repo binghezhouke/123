@@ -260,13 +260,26 @@ func (t *Tree) waitArchiveIndex(ctx context.Context, key string, wait time.Durat
 }
 
 func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *archiveDescriptor, password []byte) (*zipIndex, error) {
+	statusKey := t.archiveTaskKey(source, a, password)
+	t.indexStatuses.update(statusKey, func(s *ArchiveIndexStatus) {
+		if s.State == "" {
+			s.State = "queued"
+		}
+		s.ArchiveSize = a.size
+	})
 	reader, size, identity, err := t.archiveSource(ctx, source, a)
 	if err != nil {
+		t.indexStatuses.set(statusKey, ArchiveIndexStatus{State: "failed", ArchiveSize: a.size})
 		return nil, err
 	}
 	if archiveKind(a.name) == ".rar" {
 		reader = &metadataRemote{reader: source.NewMetadataReader(ctx), fileID: a.id, size: size, nextLog: time.Now().Add(30 * time.Second)}
 	}
+	reader = &indexProgressReaderAt{r: reader, status: t.indexStatuses, key: statusKey, size: size}
+	t.indexStatuses.update(statusKey, func(s *ArchiveIndexStatus) {
+		s.State = "scanning"
+		s.ArchiveSize = size
+	})
 	key := "archive-index:" + archiveKind(a.name) + ":" + identity + ":" + t.passwordTag(a, password)
 	kind := archiveKind(a.name)
 	persistKey := t.archiveIndexCacheKey(kind, identity, a, password)
@@ -346,6 +359,10 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 					return syscall.EFBIG
 				}
 			}
+			t.indexStatuses.update(statusKey, func(s *ArchiveIndexStatus) {
+				s.Members = entries
+				s.ArchiveSize = size
+			})
 			close(idx.changed)
 			idx.changed = make(chan struct{})
 			return nil
@@ -355,6 +372,11 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		idx.scanErr = archiveReadError(ctx, err, password)
 		close(idx.changed)
 		idx.mu.Unlock()
+		if err != nil {
+			t.indexStatuses.set(statusKey, ArchiveIndexStatus{State: "failed", Members: entries, ArchiveSize: size})
+		} else {
+			t.indexStatuses.set(statusKey, ArchiveIndexStatus{State: "complete", Members: entries, ScanOffset: size, ArchiveSize: size})
+		}
 		log.Printf("archive index finished: file_id=%d entries=%d elapsed=%s success=%t", a.id, entries, time.Since(started).Round(time.Millisecond), err == nil)
 		if err != nil {
 			return nil, 0, archiveReadError(ctx, err, password)
