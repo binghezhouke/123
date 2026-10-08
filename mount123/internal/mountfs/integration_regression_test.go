@@ -71,6 +71,39 @@ func TestZIPSubdirectorySurvivesIndexExpiry(t *testing.T) {
 	}
 }
 
+func TestArchivePageCacheFlagsOnlyMaterializedMembers(t *testing.T) {
+	root, _ := fixture(t)
+	fs.NewNodeFS(root, &fs.Options{})
+	archive := lookup(t, root, "photos.zip")
+	deflate := lookup(t, lookup(t, archive, "images"), "8.txt")
+	h, flags, errno := deflate.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	h.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatalf("materialized Deflate open flags=%x, want KEEP_CACHE", flags)
+	}
+	stored := lookup(t, lookup(t, archive, "images"), "0.txt")
+	h, flags, errno = stored.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	h.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_DIRECT_IO {
+		t.Fatalf("Store member open flags=%x, want DIRECT_IO", flags)
+	}
+	root.tree.opts.DisableArchivePageCache = true
+	h, flags, errno = deflate.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	h.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_DIRECT_IO {
+		t.Fatalf("disabled page cache flags=%x, want DIRECT_IO", flags)
+	}
+}
+
 func TestDeflateRejectsCorruptCRC(t *testing.T) {
 	root, _ := fixture(t)
 	archive := root.tree.api.(*fakeAPI).archive

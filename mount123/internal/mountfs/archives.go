@@ -17,7 +17,6 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/bodgit/sevenzip"
 	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/nwaples/rardecode/v2"
 )
 
@@ -477,5 +476,5 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	return &handle{reader: cached, closer: cached, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+	return &handle{reader: cached, closer: cached, size: m.size}, t.archiveCacheOpenFlags(), 0
 }

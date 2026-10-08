@@ -49,20 +49,21 @@ type PasswordAPI interface {
 // Options sets mount-local metadata and source reuse lifetimes. Zero values
 // select documented defaults.
 type Options struct {
-	PrefetchFiles       int
-	PrefetchWorkers     int
-	PrefetchBytes       int64
-	DirectoryTTL        time.Duration
-	SourceTTL           time.Duration
-	ZIPIndexTTL         time.Duration
-	MetadataBytes       int64
-	MaxEntries          int
-	MaxZIPEntries       int
-	MaxExpandedNodes    int
-	MaxDepth            int
-	MaxNameBytes        int
-	MaxConcurrentBuilds int
-	RefreshFileMetadata bool
+	PrefetchFiles           int
+	PrefetchWorkers         int
+	PrefetchBytes           int64
+	DirectoryTTL            time.Duration
+	SourceTTL               time.Duration
+	ZIPIndexTTL             time.Duration
+	MetadataBytes           int64
+	MaxEntries              int
+	MaxZIPEntries           int
+	MaxExpandedNodes        int
+	MaxDepth                int
+	MaxNameBytes            int
+	MaxConcurrentBuilds     int
+	RefreshFileMetadata     bool
+	DisableArchivePageCache bool
 }
 
 func defaults(o Options) Options {
@@ -1038,7 +1039,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			}
 			return nil, 0, toErrno(err)
 		}
-		return &handle{reader: cached, closer: cached, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+		return &handle{reader: cached, closer: cached, size: m.size}, n.tree.archiveCacheOpenFlags(), 0
 	}
 	if m.method != zip.Store && m.method != zip.Deflate {
 		return nil, 0, syscall.EOPNOTSUPP
@@ -1064,7 +1065,14 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	return &handle{reader: cached, closer: cached, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+	return &handle{reader: cached, closer: cached, size: m.size}, n.tree.archiveCacheOpenFlags(), 0
+}
+
+func (t *Tree) archiveCacheOpenFlags() uint32 {
+	if t.opts.DisableArchivePageCache {
+		return fuse.FOPEN_DIRECT_IO
+	}
+	return fuse.FOPEN_KEEP_CACHE
 }
 
 type contextRemote struct {

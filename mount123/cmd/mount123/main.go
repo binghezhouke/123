@@ -55,11 +55,12 @@ func run() error {
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
-	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and ZIP index cache budget in MiB")
+	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and archive index cache budget in MiB")
 	archiveEntries := flag.Int("archive-max-entries", 100000, "maximum members per archive index")
 	directoryTTL := flag.Duration("directory-ttl", 30*time.Second, "directory snapshot freshness interval")
 	sourceTTL := flag.Duration("source-ttl", 30*time.Second, "remote reader reuse interval across opens")
 	fileInfo := flag.Bool("file-info", false, "refresh metadata for looked-up cloud files (adds a batched API request)")
+	archivePageCache := flag.Bool("archive-page-cache", true, "allow the kernel to cache fully materialized archive members")
 	zipDirs := flag.Bool("zip-dirs", true, "expose ZIP, 7z and RAR archives as directories")
 	prefetchFiles := flag.Int("prefetch-files", 9, "maximum adjacent images to prefetch (0 disables)")
 	prefetchWorkers := flag.Int("prefetch-workers", 2, "maximum background image reads")
@@ -151,7 +152,7 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Fail authentication/list errors before installing a mount.
-	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo})
+	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableArchivePageCache: !*archivePageCache})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}
