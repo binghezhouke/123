@@ -23,12 +23,14 @@ import (
 var ErrClosed = errors.New("storage cache is closed")
 
 type cacheEntry struct {
-	path      string
-	size      int64
-	used      time.Time
-	lastTouch time.Time
-	pins      int
-	lru       *list.Element
+	path                 string
+	size                 int64
+	used                 time.Time
+	lastTouch            time.Time
+	pins                 int
+	lru                  *list.Element
+	rangeID              string
+	rangeStart, rangeEnd int64
 }
 type flight struct {
 	done chan struct{}
@@ -46,9 +48,13 @@ type Cache struct {
 	max, used, reserved int64
 	entries             map[string]*cacheEntry
 	lru                 *list.List // newest at the front
+	ranges              map[string][]*cacheRange
+	rangeFlights        map[string][]*rangeFlight
 	flights             map[string]*flight
 	lock                *os.File
 	identityKey         [32]byte
+	durable             bool
+	ephemeral           bool
 	closed              bool
 }
 
@@ -76,7 +82,7 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), flights: make(map[string]*flight), lock: lock}
+	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), lock: lock, durable: true}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -242,7 +248,20 @@ func (c *Cache) load() error {
 			_ = os.Remove(filepath.Join(c.dir, name))
 			continue
 		}
-		if item.IsDir() || len(name) != 69 || name[64:] != ".blob" {
+		if item.IsDir() {
+			continue
+		}
+		var id string
+		var ranged *cacheRange
+		if strings.HasPrefix(name, "extent-") {
+			var err error
+			ranged, id, err = parseRangeFilename(name)
+			if err != nil {
+				continue
+			}
+		} else if len(name) == 69 && name[64:] == ".blob" {
+			id = name[:64]
+		} else {
 			continue
 		}
 		p := filepath.Join(c.dir, name)
@@ -253,15 +272,24 @@ func (c *Cache) load() error {
 		if !st.Mode().IsRegular() {
 			continue
 		}
-		key := name[:64]
+		if ranged != nil && st.Size() != ranged.end-ranged.start {
+			_ = os.Remove(p)
+			continue
+		}
 		entry := &cacheEntry{path: p, size: st.Size(), used: st.ModTime(), lastTouch: st.ModTime()}
-		loaded = append(loaded, loadedEntry{id: key, entry: entry})
+		if ranged != nil {
+			entry.rangeID, entry.rangeStart, entry.rangeEnd = ranged.identity, ranged.start, ranged.end
+		}
+		loaded = append(loaded, loadedEntry{id: id, entry: entry})
 		c.used += st.Size()
 	}
 	sort.Slice(loaded, func(i, j int) bool { return loaded[i].entry.used.Before(loaded[j].entry.used) })
 	for _, item := range loaded {
 		item.entry.lru = c.lru.PushFront(item.id)
 		c.entries[item.id] = item.entry
+		if item.entry.rangeID != "" {
+			c.addRangeLocked(&cacheRange{identity: item.entry.rangeID, start: item.entry.rangeStart, end: item.entry.rangeEnd, id: item.id})
+		}
 	}
 	// Old and oversized entries are removed using the same bounded eviction rule.
 	return c.evictLocked(0)
@@ -285,9 +313,7 @@ func (c *Cache) evictLocked(need int64) error {
 		if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		c.lru.Remove(victim)
-		delete(c.entries, id)
-		c.used -= e.size
+		c.removeEntryLocked(id, e)
 	}
 	return nil
 }
@@ -309,6 +335,9 @@ func (c *Cache) touchLocked(id string, e *cacheEntry) {
 }
 
 func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
+	if e.rangeID != "" {
+		c.removeRangeLocked(e.rangeID, id)
+	}
 	if e.lru != nil {
 		c.lru.Remove(e.lru)
 		e.lru = nil
@@ -388,14 +417,17 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 		c.mu.Lock()
 		c.reserved -= size
 		if f.err == nil && !c.closed {
-			p := targetPath
-			st, err := os.Stat(p)
+			st, err := os.Stat(targetPath)
 			if err != nil || st.Size() != size {
 				f.err = fmt.Errorf("cache fill published invalid file")
 			} else {
-				entry := &cacheEntry{path: p, size: size, used: time.Now(), lastTouch: time.Now()}
+				entry := &cacheEntry{path: targetPath, size: size, used: time.Now(), lastTouch: time.Now()}
 				entry.lru = c.lru.PushFront(id)
 				c.entries[id] = entry
+				if start, end, identity, ok := parseRangeKey(key); ok {
+					entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
+					c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: id})
+				}
 				c.used += size
 			}
 		} else if f.err == nil {
@@ -433,9 +465,11 @@ func (c *Cache) fill(ctx context.Context, targetPath string, size int64, fill fu
 		tmp.Close()
 		return fmt.Errorf("cache fill size mismatch: got %d, want %d", w.written, size)
 	}
-	if err = tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+	if c.durable {
+		if err = tmp.Sync(); err != nil {
+			tmp.Close()
+			return err
+		}
 	}
 	if err = tmp.Close(); err != nil {
 		return err
@@ -473,12 +507,22 @@ func (c *Cache) Close() error {
 	for _, f := range c.flights {
 		pending = append(pending, f.done)
 	}
+	for _, group := range c.rangeFlights {
+		for _, f := range group {
+			pending = append(pending, f.done)
+		}
+	}
 	c.mu.Unlock()
 	for _, done := range pending {
 		<-done
 	}
 	e := syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN)
 	ce := c.lock.Close()
+	if c.ephemeral {
+		if removeErr := os.RemoveAll(c.dir); ce == nil {
+			ce = removeErr
+		}
+	}
 	if e != nil {
 		return e
 	}

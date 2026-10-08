@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -594,5 +595,285 @@ func TestRemoteMigratesLegacyDataBlockIntoSharedPages(t *testing.T) {
 	}
 	if calls.Load() != before {
 		t.Fatalf("legacy cache migration made HTTP request: %d -> %d", before, calls.Load())
+	}
+}
+
+func TestRemoteOverlappingRangeFlightsDeduplicateAndKeepMissingTail(t *testing.T) {
+	data := []byte(strings.Repeat("overlap-flight", int((1<<20)/14+1)))[:1<<20]
+	var mu sync.Mutex
+	var ranges []string
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var dataRequests atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		rangeHeader := req.Header.Get("Range")
+		var a, b int64
+		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		mu.Lock()
+		ranges = append(ranges, rangeHeader)
+		mu.Unlock()
+		if !(a == 0 && b == 0) && dataRequests.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+		w.Header().Set("ETag", `"overlap-flight-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	resolve := func(context.Context) (string, error) { return s.URL, nil }
+	r, err := NewRemote(context.Background(), c, "overlap-flight", int64(len(data)), resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NewRemote(context.Background(), c, "overlap-flight", int64(len(data)), resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := remoteCachePageSize
+	first := make([]byte, 2*int(page))
+	second := make([]byte, 2*int(page))
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() { _, e := r.ReadRangeAtContext(context.Background(), first, 0); firstDone <- e }()
+	<-started
+	go func() { _, e := r2.ReadRangeAtContext(context.Background(), second, page); secondDone <- e }()
+	time.Sleep(25 * time.Millisecond)
+	close(release)
+	if err = <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err = <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(first, data[:len(first)]) || !bytes.Equal(second, data[page:3*page]) {
+		t.Fatal("overlap flight returned wrong data")
+	}
+	mu.Lock()
+	got := append([]string(nil), ranges...)
+	mu.Unlock()
+	if len(got) != 4 {
+		t.Fatalf("HTTP ranges = %v, want two probes plus two fills", got)
+	}
+	if got[2] != fmt.Sprintf("bytes=0-%d", 2*page-1) || got[3] != fmt.Sprintf("bytes=%d-%d", 2*page, 3*page-1) {
+		t.Fatalf("ranges = %v, want shared overlap merged into missing tail", got)
+	}
+}
+
+func TestRemoteDisjointRangeFlightsRunInParallel(t *testing.T) {
+	data := []byte(strings.Repeat("parallel-range", int((1<<20)/14+1)))[:1<<20]
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var a, b int64
+		if _, e := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); e != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		if calls.Add(1) > 1 {
+			started <- req.Header.Get("Range")
+			<-release
+		}
+		w.Header().Set("ETag", `"parallel-range-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, e := NewCache(t.TempDir(), 4<<20)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer c.Close()
+	r, e := NewRemote(context.Background(), c, "parallel-range", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if e != nil {
+		t.Fatal(e)
+	}
+	page := remoteCachePageSize
+	done := make(chan error, 2)
+	for _, off := range []int64{0, 5 * page} {
+		off := off
+		go func() { _, err := r.ReadRangeAtContext(context.Background(), make([]byte, page), off); done <- err }()
+	}
+	seen := map[string]bool{}
+	for i := 0; i < 2; i++ {
+		select {
+		case rg := <-started:
+			seen[rg] = true
+		case <-time.After(time.Second):
+			close(release)
+			t.Fatal("disjoint range requests were serialized")
+		}
+	}
+	close(release)
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("started ranges = %v", seen)
+	}
+}
+
+func TestCachePinsAllRangeExtentsAgainstSmallCacheEviction(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 2*int64(remoteCachePageSize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	identity := cacheID("small-cache-object")
+	one := bytes.Repeat([]byte("a"), int(remoteCachePageSize))
+	two := bytes.Repeat([]byte("b"), int(remoteCachePageSize))
+	for i, data := range [][]byte{one, two} {
+		start := int64(i) * remoteCachePageSize
+		h, e := c.AcquireRange(context.Background(), identity, start, start+remoteCachePageSize, func(_ context.Context, w io.Writer) error { _, x := w.Write(data); return x })
+		if e != nil {
+			t.Fatal(e)
+		}
+		_ = h.Close()
+	}
+	parts, ok, err := c.pinRange(identity, 0, 2*remoteCachePageSize)
+	if err != nil || !ok {
+		t.Fatalf("pin range = %v, %v", ok, err)
+	}
+	thirdID := cacheID("other-object")
+	if _, err = c.AcquireRange(context.Background(), thirdID, 0, remoteCachePageSize, fillBytes(one)); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("fill while both extents pinned = %v, want ENOSPC", err)
+	}
+	out := make([]byte, 2*int(remoteCachePageSize))
+	if err = readPinnedRange(parts, out, 0); err != nil {
+		t.Fatal(err)
+	}
+	closeRangeParts(parts)
+	if !bytes.Equal(out[:len(one)], one) || !bytes.Equal(out[len(one):], two) {
+		t.Fatal("pinned extents changed during eviction")
+	}
+}
+
+func TestCacheRangeExtentsSurviveReopen(t *testing.T) {
+	dir := t.TempDir()
+	identity := cacheID("persistent-extent")
+	c, err := NewCache(dir, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := c.AcquireRange(context.Background(), identity, 10, 20, fillBytes([]byte("0123456789")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	_ = c.Close()
+	c, err = NewCache(dir, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if missing := c.missingRanges(identity, 10, 20); len(missing) != 0 {
+		t.Fatalf("reopened range missing: %v", missing)
+	}
+	parts, ok, err := c.pinRange(identity, 10, 20)
+	if err != nil || !ok {
+		t.Fatalf("pin persisted extent = %v, %v", ok, err)
+	}
+	out := make([]byte, 10)
+	err = readPinnedRange(parts, out, 10)
+	closeRangeParts(parts)
+	if err != nil || string(out) != "0123456789" {
+		t.Fatalf("persisted bytes = %q, %v", out, err)
+	}
+}
+
+func TestRemoteRejectsOverlongChunkedRangeBody(t *testing.T) {
+	data := []byte("0123456789")
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		call := calls.Add(1)
+		var a, b int64
+		if _, e := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); e != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"long-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.WriteHeader(http.StatusPartialContent)
+		if call > 1 {
+			w.(http.Flusher).Flush()
+			_, _ = w.Write(data[a : b+1])
+			_, _ = w.Write([]byte("x"))
+			return
+		}
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "long-body", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = r.ReadAt(make([]byte, 2), 1); err == nil || !strings.Contains(err.Error(), "body length mismatch") {
+		t.Fatalf("overlong body error = %v", err)
+	}
+	if len(c.missingRanges(r.rangeID, 0, remoteCachePageSize)) == 0 {
+		t.Fatal("overlong response was cached")
+	}
+}
+
+func TestRemoteLargeWindowUsesOneCacheExtent(t *testing.T) {
+	data := bytes.Repeat([]byte("large-window"), (16<<20)/12+1)[:16<<20]
+	var dataRanges atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"large-window-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+		if !(a == 0 && b == 0) {
+			dataRanges.Add(1)
+		}
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 32<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "large-window", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := make([]byte, 16<<20)
+	if n, err := r.ReadRangeAtContext(context.Background(), window, 0); err != nil || n != len(window) {
+		t.Fatalf("large window = %d, %v", n, err)
+	}
+	if dataRanges.Load() != 1 {
+		t.Fatalf("large window made %d HTTP range requests, want one", dataRanges.Load())
+	}
+	c.mu.Lock()
+	entries := len(c.entries)
+	c.mu.Unlock()
+	if entries != 1 {
+		t.Fatalf("large window created %d cache files, want one extent", entries)
 	}
 }

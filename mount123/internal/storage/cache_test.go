@@ -167,3 +167,63 @@ func TestCacheRejectsConcurrentDirectoryOwnerAndOversize(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestEphemeralCacheSkipsSyncAndRebuildsAfterCrash(t *testing.T) {
+	root := t.TempDir()
+	first, err := NewEphemeralCache(root, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.durable {
+		t.Fatal("ephemeral cache unexpectedly enables file Sync")
+	}
+	staleDir := first.dir
+	h, err := first.Acquire(context.Background(), "untrusted-after-crash", 4, fillBytes([]byte("data")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	// Simulate process death by dropping the directory lock without Cache.Close.
+	if err = syscall.Flock(int(first.lock.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if err = first.lock.Close(); err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewEphemeralCache(root, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	if _, err = os.Stat(staleDir); !os.IsNotExist(err) {
+		t.Fatalf("stale ephemeral directory survived restart: %v", err)
+	}
+	refilled := false
+	h, err = second.Acquire(context.Background(), "untrusted-after-crash", 4, func(_ context.Context, w io.Writer) error {
+		refilled = true
+		_, writeErr := w.Write([]byte("data"))
+		return writeErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	if !refilled {
+		t.Fatal("stale content was trusted after restart")
+	}
+}
+
+func TestEphemeralCacheCloseRemovesPrivateDirectory(t *testing.T) {
+	root := t.TempDir()
+	c, err := NewEphemeralCache(root, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := c.dir
+	if err = c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("ephemeral directory remains after close: %v", err)
+	}
+}
