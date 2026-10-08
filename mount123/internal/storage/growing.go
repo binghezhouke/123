@@ -9,23 +9,29 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 type growingFlight struct {
-	mu      sync.Mutex
-	cache   *Cache
-	id      string
-	key     string
-	temp    string
-	target  string
-	size    int64
-	written int64
-	refs    int
-	state   uint8
-	err     error
-	changed chan struct{}
-	done    chan struct{}
-	cancel  context.CancelFunc
+	mu                       sync.Mutex
+	cache                    *Cache
+	id                       string
+	key                      string
+	temp                     string
+	target                   string
+	size                     int64
+	class                    cacheClass
+	hasUse                   bool
+	scanDir                  int8
+	lastUseStart, lastUseEnd int64
+	written                  int64
+	refs                     int
+	state                    uint8
+	err                      error
+	changed                  chan struct{}
+	done                     chan struct{}
+	cancel                   context.CancelFunc
 }
 
 const (
@@ -37,13 +43,14 @@ const (
 // GrowingHandle reads ranges from a shared cache fill as they become
 // available. Only a successful, complete fill is published to the cache.
 type GrowingHandle struct {
-	mu      sync.Mutex
-	flight  *growingFlight
-	file    *os.File
-	ready   *Handle
-	size    int64
-	closed  bool
-	closedC chan struct{}
+	mu         sync.Mutex
+	flight     *growingFlight
+	file       *os.File
+	ready      *Handle
+	size       int64
+	closed     bool
+	closedC    chan struct{}
+	foreground bool
 }
 
 // AcquireGrowing joins or starts an asynchronous cache fill. lifetime owns the
@@ -68,7 +75,8 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 		if h, err := c.existing(key, size); err != nil {
 			return nil, err
 		} else if h != nil {
-			return &GrowingHandle{ready: h, size: size, closedC: make(chan struct{})}, nil
+			h.promoteOnRead = !workqueue.IsBackground(ctx)
+			return &GrowingHandle{ready: h, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}, nil
 		}
 		id := cacheID(key)
 		c.mu.Lock()
@@ -122,7 +130,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 				return nil, err
 			}
 			f.refs++
-			reader := &GrowingHandle{flight: f, file: file, size: size, closedC: make(chan struct{})}
+			reader := &GrowingHandle{flight: f, file: file, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}
 			f.mu.Unlock()
 			c.mu.Unlock()
 			return reader, nil
@@ -150,10 +158,11 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 			return nil, err
 		}
 		fillCtx, cancel := context.WithCancel(lifetime)
-		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: c.filename(key), size: size, refs: 1, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
+		class := foregroundClass(workqueue.IsBackground(ctx))
+		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: c.filename(key, class), size: size, class: class, refs: 1, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
 		c.growing[id] = f
 		c.reserved += size
-		reader := &GrowingHandle{flight: f, file: readerFile, size: size, closedC: make(chan struct{})}
+		reader := &GrowingHandle{flight: f, file: readerFile, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}
 		c.mu.Unlock()
 		go f.run(fillCtx, writer, fill)
 		return reader, nil
@@ -198,7 +207,7 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	if err == nil {
 		c.reserved -= f.size
 		now := time.Now()
-		entry := &cacheEntry{path: f.target, size: f.size, used: now, lastTouch: now, pins: f.refs}
+		entry := &cacheEntry{path: f.target, size: f.size, class: f.class, hasUse: f.hasUse, scanDir: f.scanDir, lastUseStart: f.lastUseStart, lastUseEnd: f.lastUseEnd, used: now, lastTouch: now, pins: f.refs}
 		entry.lru = c.lru.PushFront(f.id)
 		if start, end, identity, ok := parseRangeKey(f.key); ok {
 			entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
@@ -354,6 +363,9 @@ func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, e
 			}
 			n, err := h.file.ReadAt(p, off)
 			h.mu.Unlock()
+			if n > 0 && h.foreground {
+				h.flight.cache.consumeGrowing(h.flight, off, off+int64(n))
+			}
 			if truncated && err == nil {
 				err = io.EOF
 			}
@@ -373,6 +385,20 @@ func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, e
 		case <-changed:
 		}
 	}
+}
+
+func (c *Cache) consumeGrowing(f *growingFlight, start, end int64) {
+	c.mu.Lock()
+	if entry := c.entries[f.id]; entry != nil {
+		c.consumeEntryLocked(f.id, entry, start, end)
+	} else {
+		oldClass := f.class
+		consumeClass(&f.class, &f.hasUse, &f.scanDir, &f.lastUseStart, &f.lastUseEnd, start, end)
+		if oldClass != f.class {
+			f.target = c.pathForKey(f.key, f.class)
+		}
+	}
+	c.mu.Unlock()
 }
 
 func (h *GrowingHandle) Close() error {

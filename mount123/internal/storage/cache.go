@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/iostats"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 var ErrClosed = errors.New("storage cache is closed")
@@ -26,6 +27,11 @@ var ErrClosed = errors.New("storage cache is closed")
 type cacheEntry struct {
 	path                 string
 	size                 int64
+	class                cacheClass
+	hasUse               bool
+	scanDir              int8
+	lastUseStart         int64
+	lastUseEnd           int64
 	used                 time.Time
 	lastTouch            time.Time
 	pins                 int
@@ -50,6 +56,9 @@ type Cache struct {
 	mu                  sync.Mutex
 	dir                 string
 	max, used, reserved int64
+	indexBudget         int64
+	indexUsed           int64
+	reservedIndex       int64
 	entries             map[string]*cacheEntry
 	lru                 *list.List // newest at the front
 	ranges              map[string][]*cacheRange
@@ -99,7 +108,8 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 		return nil, err
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
-	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
+	indexBudget := min(maxBytes/8, int64(64<<20))
+	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -130,6 +140,17 @@ func (c *Cache) StableDigest(namespace, value string) string {
 
 // Open returns a pinned cache object without creating or filling it.
 func (c *Cache) Open(key string) (*Handle, error) {
+	return c.open(key, false)
+}
+
+// OpenArchiveIndex opens a persisted archive index without treating its
+// metadata read as user-content heat. Legacy entries are classified under the
+// bounded index share when possible; otherwise they remain ordinary entries.
+func (c *Cache) OpenArchiveIndex(key string) (*Handle, error) {
+	return c.open(key, true)
+}
+
+func (c *Cache) open(key string, archiveIndex bool) (*Handle, error) {
 	id := cacheID(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -148,14 +169,28 @@ func (c *Cache) Open(key string) (*Handle, error) {
 		return nil, err
 	}
 	e.pins++
-	c.touchLocked(id, e)
-	return &Handle{file: f, cache: c, key: id, size: e.size}, nil
+	if archiveIndex {
+		c.classifyIndexLocked(id, e)
+	}
+	c.touchLRULocked(id, e)
+	return &Handle{file: f, cache: c, key: id, size: e.size, promoteOnRead: !archiveIndex}, nil
 }
 
 // Store publishes data under key using the cache's regular byte budget,
 // private file mode and atomic fill semantics.
 func (c *Cache) Store(ctx context.Context, key string, data []byte) error {
-	h, err := c.Acquire(ctx, key, int64(len(data)), func(ctx context.Context, w io.Writer) error {
+	return c.store(ctx, key, data, cacheProbation)
+}
+
+// StoreArchiveIndex stores a complete archive index under the bounded
+// protected-index share. Entries beyond that share are retained as ordinary
+// probationary cache data when the total cache budget permits.
+func (c *Cache) StoreArchiveIndex(ctx context.Context, key string, data []byte) error {
+	return c.store(ctx, key, data, cacheIndex)
+}
+
+func (c *Cache) store(ctx context.Context, key string, data []byte, class cacheClass) error {
+	h, err := c.acquire(ctx, key, int64(len(data)), c.filename(key, class), class, func(ctx context.Context, w io.Writer) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -251,9 +286,36 @@ func (c *Cache) loadIdentityKey() error {
 // per-process subdirectory that is removed on close.
 func (c *Cache) Directory() string { return c.dir }
 
-func (c *Cache) filename(key string) string {
+func (c *Cache) filename(key string, class cacheClass) string {
 	h := sha256.Sum256([]byte(key))
-	return filepath.Join(c.dir, hex.EncodeToString(h[:])+".blob")
+	return filepath.Join(c.dir, hex.EncodeToString(h[:])+"."+class.suffix()+".blob")
+}
+
+func (c *Cache) pathForKey(key string, class cacheClass) string {
+	if start, end, identity, ok := parseRangeKey(key); ok {
+		return filepath.Join(c.dir, rangeFilename(identity, start, end, cacheID(key), class))
+	}
+	return c.filename(key, class)
+}
+
+func parseObjectFilename(name string) (string, cacheClass, bool) {
+	base := strings.TrimSuffix(name, ".blob")
+	parts := strings.Split(base, ".")
+	if len(parts) == 1 && len(parts[0]) == 64 {
+		return parts[0], cacheProbation, true // pre-policy cache entry
+	}
+	if len(parts) != 2 || len(parts[0]) != 64 {
+		return "", cacheProbation, false
+	}
+	class, ok := parseCacheClass(parts[1])
+	return parts[0], class, ok
+}
+
+func (c *Cache) pathForEntry(id string, e *cacheEntry, class cacheClass) string {
+	if e.rangeID != "" {
+		return filepath.Join(c.dir, rangeFilename(e.rangeID, e.rangeStart, e.rangeEnd, id, class))
+	}
+	return filepath.Join(c.dir, id+"."+class.suffix()+".blob")
 }
 func cacheID(key string) string { h := sha256.Sum256([]byte(key)); return hex.EncodeToString(h[:]) }
 func (c *Cache) load() error {
@@ -276,15 +338,19 @@ func (c *Cache) load() error {
 			continue
 		}
 		var id string
+		class := cacheProbation
 		var ranged *cacheRange
 		if strings.HasPrefix(name, "extent-") {
 			var err error
-			ranged, id, err = parseRangeFilename(name)
+			ranged, id, class, err = parseRangeFilename(name)
 			if err != nil {
 				continue
 			}
-		} else if len(name) == 69 && name[64:] == ".blob" {
-			id = name[:64]
+		} else if strings.HasSuffix(name, ".blob") {
+			id, class, _ = parseObjectFilename(name)
+			if id == "" {
+				continue
+			}
 		} else {
 			continue
 		}
@@ -300,7 +366,7 @@ func (c *Cache) load() error {
 			_ = os.Remove(p)
 			continue
 		}
-		entry := &cacheEntry{path: p, size: st.Size(), used: st.ModTime(), lastTouch: st.ModTime()}
+		entry := &cacheEntry{path: p, size: st.Size(), class: class, used: st.ModTime(), lastTouch: st.ModTime()}
 		if ranged != nil {
 			entry.rangeID, entry.rangeStart, entry.rangeEnd = ranged.identity, ranged.start, ranged.end
 		}
@@ -311,8 +377,17 @@ func (c *Cache) load() error {
 	for _, item := range loaded {
 		item.entry.lru = c.lru.PushFront(item.id)
 		c.entries[item.id] = item.entry
+		if item.entry.class == cacheIndex {
+			c.indexUsed += item.entry.size
+		}
 		if item.entry.rangeID != "" {
 			c.addRangeLocked(&cacheRange{identity: item.entry.rangeID, start: item.entry.rangeStart, end: item.entry.rangeEnd, id: item.id})
+		}
+	}
+	for node := c.lru.Back(); node != nil && c.indexUsed > c.indexBudget; node = node.Prev() {
+		id := node.Value.(string)
+		if e := c.entries[id]; e != nil && e.class == cacheIndex {
+			c.setClassLocked(id, e, cacheProbation)
 		}
 	}
 	// Old and oversized entries are removed using the same bounded eviction rule.
@@ -322,11 +397,12 @@ func (c *Cache) load() error {
 func (c *Cache) evictLocked(need int64) error {
 	for c.used+c.reserved+need > c.max {
 		var victim *list.Element
+		var victimClass cacheClass = cacheIndex + 1
 		for node := c.lru.Back(); node != nil; node = node.Prev() {
 			id := node.Value.(string)
-			if e := c.entries[id]; e != nil && e.pins == 0 {
+			if e := c.entries[id]; e != nil && e.pins == 0 && e.class < victimClass {
 				victim = node
-				break
+				victimClass = e.class
 			}
 		}
 		if victim == nil {
@@ -342,7 +418,7 @@ func (c *Cache) evictLocked(need int64) error {
 	return nil
 }
 
-func (c *Cache) touchLocked(id string, e *cacheEntry) {
+func (c *Cache) touchLRULocked(id string, e *cacheEntry) {
 	e.used = time.Now()
 	if e.lru != nil {
 		c.lru.MoveToFront(e.lru)
@@ -358,6 +434,87 @@ func (c *Cache) touchLocked(id string, e *cacheEntry) {
 	}
 }
 
+func consumeClass(class *cacheClass, hasUse *bool, scanDir *int8, lastStart, lastEnd *int64, start, end int64) {
+	if end <= start || *class == cacheIndex {
+		return
+	}
+	if *class == cacheSpeculative {
+		*class = cacheProbation
+		*hasUse = true
+		*lastStart, *lastEnd = start, end
+		return
+	}
+	if *class != cacheProbation {
+		return
+	}
+	if !*hasUse {
+		*hasUse = true
+		*lastStart, *lastEnd = start, end
+		return
+	}
+	switch *scanDir {
+	case 1:
+		if start >= *lastEnd {
+			*lastEnd = max(*lastEnd, end)
+			return
+		}
+	case -1:
+		if end <= *lastStart {
+			*lastStart = min(*lastStart, start)
+			return
+		}
+	default:
+		if start >= *lastEnd {
+			*scanDir = 1
+			*lastEnd = max(*lastEnd, end)
+			return
+		}
+		if end <= *lastStart {
+			*scanDir = -1
+			*lastStart = min(*lastStart, start)
+			return
+		}
+	}
+	*class = cacheHot
+}
+
+func (c *Cache) consumeEntryLocked(id string, e *cacheEntry, start, end int64) {
+	class := e.class
+	consumeClass(&class, &e.hasUse, &e.scanDir, &e.lastUseStart, &e.lastUseEnd, start, end)
+	c.setClassLocked(id, e, class)
+}
+
+func (c *Cache) classifyIndexLocked(id string, e *cacheEntry) {
+	if e.class == cacheIndex {
+		return
+	}
+	if e.size <= c.indexBudget-c.indexUsed-c.reservedIndex {
+		c.setClassLocked(id, e, cacheIndex)
+	} else {
+		c.setClassLocked(id, e, cacheProbation)
+	}
+}
+
+func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
+	if e.class == class {
+		return
+	}
+	newPath := c.pathForEntry(id, e, class)
+	if e.path != newPath {
+		if err := os.Rename(e.path, newPath); err != nil {
+			return
+		}
+		e.path = newPath
+	}
+	if e.class == cacheIndex {
+		c.indexUsed -= e.size
+	}
+	e.class = class
+	if class == cacheIndex {
+		c.indexUsed += e.size
+	}
+}
+
 func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
 	if e.rangeID != "" {
 		c.removeRangeLocked(e.rangeID, id)
@@ -368,15 +525,19 @@ func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
 	}
 	delete(c.entries, id)
 	c.used -= e.size
+	if e.class == cacheIndex {
+		c.indexUsed -= e.size
+	}
 }
 
 // Acquire returns a pinned handle for key, filling and atomically publishing it
 // on a miss. Concurrent misses for the same key share one fill operation.
 func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(context.Context, io.Writer) error) (*Handle, error) {
-	return c.acquire(ctx, key, size, c.filename(key), fill)
+	class := foregroundClass(workqueue.IsBackground(ctx))
+	return c.acquire(ctx, key, size, c.filename(key, class), class, fill)
 }
 
-func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath string, fill func(context.Context, io.Writer) error) (*Handle, error) {
+func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath string, class cacheClass, fill func(context.Context, io.Writer) error) (*Handle, error) {
 	if size < 0 || size > c.max {
 		return nil, syscall.ENOSPC
 	}
@@ -391,9 +552,12 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 			f, err := os.Open(e.path)
 			if err == nil {
 				e.pins++
-				c.touchLocked(id, e)
+				if class == cacheIndex {
+					c.classifyIndexLocked(id, e)
+				}
+				c.touchLRULocked(id, e)
 				c.mu.Unlock()
-				return &Handle{file: f, cache: c, key: id, size: size}, nil
+				return &Handle{file: f, cache: c, key: id, size: size, promoteOnRead: class != cacheIndex && class != cacheSpeculative}, nil
 			}
 			if e.pins != 0 {
 				c.mu.Unlock()
@@ -439,6 +603,10 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 				continue
 			}
 		}
+		if class == cacheIndex && size > c.indexBudget-c.indexUsed-c.reservedIndex {
+			class = cacheProbation
+			targetPath = c.pathForKey(key, class)
+		}
 		if err := c.evictLocked(size); err != nil {
 			c.mu.Unlock()
 			return nil, err
@@ -446,16 +614,22 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 		f := &flight{done: make(chan struct{})}
 		c.flights[id] = f
 		c.reserved += size
+		if class == cacheIndex {
+			c.reservedIndex += size
+		}
 		c.mu.Unlock()
 		f.err = c.fill(ctx, targetPath, size, fill)
 		c.mu.Lock()
 		c.reserved -= size
+		if class == cacheIndex {
+			c.reservedIndex -= size
+		}
 		if f.err == nil && !c.closed {
 			st, err := os.Stat(targetPath)
 			if err != nil || st.Size() != size {
 				f.err = fmt.Errorf("cache fill published invalid file")
 			} else {
-				entry := &cacheEntry{path: targetPath, size: size, used: time.Now(), lastTouch: time.Now()}
+				entry := &cacheEntry{path: targetPath, size: size, class: class, used: time.Now(), lastTouch: time.Now()}
 				entry.lru = c.lru.PushFront(id)
 				c.entries[id] = entry
 				if start, end, identity, ok := parseRangeKey(key); ok {
@@ -463,6 +637,9 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 					c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: id})
 				}
 				c.used += size
+				if class == cacheIndex {
+					c.indexUsed += size
+				}
 			}
 		} else if f.err == nil {
 			_ = os.Remove(targetPath)
@@ -574,12 +751,13 @@ func (c *Cache) Close() error {
 
 // Handle pins an immutable cache file until Close.
 type Handle struct {
-	mu     sync.Mutex
-	file   *os.File
-	cache  *Cache
-	key    string
-	size   int64
-	closed bool
+	mu            sync.Mutex
+	file          *os.File
+	cache         *Cache
+	key           string
+	size          int64
+	closed        bool
+	promoteOnRead bool
 }
 
 func (h *Handle) Size() int64 { return h.size }
@@ -589,7 +767,16 @@ func (h *Handle) ReadAt(p []byte, off int64) (int, error) {
 	if h.closed {
 		return 0, os.ErrClosed
 	}
-	return h.file.ReadAt(p, off)
+	n, err := h.file.ReadAt(p, off)
+	if n > 0 && h.promoteOnRead {
+		c := h.cache
+		c.mu.Lock()
+		if entry := c.entries[h.key]; entry != nil {
+			c.consumeEntryLocked(h.key, entry, off, off+int64(n))
+		}
+		c.mu.Unlock()
+	}
+	return n, err
 }
 func (h *Handle) Close() error {
 	h.mu.Lock()
@@ -629,6 +816,6 @@ func (c *Cache) existing(key string, size int64) (*Handle, error) {
 		return nil, err
 	}
 	e.pins++
-	c.touchLocked(id, e)
+	c.touchLRULocked(id, e)
 	return &Handle{file: f, cache: c, key: id, size: size}, nil
 }

@@ -32,13 +32,13 @@ func (indexStoreTestAPI) DownloadURL(context.Context, int64) (string, error) { r
 func removeExceptIndexBlob(t *testing.T, dir, key string) {
 	t.Helper()
 	hash := sha256.Sum256([]byte(key))
-	keep := hex.EncodeToString(hash[:]) + ".blob"
+	base := hex.EncodeToString(hash[:])
 	items, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, item := range items {
-		if strings.HasSuffix(item.Name(), ".blob") && item.Name() != keep {
+		if strings.HasSuffix(item.Name(), ".blob") && item.Name() != base+".blob" && !strings.HasPrefix(item.Name(), base+".") {
 			if err := os.Remove(filepath.Join(dir, item.Name())); err != nil {
 				t.Fatal(err)
 			}

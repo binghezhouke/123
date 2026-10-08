@@ -610,7 +610,7 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 	// Copy every cache hit before filling holes. As gaps are fetched, LRU may
 	// evict any unpinned extent (including another part of this request); the
 	// caller's buffer preserves those bytes and prevents a refetch loop.
-	parts, err := r.cache.pinAvailableRange(r.rangeID, off, end)
+	parts, err := r.cache.pinAvailableRange(r.rangeID, off, end, !workqueue.IsBackground(ctx))
 	if err != nil {
 		return 0, err
 	}
@@ -634,7 +634,7 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 				if err := r.ensureCachedRange(ctx, pos, chunkEnd); err != nil {
 					return 0, err
 				}
-				chunkParts, pinned, err = r.cache.pinRange(r.rangeID, pos, chunkEnd)
+				chunkParts, pinned, err = r.cache.pinRange(r.rangeID, pos, chunkEnd, !workqueue.IsBackground(ctx))
 				if err != nil {
 					return 0, err
 				}

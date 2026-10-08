@@ -70,7 +70,7 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 	if t.cache == nil || cacheKey == "" {
 		return nil, false
 	}
-	h, err := t.cache.Open(cacheKey)
+	h, err := t.cache.OpenArchiveIndex(cacheKey)
 	if err != nil {
 		return nil, false
 	}
@@ -155,7 +155,7 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 	if err := json.NewEncoder(&buffer).Encode(dto); err != nil {
 		return
 	}
-	_ = t.cache.Store(ctx, cacheKey, buffer.Bytes())
+	_ = t.cache.StoreArchiveIndex(ctx, cacheKey, buffer.Bytes())
 }
 
 func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDTO, archiveSize int64) (*zipIndex, error) {

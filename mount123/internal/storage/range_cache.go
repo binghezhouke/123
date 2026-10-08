@@ -63,27 +63,35 @@ func parseRangeKey(key string) (start, end int64, identity string, ok bool) {
 	return start, end, identity, true
 }
 
-func rangeFilename(identity string, start, end int64, id string) string {
-	return fmt.Sprintf("extent-%s-%d-%d-%s.blob", identity, start, end, id)
+func rangeFilename(identity string, start, end int64, id string, class cacheClass) string {
+	return fmt.Sprintf("extent-%s-%d-%d-%s-%s.blob", identity, start, end, id, class.suffix())
 }
 
-func parseRangeFilename(name string) (*cacheRange, string, error) {
+func parseRangeFilename(name string) (*cacheRange, string, cacheClass, error) {
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(name, "extent-"), ".blob"), "-")
-	if len(parts) != 4 || len(parts[0]) != 64 || len(parts[3]) != 64 {
-		return nil, "", errors.New("invalid extent filename")
+	if (len(parts) != 4 && len(parts) != 5) || len(parts[0]) != 64 || len(parts[3]) != 64 {
+		return nil, "", cacheProbation, errors.New("invalid extent filename")
 	}
 	start, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil || start < 0 {
-		return nil, "", errors.New("invalid extent start")
+		return nil, "", cacheProbation, errors.New("invalid extent start")
 	}
 	end, err := strconv.ParseInt(parts[2], 10, 64)
 	if err != nil || end <= start {
-		return nil, "", errors.New("invalid extent end")
+		return nil, "", cacheProbation, errors.New("invalid extent end")
 	}
 	if cacheID(rangeKey(parts[0], start, end)) != parts[3] {
-		return nil, "", errors.New("extent filename key mismatch")
+		return nil, "", cacheProbation, errors.New("extent filename key mismatch")
 	}
-	return &cacheRange{identity: parts[0], start: start, end: end, id: parts[3]}, parts[3], nil
+	class := cacheProbation
+	if len(parts) == 5 {
+		var ok bool
+		class, ok = parseCacheClass(parts[4])
+		if !ok {
+			return nil, "", cacheProbation, errors.New("invalid extent class")
+		}
+	}
+	return &cacheRange{identity: parts[0], start: start, end: end, id: parts[3]}, parts[3], class, nil
 }
 
 // AcquireRange stores one immutable byte extent in one cache blob.
@@ -92,8 +100,9 @@ func (c *Cache) AcquireRange(ctx context.Context, identity string, start, end in
 		return nil, errors.New("invalid cache range")
 	}
 	key := rangeKey(identity, start, end)
-	path := filepath.Join(c.dir, rangeFilename(identity, start, end, cacheID(key)))
-	return c.acquire(ctx, key, end-start, path, fill)
+	class := foregroundClass(workqueue.IsBackground(ctx))
+	path := filepath.Join(c.dir, rangeFilename(identity, start, end, cacheID(key), class))
+	return c.acquire(ctx, key, end-start, path, class, fill)
 }
 
 func (c *Cache) addRangeLocked(r *cacheRange) {
@@ -211,7 +220,8 @@ func (c *Cache) finishRangeFlight(identity string, f *rangeFlight, err error) {
 
 // pinRange atomically pins every extent needed for [start,end). A coverage
 // hole returns ok=false after releasing all partial pins.
-func (c *Cache) pinRange(identity string, start, end int64) ([]pinnedRangePart, bool, error) {
+func (c *Cache) pinRange(identity string, start, end int64, foregroundArg ...bool) ([]pinnedRangePart, bool, error) {
+	foreground := len(foregroundArg) > 0 && foregroundArg[0]
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -240,8 +250,11 @@ func (c *Cache) pinRange(identity string, start, end int64) ([]pinnedRangePart, 
 			return nil, false, err
 		}
 		e.pins++
-		c.touchLocked(r.id, e)
+		c.touchLRULocked(r.id, e)
 		partEnd := min(end, r.end)
+		if foreground {
+			c.consumeEntryLocked(r.id, e, cursor, partEnd)
+		}
 		parts = append(parts, pinnedRangePart{handle: &Handle{file: f, cache: c, key: r.id, size: e.size}, start: cursor, end: partEnd, base: r.start})
 		cursor = partEnd
 		if cursor >= end {
@@ -260,7 +273,7 @@ func (c *Cache) pinRange(identity string, start, end int64) ([]pinnedRangePart, 
 // even when the range has holes. Callers can copy these bytes into their own
 // destination before filling the holes, so later LRU eviction cannot force a
 // refetch of bytes already available in the cache.
-func (c *Cache) pinAvailableRange(identity string, start, end int64) ([]pinnedRangePart, error) {
+func (c *Cache) pinAvailableRange(identity string, start, end int64, foreground bool) ([]pinnedRangePart, error) {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -288,7 +301,10 @@ func (c *Cache) pinAvailableRange(identity string, start, end int64) ([]pinnedRa
 			return nil, err
 		}
 		e.pins++
-		c.touchLocked(r.id, e)
+		c.touchLRULocked(r.id, e)
+		if foreground {
+			c.consumeEntryLocked(r.id, e, max(start, r.start), min(end, r.end))
+		}
 		parts = append(parts, pinnedRangePart{handle: &Handle{file: f, cache: c, key: r.id, size: e.size}, start: max(start, r.start), end: min(end, r.end), base: r.start})
 	}
 	c.mu.Unlock()
