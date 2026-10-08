@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
@@ -15,5 +16,8 @@ func (c *Cache) acquireTransfer(ctx context.Context) (func(), error) {
 	}
 	gate := c.downloadGate
 	c.mu.Unlock()
-	return gate.Acquire(ctx)
+	started := time.Now()
+	release, err := gate.Acquire(ctx)
+	c.stats.ObserveTransferQueue(time.Since(started))
+	return release, err
 }

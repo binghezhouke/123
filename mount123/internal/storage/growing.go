@@ -173,6 +173,7 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	if err == nil {
 		err = ctx.Err()
 	}
+	publicationStarted := time.Now()
 	if err == nil && c.durable {
 		err = writer.Sync()
 	}
@@ -190,6 +191,9 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	f.mu.Unlock()
 	if err == nil {
 		err = os.Rename(f.temp, f.target)
+	}
+	if err == nil {
+		c.stats.ObserveCachePublication(time.Since(publicationStarted))
 	}
 	if err == nil {
 		c.reserved -= f.size

@@ -184,13 +184,14 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 			cancel()
 			return nil, err
 		}
+		requestStarted := time.Now()
 		resp, err := r.client.Do(req)
 		if err != nil {
 			release()
 			cancel()
 			return nil, contextError(ctx, err, "remote range request failed")
 		}
-		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: func() { cancel(); release() }}
+		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: func() { cancel(); release() }, started: requestStarted, stats: r.cache.IOStats()}
 		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) && attempt == 0 {
 			resp.Body.Close()
 			if err = r.refresh(ctx); err != nil {
@@ -214,11 +215,43 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 
 type cancelBody struct {
 	io.ReadCloser
-	cancel context.CancelFunc
+	cancel  context.CancelFunc
+	started time.Time
+	first   time.Time
+	read    uint64
+	stats   interface {
+		ObserveHTTPBodyTTFB(time.Duration)
+		ObserveHTTPTransfer(time.Duration)
+		AddDownloadedBytes(uint64)
+	}
+	once sync.Once
+}
+
+func (b *cancelBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		now := time.Now()
+		if b.first.IsZero() {
+			b.first = now
+			if b.stats != nil && !b.started.IsZero() {
+				b.stats.ObserveHTTPBodyTTFB(now.Sub(b.started))
+			}
+		}
+		b.read += uint64(n)
+	}
+	return n, err
 }
 
 func (b *cancelBody) Close() error {
 	err := b.ReadCloser.Close()
+	b.once.Do(func() {
+		if b.stats != nil {
+			b.stats.AddDownloadedBytes(b.read)
+			if !b.first.IsZero() {
+				b.stats.ObserveHTTPTransfer(time.Since(b.first))
+			}
+		}
+	})
 	b.cancel()
 	return err
 }
@@ -296,6 +329,7 @@ func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off 
 		return 0, io.EOF
 	}
 	want := min(int64(len(p)), r.size-off)
+	r.recordCacheHitBytes(off, off+want)
 	n, err := r.readRangeWithCache(ctx, p[:want], off)
 	if err != nil {
 		return n, err
@@ -325,6 +359,7 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 	if int64(want) > r.size-off {
 		want = int(r.size - off)
 	}
+	r.recordCacheHitBytes(off, off+int64(want))
 	read := 0
 	for read < want {
 		if err := ctx.Err(); err != nil {
@@ -363,6 +398,19 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 		return read, io.EOF
 	}
 	return read, nil
+}
+
+func (r *Remote) recordCacheHitBytes(start, end int64) {
+	if start >= end {
+		return
+	}
+	covered := end - start
+	for _, gap := range r.cache.missingRanges(r.rangeID, start, end) {
+		covered -= gap.end - gap.start
+	}
+	if stats := r.cache.IOStats(); stats != nil {
+		stats.AddCacheHitBytes(uint64(max(covered, 0)))
+	}
 }
 
 // ensureCachedRange stores missing bytes as immutable range extents. Each

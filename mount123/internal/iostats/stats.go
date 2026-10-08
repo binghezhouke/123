@@ -25,18 +25,18 @@ type Tracker struct {
 // DurationSummary is unknown until at least one observation has been made.
 // Percentiles are upper bounds of fixed logarithmic buckets, in nanoseconds.
 type DurationSummary struct {
-	Status   string `json:"status"`
-	Samples  uint64 `json:"samples,omitempty"`
-	P50Nanos uint64 `json:"p50_nanos,omitempty"`
-	P95Nanos uint64 `json:"p95_nanos,omitempty"`
-	MaxNanos uint64 `json:"max_nanos,omitempty"`
+	Status   string  `json:"status"`
+	Samples  *uint64 `json:"samples"`
+	P50Nanos *uint64 `json:"p50_nanos"`
+	P95Nanos *uint64 `json:"p95_nanos"`
+	MaxNanos *uint64 `json:"max_nanos"`
 }
 
 // CounterSummary distinguishes an observed zero from a metric with no hook.
 type CounterSummary struct {
-	Status string `json:"status"`
-	Events uint64 `json:"events,omitempty"`
-	Bytes  uint64 `json:"bytes,omitempty"`
+	Status string  `json:"status"`
+	Events *uint64 `json:"events"`
+	Bytes  *uint64 `json:"bytes"`
 }
 
 // Snapshot contains process-lifetime aggregate measurements only.
@@ -123,10 +123,10 @@ func (d *duration) snapshot() DurationSummary {
 	}
 	return DurationSummary{
 		Status:   "measured",
-		Samples:  count,
-		P50Nanos: d.quantile(count, 0.50),
-		P95Nanos: d.quantile(count, 0.95),
-		MaxNanos: d.max.Load(),
+		Samples:  ptr(count),
+		P50Nanos: ptr(d.quantile(count, 0.50)),
+		P95Nanos: ptr(d.quantile(count, 0.95)),
+		MaxNanos: ptr(d.max.Load()),
 	}
 }
 
@@ -154,8 +154,10 @@ func (c *counter) snapshot() CounterSummary {
 	if events == 0 {
 		return CounterSummary{Status: "unknown"}
 	}
-	return CounterSummary{Status: "measured", Events: events, Bytes: c.bytes.Load()}
+	return CounterSummary{Status: "measured", Events: ptr(events), Bytes: ptr(c.bytes.Load())}
 }
+
+func ptr[T any](value T) *T { return &value }
 
 func bucketIndex(nanos uint64) int {
 	if nanos == 0 {

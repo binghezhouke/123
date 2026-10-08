@@ -51,7 +51,7 @@ func run() error {
 		defer stop()
 		return runUnlock(ctx, os.Args[2:], os.Stdin, os.Stderr, os.Stdout)
 	}
-	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "wait-index") {
+	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "wait-index" || os.Args[1] == "io-stats") {
 		ctx, stop := notifyContext()
 		defer stop()
 		return runControlCommand(ctx, os.Args[1:], os.Stderr, os.Stdout)

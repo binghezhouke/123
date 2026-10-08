@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
 	"golang.org/x/sys/unix"
 )
@@ -36,12 +37,14 @@ func (e *commandExitError) Error() string { return e.err.Error() }
 func (e *commandExitError) Unwrap() error { return e.err }
 
 type controlRequest struct {
-	Path string `json:"path"`
+	Command string `json:"command,omitempty"`
+	Path    string `json:"path,omitempty"`
 }
 
 type controlResponse struct {
-	Status *mountfs.ArchiveIndexStatus `json:"status,omitempty"`
-	Error  string                      `json:"error,omitempty"`
+	Status  *mountfs.ArchiveIndexStatus `json:"status,omitempty"`
+	IOStats *iostats.Snapshot           `json:"io_stats,omitempty"`
+	Error   string                      `json:"error,omitempty"`
 }
 
 type controlServer struct {
@@ -138,6 +141,15 @@ func (s *controlServer) handle(ctx context.Context, conn *net.UnixConn) {
 		_ = json.NewEncoder(conn).Encode(controlResponse{Error: "invalid control request"})
 		return
 	}
+	if request.Command == "io-stats" {
+		snapshot := s.root.IOStats()
+		_ = json.NewEncoder(conn).Encode(controlResponse{IOStats: &snapshot})
+		return
+	}
+	if request.Command != "" && request.Command != "status" {
+		_ = json.NewEncoder(conn).Encode(controlResponse{Error: "unsupported control command"})
+		return
+	}
 	archivePath := request.Path
 	if filepath.IsAbs(archivePath) {
 		absolute := filepath.Clean(archivePath)
@@ -205,7 +217,9 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 	socketPath := flags.String("control-socket", filepath.Join(userCache, "mount123", "control.sock"), "running mount's local control socket")
 	timeout := flags.Duration("timeout", 10*time.Minute, "maximum wait-index duration")
 	flags.Usage = func() {
-		if command == "wait-index" {
+		if command == "io-stats" {
+			_, _ = fmt.Fprintf(stderr, "Usage: mount123 io-stats [-control-socket PATH]\n")
+		} else if command == "wait-index" {
 			_, _ = fmt.Fprintf(stderr, "Usage: mount123 %s [-control-socket PATH] [-timeout DURATION] <mounted archive path>\n", command)
 		} else {
 			_, _ = fmt.Fprintf(stderr, "Usage: mount123 %s [-control-socket PATH] <mounted archive path>\n", command)
@@ -217,6 +231,16 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 			return nil
 		}
 		return err
+	}
+	if command == "io-stats" {
+		if flags.NArg() != 0 {
+			return errors.New("io-stats does not take a path")
+		}
+		snapshot, err := requestControlIOStats(ctx, *socketPath)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(stdout).Encode(snapshot)
 	}
 	if flags.NArg() != 1 || (command == "wait-index" && *timeout <= 0) {
 		return errors.New("expected one mounted archive path; flags must precede the path")
@@ -269,15 +293,7 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 }
 
 func requestControlStatus(ctx context.Context, socketPath, archivePath string) (mountfs.ArchiveIndexStatus, error) {
-	info, err := os.Lstat(socketPath)
-	if err != nil {
-		return mountfs.ArchiveIndexStatus{}, fmt.Errorf("mount control socket unavailable: %w", err)
-	}
-	if info.Mode()&os.ModeSocket == 0 || !ownedByCurrentUser(info) || info.Mode().Perm()&0077 != 0 {
-		return mountfs.ArchiveIndexStatus{}, errors.New("control socket is not a private socket owned by the current user")
-	}
-	dialer := net.Dialer{Timeout: 2 * time.Second}
-	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	conn, err := dialControl(ctx, socketPath)
 	if err != nil {
 		return mountfs.ArchiveIndexStatus{}, err
 	}
@@ -285,7 +301,7 @@ func requestControlStatus(ctx context.Context, socketPath, archivePath string) (
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
 	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-	if err := json.NewEncoder(conn).Encode(controlRequest{Path: archivePath}); err != nil {
+	if err := json.NewEncoder(conn).Encode(controlRequest{Command: "status", Path: archivePath}); err != nil {
 		return mountfs.ArchiveIndexStatus{}, err
 	}
 	var response controlResponse
@@ -299,6 +315,47 @@ func requestControlStatus(ctx context.Context, socketPath, archivePath string) (
 		return mountfs.ArchiveIndexStatus{}, errors.New("mount returned an empty archive status")
 	}
 	return *response.Status, nil
+}
+
+func requestControlIOStats(ctx context.Context, socketPath string) (iostats.Snapshot, error) {
+	conn, err := dialControl(ctx, socketPath)
+	if err != nil {
+		return iostats.Snapshot{}, err
+	}
+	defer conn.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopClose()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	if err := json.NewEncoder(conn).Encode(controlRequest{Command: "io-stats"}); err != nil {
+		return iostats.Snapshot{}, err
+	}
+	var response controlResponse
+	if err := json.NewDecoder(io.LimitReader(conn, 16<<10)).Decode(&response); err != nil {
+		return iostats.Snapshot{}, err
+	}
+	if response.Error != "" {
+		return iostats.Snapshot{}, errors.New(response.Error)
+	}
+	if response.IOStats == nil {
+		return iostats.Snapshot{}, errors.New("mount returned empty I/O statistics")
+	}
+	return *response.IOStats, nil
+}
+
+func dialControl(ctx context.Context, socketPath string) (net.Conn, error) {
+	info, err := os.Lstat(socketPath)
+	if err != nil {
+		return nil, fmt.Errorf("mount control socket unavailable: %w", err)
+	}
+	if info.Mode()&os.ModeSocket == 0 || !ownedByCurrentUser(info) || info.Mode().Perm()&0077 != 0 {
+		return nil, errors.New("control socket is not a private socket owned by the current user")
+	}
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "unix", socketPath)
+	if err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
 func controlSocketPath(cacheDir string) string { return filepath.Join(cacheDir, "control.sock") }

@@ -6,6 +6,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
 	"github.com/binghezhouke/123/mount123/internal/panapi"
 	"github.com/binghezhouke/123/mount123/internal/storage"
@@ -26,6 +28,42 @@ type controlTestAPI struct {
 	url   string
 	size  int64
 	files []panapi.File
+}
+
+func TestIOStatsControlCommandReturnsAggregateJSONWithoutPath(t *testing.T) {
+	cache, err := storage.NewCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	root := mountfs.New(context.Background(), &controlTestAPI{}, cache, 0, true)
+	socketDir := t.TempDir()
+	if err := os.Chmod(socketDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	socketPath := filepath.Join(socketDir, "control.sock")
+	control, err := startControlServer(socketPath, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, stopServe := context.WithCancel(context.Background())
+	go control.serve(serveCtx)
+	defer func() { stopServe(); control.close() }()
+
+	var output bytes.Buffer
+	if err := runControlCommand(context.Background(), []string{"io-stats", "-control-socket", socketPath}, io.Discard, &output); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot iostats.Snapshot
+	if err := json.Unmarshal(output.Bytes(), &snapshot); err != nil {
+		t.Fatalf("io-stats did not return JSON: %v (%s)", err, output.String())
+	}
+	if snapshot.ForegroundReadLatency.Status != "unknown" || snapshot.DirectoryLookup.Status != "unknown" {
+		t.Fatalf("unobserved metrics are not explicit: %#v", snapshot)
+	}
+	if bytes.Contains(output.Bytes(), []byte("signature")) || bytes.Contains(output.Bytes(), []byte("password")) {
+		t.Fatalf("stats response unexpectedly exposes sensitive field names: %s", output.String())
+	}
 }
 
 func (a *controlTestAPI) List(context.Context, int64) ([]panapi.File, error) {

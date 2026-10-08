@@ -23,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/panapi"
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -174,6 +175,16 @@ type Node struct {
 	item *entry
 	root bool
 }
+
+// IOStats returns a bounded aggregate snapshot for the running mount. It does
+// not include file paths, URLs, credentials, passwords, or file contents.
+func (n *Node) IOStats() iostats.Snapshot {
+	if n == nil || n.tree == nil || n.tree.cache == nil || n.tree.cache.IOStats() == nil {
+		return iostats.New().Snapshot()
+	}
+	return n.tree.cache.IOStats().Snapshot()
+}
+
 type metaItem struct {
 	key     string
 	value   any
@@ -997,15 +1008,23 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		defer done()
 	}
 	h, flagsOut, errno := n.openRaw(ctx, flags)
+	if errno != 0 {
+		return h, flagsOut, errno
+	}
+	if n.tree.cache != nil {
+		if raw, ok := h.(*handle); ok {
+			raw.stats = n.tree.cache.IOStats()
+		}
+	}
 	if errno == 0 && n.tree.prefetch != nil && n.parent != nil && imageName(n.item.name) {
 		// Every image read must reach FUSE while prefetch is enabled so the
 		// prefetch window can follow forward and reverse browsing. Fully
 		// materialized archive images can use the kernel page cache only when
 		// image prefetch is disabled.
 		flagsOut = fuse.FOPEN_DIRECT_IO
-		return &imageHandle{FileHandle: h, node: n}, flagsOut, errno
+		h = &imageHandle{FileHandle: h, node: n}
 	}
-	return h, flagsOut, errno
+	return h, flagsOut, 0
 }
 
 func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
@@ -1203,6 +1222,7 @@ type handle struct {
 	reader    io.ReaderAt
 	closer    io.Closer
 	remote    *storage.Remote
+	stats     *iostats.Tracker
 	base      int64
 	size      uint64
 	readAhead *readAhead
@@ -1210,6 +1230,10 @@ type handle struct {
 }
 
 func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	if h.stats != nil {
+		started := time.Now()
+		defer func() { h.stats.ObserveForegroundRead(time.Since(started)) }()
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, toErrno(err)
 	}

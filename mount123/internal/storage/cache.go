@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"io"
 	"os"
@@ -41,6 +42,7 @@ type flight struct {
 // owned by one process for the lifetime of the Cache.
 type Cache struct {
 	downloadGate        *workqueue.Gate
+	stats               *iostats.Tracker
 	links               map[string]cachedLink
 	linkFlights         map[string]chan struct{}
 	mu                  sync.Mutex
@@ -83,7 +85,7 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true}
+	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, stats: iostats.New()}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -94,6 +96,9 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 	}
 	return c, nil
 }
+
+// IOStats returns the mount-lifetime aggregate statistics tracker.
+func (c *Cache) IOStats() *iostats.Tracker { return c.stats }
 
 // StableDigest returns a keyed digest for cache identities. The key is unique
 // to this private cache root and persists across mount processes. The input is
@@ -477,6 +482,8 @@ func (c *Cache) fill(ctx context.Context, targetPath string, size int64, fill fu
 		tmp.Close()
 		return fmt.Errorf("cache fill size mismatch: got %d, want %d", w.written, size)
 	}
+	publishStarted := time.Now()
+	defer func() { c.stats.ObserveCachePublication(time.Since(publishStarted)) }()
 	if c.durable {
 		if err = tmp.Sync(); err != nil {
 			tmp.Close()
