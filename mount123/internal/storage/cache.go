@@ -224,6 +224,10 @@ func (c *Cache) loadIdentityKey() error {
 	return nil
 }
 
+// Directory returns the active cache directory. Ephemeral caches use a private
+// per-process subdirectory that is removed on close.
+func (c *Cache) Directory() string { return c.dir }
+
 func (c *Cache) filename(key string) string {
 	h := sha256.Sum256([]byte(key))
 	return filepath.Join(c.dir, hex.EncodeToString(h[:])+".blob")

@@ -24,6 +24,17 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
+func openCache(dir string, maxBytes int64, durability string) (*storage.Cache, error) {
+	switch durability {
+	case "durable":
+		return storage.NewCache(dir, maxBytes)
+	case "ephemeral":
+		return storage.NewEphemeralCache(dir, maxBytes)
+	default:
+		return nil, fmt.Errorf("invalid cache durability: choose durable or ephemeral")
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Print(err)
@@ -54,6 +65,8 @@ func run() error {
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
+	cacheDurability := flag.String("cache-durability", "durable", "cache durability: durable or ephemeral")
+	readAheadMiB := flag.Int64("read-ahead-mib", 16, "maximum sequential per-file read-ahead window in MiB (0 disables)")
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
 	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and archive index cache budget in MiB")
 	archiveEntries := flag.Int("archive-max-entries", 100000, "maximum members per archive index")
@@ -71,6 +84,12 @@ func run() error {
 	}
 	if *prefetchFiles < 0 || *prefetchFiles > 64 || *prefetchWorkers < 1 || *prefetchWorkers > 16 || *prefetchMiB < 1 || *prefetchMiB > 1<<20 {
 		return fmt.Errorf("invalid prefetch limits")
+	}
+	if *cacheDurability != "durable" && *cacheDurability != "ephemeral" {
+		return fmt.Errorf("invalid cache durability: choose durable or ephemeral")
+	}
+	if *readAheadMiB < 0 || *readAheadMiB > 16 {
+		return fmt.Errorf("read-ahead window must be between 0 and 16 MiB")
 	}
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
@@ -140,19 +159,19 @@ func run() error {
 			return fmt.Errorf("invalid config JSON: %w", err)
 		}
 	}
-	cache, err := storage.NewCache(cacheAbs, *cacheGiB<<30)
+	cache, err := openCache(cacheAbs, *cacheGiB<<30, *cacheDurability)
 	if err != nil {
 		return err
 	}
 	defer cache.Close()
-	api, err := panapi.New(panapi.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, AccessToken: token, TokenCache: filepath.Join(cacheAbs, "token.json")})
+	api, err := panapi.New(panapi.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, AccessToken: token, TokenCache: filepath.Join(cache.Directory(), "token.json")})
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Fail authentication/list errors before installing a mount.
-	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableArchivePageCache: !*archivePageCache})
+	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableArchivePageCache: !*archivePageCache, ReadAheadMaxBytes: *readAheadMiB << 20, DisableReadAhead: *readAheadMiB == 0})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}
