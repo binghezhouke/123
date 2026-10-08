@@ -121,7 +121,7 @@ func (t *Tree) buildCloudDirectoryFromFiles(ctx context.Context, files []panapi.
 			return nil, 0, err
 		}
 		name := f.Name
-		if _, exists := directory.byName[name]; exists {
+		if _, exists := directory.byName[name]; exists || name == refreshControlName {
 			name = cloudDuplicateName(f, reserved)
 			size += int64(len(name))
 		}

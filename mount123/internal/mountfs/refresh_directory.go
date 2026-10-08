@@ -33,7 +33,7 @@ func (n *Node) RefreshDirectory(ctx context.Context, mountRelativePath string) (
 	if parent.item == nil || parent.item.cloud == nil || !parent.item.cloud.IsDir || parent.item.archive != nil || parent.item.source != nil || parent.item.disc != nil || parent.item.member != nil {
 		return RefreshResult{}, syscall.EINVAL
 	}
-	return n.tree.refreshCloudDirectory(ctx, parent.item.cloud.ID, n, mountRelativePath)
+	return n.tree.requestDirectoryRefresh(ctx, parent.item.cloud.ID, n, mountRelativePath, false)
 }
 
 func (n *Node) cloudDirectoryAt(ctx context.Context, value string) (*Node, error) {

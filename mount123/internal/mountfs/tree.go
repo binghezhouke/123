@@ -141,6 +141,9 @@ type Tree struct {
 	cacheScope        string
 	cacheScopeStable  bool
 	directoryStats    directoryStatsCounters
+
+	refreshMu          sync.Mutex
+	directoryRefreshes map[int64]*directoryRefreshState
 }
 type directoryPin struct {
 	refs        int
@@ -1023,6 +1026,9 @@ func (n *Node) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.At
 	return syscall.EROFS
 }
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if name == refreshControlName && n.isCloudDirectory() {
+		return n.refreshControl(ctx, out), 0
+	}
 	entries, pending, err := n.lookupEntries(ctx, name)
 	if err != nil {
 		return nil, toErrno(err)
@@ -1176,7 +1182,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		return nil, 0, syscall.EIO
 	}
 	if m.flags&1 != 0 {
-		password, err := n.tree.passwordForArchive(ctx, n.item.archive)
+		password, err := n.passwordForMember(ctx)
 		if err != nil {
 			return nil, 0, toErrno(err)
 		}

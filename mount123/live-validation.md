@@ -188,3 +188,12 @@
 - 单 worker 重复测试发现无序并发启动可能让远处图片抢先占用槽位，已改为按预测顺序分配；补充旧调度取消、未启动任务清理及终态只计一次的回归。最终全量 FUSE/race、vet 通过，最终取消 guard 后预取定向 race 回归通过，并重新构建部署。
 - socket 及周期 JSONL 中 `stage_schema_version=1`、`fill_outcome_version=1` 和 `image_prefetch` 生效。无实际解压时阶段为 unknown；任务取消单独计数，不再与实际错误混淆。阶段包含嵌套等待，不能相加当成端到端耗时。
 - 最终版本再次正式挂载后，文本读取 1.27 ms、RAR JSON 读取 353.4 ms，两个样本校验和均一致；`remote_recovery.attempts=0`、`list_calls=0`，URL/probe 阶段无样本。RAR 用时包含索引恢复等本地处理，不等同于纯字节缓存访问时间。
+
+## 目录内刷新与缺失 ZIP 密码恢复验收（2026-10-08）
+
+- Issue #41：云端目录的虚拟 `.mount123-refresh` 仅在只读打开时刷新当前层。控制文件不进入目录列表；同名云文件通过 ID 别名访问，压缩包内同名成员保持原内容。
+- 公开节点及真实 FUSE 回归覆盖 `cat`、属性查询/遍历不刷新、保留内核 `ro`、长内核负目录项缓存失效、重复打开与同句柄读取、CLI 与控制文件并发合并，以及取消、失败保留旧快照。
+- ZIP 缺失侧车的公开 Open 回归覆盖恢复磁盘旧快照、20 个并发打开仅一次刷新、后台预取不刷新、失败冷却和手动绕过冷却。自动冷却按父目录设置为 30 秒，仅实际打开加密 ZIP 成员触发。
+- 全量 `MOUNT123_FUSE_TEST=1 GOTOOLCHAIN=local GOPROXY=off /tmp/123-go-sdk/go/bin/go test -C mount123 -race -buildvcs=false -timeout=120s ./...`、`go vet`、二进制构建和 diff 检查通过。
+- 使用真实账号、独立临时只读 FUSE 挂载与 256 MiB 缓存，对目录 `28677655` 在本地模拟尚无目标 `.pwd` 的旧快照，关闭缓存后重新打开并恢复。Lookup/stat 未重新列目录；打开原失败图片自动 List 一次后解密成功，完整读出 7,641,267 字节，用时 1.948 秒。之后实际执行 `cat .mount123-refresh`，返回 `entries=260`，只增加一次 List。
+- 模拟仅过滤本地测试列表，没有修改网盘或密码。临时挂载、缓存及验收程序已清理。
