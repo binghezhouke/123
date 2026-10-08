@@ -208,7 +208,7 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 		c.reserved -= f.size
 		now := time.Now()
 		entry := &cacheEntry{path: f.target, size: f.size, class: f.class, hasUse: f.hasUse, scanDir: f.scanDir, lastUseStart: f.lastUseStart, lastUseEnd: f.lastUseEnd, used: now, lastTouch: now, pins: f.refs}
-		entry.lru = c.lru.PushFront(f.id)
+		entry.lru = c.lru[entry.class].PushFront(f.id)
 		if start, end, identity, ok := parseRangeKey(f.key); ok {
 			entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
 			c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: f.id})

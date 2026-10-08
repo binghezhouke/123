@@ -372,8 +372,8 @@ func TestAcquireGrowingSizeReplacementRemovesOldLRUNode(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.used != 4 || c.lru.Len() != 1 {
-		t.Fatalf("size replacement left stale cache state: used=%d lru=%d", c.used, c.lru.Len())
+	if c.used != 4 || c.lruLen() != 1 {
+		t.Fatalf("size replacement left stale cache state: used=%d lru=%d", c.used, c.lruLen())
 	}
 }
 

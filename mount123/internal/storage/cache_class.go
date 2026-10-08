@@ -15,6 +15,8 @@ const (
 	cacheIndex
 )
 
+const cacheClassCount = int(cacheIndex) + 1
+
 func (c cacheClass) suffix() string {
 	switch c {
 	case cacheSpeculative:

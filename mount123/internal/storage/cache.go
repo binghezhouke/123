@@ -60,7 +60,7 @@ type Cache struct {
 	indexUsed           int64
 	reservedIndex       int64
 	entries             map[string]*cacheEntry
-	lru                 *list.List // newest at the front
+	lru                 [cacheClassCount]*list.List // one newest-first queue per retention class
 	ranges              map[string][]*cacheRange
 	rangeFlights        map[string][]*rangeFlight
 	flights             map[string]*flight
@@ -109,7 +109,7 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	indexBudget := min(maxBytes/8, int64(64<<20))
-	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
+	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -317,6 +317,24 @@ func (c *Cache) pathForEntry(id string, e *cacheEntry, class cacheClass) string 
 	}
 	return filepath.Join(c.dir, id+"."+class.suffix()+".blob")
 }
+
+func newClassLRUs() [cacheClassCount]*list.List {
+	var queues [cacheClassCount]*list.List
+	for i := range queues {
+		queues[i] = list.New()
+	}
+	return queues
+}
+
+func (c *Cache) lruLen() int {
+	count := 0
+	for _, queue := range c.lru {
+		if queue != nil {
+			count += queue.Len()
+		}
+	}
+	return count
+}
 func cacheID(key string) string { h := sha256.Sum256([]byte(key)); return hex.EncodeToString(h[:]) }
 func (c *Cache) load() error {
 	items, err := os.ReadDir(c.dir)
@@ -375,7 +393,7 @@ func (c *Cache) load() error {
 	}
 	sort.Slice(loaded, func(i, j int) bool { return loaded[i].entry.used.Before(loaded[j].entry.used) })
 	for _, item := range loaded {
-		item.entry.lru = c.lru.PushFront(item.id)
+		item.entry.lru = c.lru[item.entry.class].PushFront(item.id)
 		c.entries[item.id] = item.entry
 		if item.entry.class == cacheIndex {
 			c.indexUsed += item.entry.size
@@ -384,11 +402,13 @@ func (c *Cache) load() error {
 			c.addRangeLocked(&cacheRange{identity: item.entry.rangeID, start: item.entry.rangeStart, end: item.entry.rangeEnd, id: item.id})
 		}
 	}
-	for node := c.lru.Back(); node != nil && c.indexUsed > c.indexBudget; node = node.Prev() {
+	for node := c.lru[cacheIndex].Back(); node != nil && c.indexUsed > c.indexBudget; {
+		previous := node.Prev()
 		id := node.Value.(string)
 		if e := c.entries[id]; e != nil && e.class == cacheIndex {
 			c.setClassLocked(id, e, cacheProbation)
 		}
+		node = previous
 	}
 	// Old and oversized entries are removed using the same bounded eviction rule.
 	return c.evictLocked(0)
@@ -397,12 +417,13 @@ func (c *Cache) load() error {
 func (c *Cache) evictLocked(need int64) error {
 	for c.used+c.reserved+need > c.max {
 		var victim *list.Element
-		var victimClass cacheClass = cacheIndex + 1
-		for node := c.lru.Back(); node != nil; node = node.Prev() {
-			id := node.Value.(string)
-			if e := c.entries[id]; e != nil && e.pins == 0 && e.class < victimClass {
-				victim = node
-				victimClass = e.class
+		for class := cacheSpeculative; class <= cacheIndex && victim == nil; class++ {
+			for node := c.lru[class].Back(); node != nil; node = node.Prev() {
+				id := node.Value.(string)
+				if e := c.entries[id]; e != nil && e.pins == 0 {
+					victim = node
+					break
+				}
 			}
 		}
 		if victim == nil {
@@ -421,9 +442,9 @@ func (c *Cache) evictLocked(need int64) error {
 func (c *Cache) touchLRULocked(id string, e *cacheEntry) {
 	e.used = time.Now()
 	if e.lru != nil {
-		c.lru.MoveToFront(e.lru)
+		c.lru[e.class].MoveToFront(e.lru)
 	} else {
-		e.lru = c.lru.PushFront(id)
+		e.lru = c.lru[e.class].PushFront(id)
 	}
 	// Persist recency at most once per minute per file; ordinary cache hits
 	// only update the in-memory LRU and do not issue a filesystem metadata op.
@@ -506,6 +527,10 @@ func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
 		}
 		e.path = newPath
 	}
+	if e.lru != nil {
+		c.lru[e.class].Remove(e.lru)
+		e.lru = c.lru[class].PushFront(id)
+	}
 	if e.class == cacheIndex {
 		c.indexUsed -= e.size
 	}
@@ -520,7 +545,7 @@ func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
 		c.removeRangeLocked(e.rangeID, id)
 	}
 	if e.lru != nil {
-		c.lru.Remove(e.lru)
+		c.lru[e.class].Remove(e.lru)
 		e.lru = nil
 	}
 	delete(c.entries, id)
@@ -630,7 +655,7 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 				f.err = fmt.Errorf("cache fill published invalid file")
 			} else {
 				entry := &cacheEntry{path: targetPath, size: size, class: class, used: time.Now(), lastTouch: time.Now()}
-				entry.lru = c.lru.PushFront(id)
+				entry.lru = c.lru[entry.class].PushFront(id)
 				c.entries[id] = entry
 				if start, end, identity, ok := parseRangeKey(key); ok {
 					entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end

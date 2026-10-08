@@ -820,8 +820,8 @@ func TestRemoveRangeCleansLRUAndCoverage(t *testing.T) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.used != 0 || c.lru.Len() != 0 || len(c.ranges[identity]) != 0 {
-		t.Fatalf("remove left stale state: used=%d lru=%d ranges=%v", c.used, c.lru.Len(), c.ranges[identity])
+	if c.used != 0 || c.lruLen() != 0 || len(c.ranges[identity]) != 0 {
+		t.Fatalf("remove left stale state: used=%d lru=%d ranges=%v", c.used, c.lruLen(), c.ranges[identity])
 	}
 }
 
