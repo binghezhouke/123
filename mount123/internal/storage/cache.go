@@ -31,6 +31,8 @@ type flight struct {
 // Cache is a persistent, size-bounded cache. Its directory is exclusively
 // owned by one process for the lifetime of the Cache.
 type Cache struct {
+	links               map[string]cachedLink
+	linkFlights         map[string]chan struct{}
 	mu                  sync.Mutex
 	dir                 string
 	max, used, reserved int64
@@ -328,4 +330,29 @@ func (h *Handle) Close() error {
 	}
 	c.mu.Unlock()
 	return err
+}
+
+// existing pins a cached data block without starting a fill on a miss.
+func (c *Cache) existing(key string, size int64) (*Handle, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return nil, ErrClosed
+	}
+	id := cacheID(key)
+	e := c.entries[id]
+	if e == nil || e.size != size {
+		return nil, nil
+	}
+	f, err := os.Open(e.path)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	e.pins++
+	e.used = time.Now()
+	_ = os.Chtimes(e.path, e.used, e.used)
+	return &Handle{file: f, cache: c, key: id, size: size}, nil
 }

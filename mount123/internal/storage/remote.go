@@ -25,10 +25,12 @@ type Remote struct {
 	cache          *Cache
 	size           int64
 	key            string
+	linkKey        string
 	resolve        ResolveURL
 	client         *http.Client
 	mu             sync.Mutex
 	url            string
+	resolvedURL    string
 	urlUntil       time.Time
 	etag, modified string
 }
@@ -50,7 +52,7 @@ func NewRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, k
 	}
 	ctx, cancel := combineContexts(lifetimeCtx, operationCtx)
 	defer cancel()
-	r := &Remote{lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: key, resolve: resolve, client: http.DefaultClient}
+	r := &Remote{lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: key, linkKey: key, resolve: resolve, client: http.DefaultClient}
 	if size == 0 {
 		r.key = namespaceWithoutValidator(key)
 		return r, nil
@@ -129,13 +131,16 @@ func (r *Remote) Key() string { return r.key }
 func (r *Remote) refresh(ctx context.Context) error {
 	cctx, cancel := context.WithTimeout(ctx, remoteRequestTimeout)
 	defer cancel()
-	u, err := r.resolve(cctx)
-	if err != nil || u == "" {
+	r.mu.Lock()
+	previous := r.resolvedURL
+	r.mu.Unlock()
+	link, err := r.cache.downloadLink(cctx, r.linkKey, previous, r.resolve)
+	if err != nil {
 		return contextError(ctx, err, "could not resolve remote download URL")
 	}
 	r.mu.Lock()
-	r.url = u
-	r.urlUntil = time.Now().Add(10 * time.Minute)
+	r.url, r.urlUntil = link.url, link.until
+	r.resolvedURL = link.url
 	r.mu.Unlock()
 	return nil
 }
@@ -182,6 +187,15 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 			}
 			continue
 		}
+		// Reuse the resolved CDN endpoint instead of repeating its redirect
+		// on every sparse metadata request. Authentication failures still refresh.
+		if resp.StatusCode == http.StatusPartialContent && resp.Request != nil {
+			r.mu.Lock()
+			if r.url == u {
+				r.url = resp.Request.URL.String()
+			}
+			r.mu.Unlock()
+		}
 		return resp, nil
 	}
 	return nil, errors.New("remote range request failed")
@@ -223,6 +237,40 @@ func (r *Remote) ReadAt(p []byte, off int64) (int, error) {
 // ReadAtContext reads from the remote while observing both ctx and the
 // lifetime context supplied when the Remote was constructed.
 func (r *Remote) ReadAtContext(operationCtx context.Context, p []byte, off int64) (int, error) {
+	return r.readAtContext(operationCtx, p, off, remoteBlockSize, "remote")
+}
+
+// ReadMetadataAtContext avoids fetching a whole 1 MiB data block for
+// every small header. Existing data blocks remain usable after upgrading.
+func (r *Remote) ReadMetadataAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	ctx, cancel := combineContexts(r.lifetimeCtx, ctx)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if off >= 0 && off < r.size && len(p) > 0 {
+		block := off / remoteBlockSize
+		start := block * remoteBlockSize
+		size := remoteBlockSize
+		if size > r.size-start {
+			size = r.size - start
+		}
+		if int64(len(p)) <= size-(off-start) {
+			key := fmt.Sprintf("remote:%s:%d:%d", r.key, block, size)
+			h, err := r.cache.existing(key, size)
+			if err != nil {
+				return 0, err
+			}
+			if h != nil {
+				defer h.Close()
+				return h.ReadAt(p, off-start)
+			}
+		}
+	}
+	return r.readAtContext(ctx, p, off, 64<<10, "remote-meta")
+}
+
+func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64, blockSize int64, prefix string) (int, error) {
 	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -247,14 +295,14 @@ func (r *Remote) ReadAtContext(operationCtx context.Context, p []byte, off int64
 			return read, err
 		}
 		pos := off + int64(read)
-		block := pos / remoteBlockSize
-		start := block * remoteBlockSize
-		end := start + remoteBlockSize - 1
+		block := pos / blockSize
+		start := block * blockSize
+		end := start + blockSize - 1
 		if end >= r.size {
 			end = r.size - 1
 		}
 		nblock := end - start + 1
-		cacheKey := fmt.Sprintf("remote:%s:%d:%d", r.key, block, nblock)
+		cacheKey := fmt.Sprintf("%s:%s:%d:%d", prefix, r.key, block, nblock)
 		h, err := r.cache.Acquire(ctx, cacheKey, nblock, func(ctx context.Context, w io.Writer) error { return r.fetchBlock(ctx, start, end, w) })
 		if err != nil {
 			if read > 0 {

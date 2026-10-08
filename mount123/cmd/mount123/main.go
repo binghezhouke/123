@@ -30,6 +30,11 @@ func main() {
 	}
 }
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "unlock" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runUnlock(ctx, os.Args[2:], os.Stdin, os.Stderr, os.Stdout)
+	}
 	userCache, err := os.UserCacheDir()
 	if err != nil {
 		return err
@@ -40,10 +45,21 @@ func run() error {
 	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
 	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and ZIP index cache budget in MiB")
+	archiveEntries := flag.Int("archive-max-entries", 100000, "maximum members per archive index")
 	directoryTTL := flag.Duration("directory-ttl", 30*time.Second, "directory snapshot freshness interval")
 	sourceTTL := flag.Duration("source-ttl", 30*time.Second, "remote reader reuse interval across opens")
-	zipDirs := flag.Bool("zip-dirs", true, "expose .zip files as directories")
+	fileInfo := flag.Bool("file-info", false, "refresh metadata for looked-up cloud files (adds a batched API request)")
+	zipDirs := flag.Bool("zip-dirs", true, "expose ZIP, 7z and RAR archives as directories")
+	prefetchFiles := flag.Int("prefetch-files", 9, "maximum adjacent images to prefetch (0 disables)")
+	prefetchWorkers := flag.Int("prefetch-workers", 2, "maximum background image reads")
+	prefetchMiB := flag.Int64("prefetch-mib", 256, "maximum target image bytes per prefetch window in MiB")
 	flag.Parse()
+	if *archiveEntries < 1 || *archiveEntries > 1000000 {
+		return fmt.Errorf("invalid archive entry limit")
+	}
+	if *prefetchFiles < 0 || *prefetchFiles > 64 || *prefetchWorkers < 1 || *prefetchWorkers > 16 || *prefetchMiB < 1 || *prefetchMiB > 1<<20 {
+		return fmt.Errorf("invalid prefetch limits")
+	}
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
 	}
@@ -110,7 +126,7 @@ func run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Fail authentication/list errors before installing a mount.
-	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL})
+	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}

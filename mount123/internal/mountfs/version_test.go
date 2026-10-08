@@ -62,7 +62,20 @@ func TestArchiveVersionRefreshPreservesOldHandleSnapshot(t *testing.T) {
 	api.version = "v2"
 	api.mu.Unlock()
 	time.Sleep(30 * time.Millisecond)
-	fresh := lookup(t, lookup(t, lookup(t, root, "photos.zip"), "images"), "file.txt")
+	// An expired snapshot is served once while its replacement loads in the background.
+	var freshArchive *Node
+	deadline := time.Now().Add(time.Second)
+	for {
+		freshArchive = lookup(t, root, "photos.zip")
+		if freshArchive.item.cloud.Version == "v2" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("background directory refresh did not publish new version")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	fresh := lookup(t, lookup(t, freshArchive, "images"), "file.txt")
 	if got := string(readNode(t, fresh, 0, 11)); got != "new content" {
 		t.Fatal(got)
 	}

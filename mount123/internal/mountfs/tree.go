@@ -5,6 +5,7 @@ import (
 	"archive/zip"
 	"compress/flate"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -15,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -23,6 +25,7 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+	"github.com/nwaples/rardecode/v2"
 )
 
 type API interface {
@@ -30,9 +33,23 @@ type API interface {
 	DownloadURL(context.Context, int64) (string, error)
 }
 
+// MetadataAPI is optional to keep small adapters compatible. The production
+// client implements both methods for root validation and active inode refresh.
+type MetadataAPI interface {
+	Infos(context.Context, []int64) ([]panapi.File, error)
+	Detail(context.Context, int64) (panapi.File, error)
+}
+
+type PasswordAPI interface {
+	ReadSmallFile(context.Context, int64, int64) ([]byte, error)
+}
+
 // Options sets mount-local metadata and source reuse lifetimes. Zero values
 // select documented defaults.
 type Options struct {
+	PrefetchFiles       int
+	PrefetchWorkers     int
+	PrefetchBytes       int64
 	DirectoryTTL        time.Duration
 	SourceTTL           time.Duration
 	ZIPIndexTTL         time.Duration
@@ -43,6 +60,7 @@ type Options struct {
 	MaxDepth            int
 	MaxNameBytes        int
 	MaxConcurrentBuilds int
+	RefreshFileMetadata bool
 }
 
 func defaults(o Options) Options {
@@ -80,17 +98,25 @@ func defaults(o Options) Options {
 }
 
 type Tree struct {
-	ctx       context.Context
-	api       API
-	cache     *storage.Cache
-	zipDirs   bool
-	opts      Options
-	mu        sync.Mutex
-	meta      map[string]*metaItem
-	metaBytes int64
-	seq       uint64
-	builds    chan struct{}
-	sources   map[string]*sourceCall
+	prefetch         *imagePrefetch
+	ctx              context.Context
+	api              API
+	cache            *storage.Cache
+	zipDirs          bool
+	opts             Options
+	mu               sync.Mutex
+	meta             map[string]*metaItem
+	metaBytes        int64
+	seq              uint64
+	builds           chan struct{}
+	sources          map[string]*sourceCall
+	archiveTasks     map[string]*sourceCall
+	refreshing       map[string]bool
+	infoMu           sync.Mutex
+	infoPending      []*infoRequest
+	infoRunning      bool
+	passwordKey      [32]byte
+	passwordKeyValid bool
 }
 type entry struct {
 	name        string
@@ -99,9 +125,13 @@ type entry struct {
 	source      *storage.Remote
 	zipPath     string
 	archiveSize int64
+	archive     *archiveDescriptor
 	directory   bool
 }
 type member struct {
+	rarLocator       *rardecode.MemberLocator
+	format           string
+	ordinal          int
 	file             *zip.File
 	reader           *contextZIPReaderAt
 	name             string
@@ -109,11 +139,21 @@ type member struct {
 	flags            uint16
 	crc              uint32
 	compressed, size uint64
+	encrypted        bool
+	aes              *aesMemberInfo
 }
+type archiveDescriptor struct {
+	id, parentID  int64
+	name, version string
+	size          int64
+}
+type protectedPassword struct{ nonce, ciphertext []byte }
 type Node struct {
+	parent *Node
 	fs.Inode
 	tree *Tree
 	item *entry
+	root bool
 }
 type metaItem struct {
 	key     string
@@ -123,10 +163,27 @@ type metaItem struct {
 	seq     uint64
 }
 type sourceCall struct {
-	done  chan struct{}
-	value any
-	err   error
+	partial *zipIndex
+	updated chan struct{}
+	done    chan struct{}
+	value   any
+	err     error
 }
+type infoResult struct {
+	file panapi.File
+	err  error
+}
+type infoRequest struct {
+	ctx    context.Context
+	id     int64
+	result chan infoResult
+}
+
+var errInfoNotFound = errors.New("file metadata not found or trashed")
+
+const infoBatchMax = 100
+const infoQueueMax = 400
+const infoBatchWindow = 5 * time.Millisecond
 
 func New(ctx context.Context, api API, cache *storage.Cache, rootID int64, zipDirs bool) *Node {
 	return NewWithOptions(ctx, api, cache, rootID, zipDirs, Options{})
@@ -136,11 +193,39 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 		ctx = context.Background()
 	}
 	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}}
-	return &Node{tree: t, item: &entry{directory: true, cloud: &panapi.File{ID: rootID, IsDir: true}}}
+	_, secretErr := rand.Read(t.passwordKey[:])
+	t.passwordKeyValid = secretErr == nil
+	if opts.PrefetchFiles > 0 {
+		t.prefetch = newImagePrefetch(t)
+	}
+	return &Node{tree: t, item: &entry{directory: true, cloud: &panapi.File{ID: rootID, IsDir: true}}, root: true}
 }
 
-// Prepare validates and caches the root listing before mounting.
-func (n *Node) Prepare(ctx context.Context) error { _, err := n.list(ctx); return err }
+// Prepare validates a nonzero root and caches its listing before mounting.
+func (n *Node) Prepare(ctx context.Context) error {
+	if n.item.cloud.ID != 0 {
+		if api, ok := n.tree.api.(MetadataAPI); ok {
+			id := n.item.cloud.ID
+			value, err := n.tree.loadMeta(ctx, fmt.Sprintf("detail:%d", id), n.tree.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
+				f, err := api.Detail(ctx, id)
+				if err != nil {
+					return nil, 0, err
+				}
+				return f, int64(512 + len(f.Name) + len(f.Version)), nil
+			})
+			if err != nil {
+				return fmt.Errorf("root metadata: %w", err)
+			}
+			f := value.(panapi.File)
+			if f.ID != id || !f.IsDir || f.Trashed {
+				return errors.New("root ID is missing, trashed or not a directory")
+			}
+			n.item.cloud = &f
+		}
+	}
+	_, err := n.list(ctx)
+	return err
+}
 
 func validName(name string) bool {
 	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00") && utf8.ValidString(name)
@@ -231,12 +316,188 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 	}
 }
 
+func (t *Tree) lookupCloudMetadata(ctx context.Context, snapshot *panapi.File) (*panapi.File, error) {
+	api, ok := t.api.(MetadataAPI)
+	if !ok {
+		return snapshot, nil
+	}
+	key := fmt.Sprintf("info:%d:%s:%d:%t", snapshot.ID, snapshot.Version, snapshot.Size, snapshot.IsDir)
+	value, err := t.loadMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
+		f, err := t.requestInfo(ctx, api, snapshot.ID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if f.Trashed {
+			return nil, 0, errInfoNotFound
+		}
+		if f.ID != snapshot.ID || f.Name != snapshot.Name || f.IsDir != snapshot.IsDir {
+			return nil, 0, syscall.ESTALE
+		}
+		// Directory aggregates may vary between list and Infos. Keep the
+		// immutable directory snapshot while accepting refreshed timestamps.
+		if !snapshot.IsDir && (f.Size != snapshot.Size || f.Version != snapshot.Version) {
+			return nil, 0, syscall.ESTALE
+		}
+		copy := *snapshot
+		if !f.CreatedAt.IsZero() {
+			copy.CreatedAt = f.CreatedAt
+		}
+		if !f.UpdatedAt.IsZero() {
+			copy.UpdatedAt = f.UpdatedAt
+		}
+		return &copy, int64(512 + len(copy.Name) + len(copy.Version)), nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(*panapi.File), nil
+}
+
+func (t *Tree) cachedCloudMetadata(snapshot *panapi.File) *panapi.File {
+	key := fmt.Sprintf("info:%d:%s:%d:%t", snapshot.ID, snapshot.Version, snapshot.Size, snapshot.IsDir)
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	item := t.meta[key]
+	if item == nil || time.Now().After(item.expires) {
+		return snapshot
+	}
+	t.seq++
+	item.seq = t.seq
+	f, ok := item.value.(*panapi.File)
+	if !ok {
+		return snapshot
+	}
+	return f
+}
+
+func (t *Tree) requestInfo(ctx context.Context, api MetadataAPI, id int64) (panapi.File, error) {
+	req := &infoRequest{ctx: ctx, id: id, result: make(chan infoResult, 1)}
+	t.infoMu.Lock()
+	if len(t.infoPending) >= infoQueueMax {
+		t.infoMu.Unlock()
+		return panapi.File{}, errors.New("metadata refresh queue is full")
+	}
+	t.infoPending = append(t.infoPending, req)
+	if !t.infoRunning {
+		t.infoRunning = true
+		go t.runInfoBatches(api)
+	}
+	t.infoMu.Unlock()
+	select {
+	case result := <-req.result:
+		return result.file, result.err
+	case <-ctx.Done():
+		return panapi.File{}, ctx.Err()
+	case <-t.ctx.Done():
+		return panapi.File{}, t.ctx.Err()
+	}
+}
+
+func (t *Tree) runInfoBatches(api MetadataAPI) {
+	for {
+		timer := time.NewTimer(infoBatchWindow)
+		select {
+		case <-timer.C:
+		case <-t.ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			t.finishInfoQueue(t.ctx.Err())
+			return
+		}
+		t.infoMu.Lock()
+		if len(t.infoPending) == 0 {
+			t.infoRunning = false
+			t.infoMu.Unlock()
+			return
+		}
+		n := len(t.infoPending)
+		if n > infoBatchMax {
+			n = infoBatchMax
+		}
+		batch := append([]*infoRequest(nil), t.infoPending[:n]...)
+		t.infoPending = append([]*infoRequest(nil), t.infoPending[n:]...)
+		t.infoMu.Unlock()
+		active := batch[:0]
+		idSet := map[int64]bool{}
+		ids := make([]int64, 0, len(batch))
+		for _, req := range batch {
+			if req.ctx.Err() != nil {
+				req.result <- infoResult{err: req.ctx.Err()}
+				continue
+			}
+			active = append(active, req)
+			if !idSet[req.id] {
+				idSet[req.id] = true
+				ids = append(ids, req.id)
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		batchCtx, cancel := context.WithCancel(t.ctx)
+		var remaining atomic.Int32
+		remaining.Store(int32(len(active)))
+		stops := make([]func() bool, 0, len(active))
+		for _, req := range active {
+			stops = append(stops, context.AfterFunc(req.ctx, func() {
+				if remaining.Add(-1) == 0 {
+					cancel()
+				}
+			}))
+		}
+		files, err := api.Infos(batchCtx, ids)
+		for _, stop := range stops {
+			stop()
+		}
+		cancel()
+		byID := make(map[int64]panapi.File, len(files))
+		for _, f := range files {
+			byID[f.ID] = f
+		}
+		for _, req := range active {
+			if err := req.ctx.Err(); err != nil {
+				req.result <- infoResult{err: err}
+				continue
+			}
+			if err != nil {
+				req.result <- infoResult{err: err}
+				continue
+			}
+			f, ok := byID[req.id]
+			if !ok {
+				req.result <- infoResult{err: errInfoNotFound}
+				continue
+			}
+			req.result <- infoResult{file: f}
+		}
+	}
+}
+
+func (t *Tree) finishInfoQueue(err error) {
+	t.infoMu.Lock()
+	pending := t.infoPending
+	t.infoPending = nil
+	t.infoRunning = false
+	t.infoMu.Unlock()
+	for _, req := range pending {
+		req.result <- infoResult{err: err}
+	}
+}
+
 func cloudKey(f *panapi.File) string { return fmt.Sprintf("cloud:%d:%s:%d", f.ID, f.Version, f.Size) }
 func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 	f := n.item.cloud
 	key := cloudKey(f)
 	t := n.tree
-	value, err := t.loadMeta(ctx, "source:"+key, t.opts.SourceTTL, func(ctx context.Context) (any, int64, error) {
+	ttl := t.opts.SourceTTL
+	if t.zipDirs && f.Version != "" && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z") {
+		ttl = max(ttl, 6*24*time.Hour)
+	}
+	value, err := t.loadMeta(ctx, "source:"+key, ttl, func(ctx context.Context) (any, int64, error) {
 		r, err := storage.NewRemoteContext(t.ctx, ctx, t.cache, key, f.Size, func(ctx context.Context) (string, error) { return t.api.DownloadURL(ctx, f.ID) })
 		if err != nil {
 			return nil, 0, err
@@ -266,11 +527,25 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 		if size == 0 && n.item.cloud != nil {
 			size = n.item.cloud.Size
 		}
-		idx, err := n.tree.getZIP(ctx, source, size)
+		archive := n.item.archive
+		if archive == nil && n.item.cloud != nil {
+			archive = &archiveDescriptor{id: n.item.cloud.ID, parentID: n.item.cloud.ParentID, name: n.item.cloud.Name, version: n.item.cloud.Version, size: n.item.cloud.Size}
+		}
+		var idx *zipIndex
+		if archive != nil && archiveKind(archive.name) != ".zip" {
+			password, e := n.tree.otherPassword(ctx, archive)
+			if e != nil {
+				return nil, e
+			}
+			defer clear(password)
+			idx, err = n.tree.otherIndex(ctx, source, archive, password)
+		} else {
+			idx, err = n.tree.getZIP(ctx, source, size)
+		}
 		if err != nil {
 			return nil, err
 		}
-		return idx.children(n.item.zipPath, source, size), nil
+		return idx.children(n.item.zipPath, source, size, archive), nil
 	}
 	return n.listCloud(ctx, fmt.Sprintf("dir:%d", n.item.cloud.ID))
 }
@@ -290,7 +565,7 @@ func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64) (
 }
 
 func (n *Node) listCloud(ctx context.Context, key string) (map[string]*entry, error) {
-	value, err := n.tree.loadMeta(ctx, key, n.tree.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
+	value, err := n.tree.loadRefreshingMeta(ctx, key, n.tree.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		files, err := n.tree.api.List(ctx, n.item.cloud.ID)
 		if err != nil {
 			return nil, 0, err
@@ -315,7 +590,7 @@ func (n *Node) listCloud(ctx context.Context, key string) (map[string]*entry, er
 				return nil, 0, fmt.Errorf("directory exceeds metadata budget; increase -metadata-mib")
 			}
 			ff := f
-			result[f.Name] = &entry{name: f.Name, cloud: &ff, directory: f.IsDir || (n.tree.zipDirs && strings.HasSuffix(strings.ToLower(f.Name), ".zip"))}
+			result[f.Name] = &entry{name: f.Name, cloud: &ff, directory: f.IsDir || (n.tree.zipDirs && archiveKind(f.Name) != "")}
 		}
 		return result, size, nil
 	})
@@ -327,16 +602,23 @@ func (n *Node) listCloud(ctx context.Context, key string) (map[string]*entry, er
 
 // ZIP index paths are represented by slash-separated components on the Node.
 type zipIndex struct {
-	root    *zipDir
-	members map[string]*member
-	bytes   int64
+	mu       sync.RWMutex
+	changed  chan struct{}
+	complete bool
+	scanErr  error
+	root     *zipDir
+	members  map[string]*member
+	bytes    int64
 }
 type zipDir struct {
+	order []string
 	dirs  map[string]*zipDir
 	files map[string]*member
 }
 
-func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int64) map[string]*entry {
+func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int64, archive *archiveDescriptor) map[string]*entry {
+	z.mu.RLock()
+	defer z.mu.RUnlock()
 	dir := z.root
 	if path != "" {
 		for _, part := range strings.Split(path, "/") {
@@ -352,13 +634,13 @@ func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int
 		if path != "" {
 			childPath = path + "/" + k
 		}
-		out[k] = &entry{name: k, directory: true, zipPath: childPath, source: source, archiveSize: archiveSize}
+		out[k] = &entry{name: k, directory: true, zipPath: childPath, source: source, archiveSize: archiveSize, archive: archive}
 	}
 	for k, m := range dir.files {
 		copy := *m
 		copy.file = nil
 		copy.reader = nil
-		out[k] = &entry{name: k, member: &copy, source: source, archiveSize: archiveSize}
+		out[k] = &entry{name: k, member: &copy, source: source, archiveSize: archiveSize, archive: archive}
 	}
 	return out
 }
@@ -426,6 +708,22 @@ func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) 
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		aesInfo, hasAES, aesErr := parseAESExtra(f.Extra)
+		if aesErr != nil {
+			return nil, aesErr
+		}
+		if hasAES && f.Flags&1 == 0 {
+			return nil, errors.New("WinZip AES entry is not marked encrypted")
+		}
+		if hasAES && f.Method != 99 {
+			return nil, errors.New("WinZip AES entry has an inconsistent compression method")
+		}
+		if f.Method == 99 && !hasAES {
+			return nil, syscall.EOPNOTSUPP
+		}
+		if f.Flags&0x40 != 0 {
+			return nil, syscall.EOPNOTSUPP
+		}
 		bytes += 384 + int64(len(f.Name)+len(f.Extra)+len(f.Comment))
 		decoded, e := zipName(f)
 		if e != nil {
@@ -471,7 +769,11 @@ func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) 
 				if !f.Mode().IsRegular() || f.UncompressedSize64 > math.MaxInt64 {
 					return nil, errors.New("unsupported ZIP entry type or size")
 				}
-				m := &member{file: f, reader: adapter, name: f.Name, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64}
+				m := &member{file: f, reader: adapter, name: f.Name, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
+				if hasAES {
+					m.aes = &aesInfo
+					m.method = aesInfo.method
+				}
 				dir.files[part] = m
 				index.members[f.Name] = m
 				nodes++
@@ -518,6 +820,13 @@ func (n *Node) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut)
 			out.Size = uint64(n.item.cloud.Size)
 		}
 	}
+	if n.item.cloud != nil {
+		file := n.item.cloud
+		if !n.root && n.tree.opts.RefreshFileMetadata {
+			file = n.tree.cachedCloudMetadata(file)
+		}
+		setFileTimes(&out.Attr, *file)
+	}
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
 	return 0
@@ -526,15 +835,30 @@ func (n *Node) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.At
 	return syscall.EROFS
 }
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
-	entries, err := n.list(ctx)
+	entries, pending, err := n.lookupEntries(ctx, name)
 	if err != nil {
 		return nil, toErrno(err)
 	}
 	e, ok := entries[name]
+	if !ok && pending {
+		return nil, syscall.EAGAIN
+	}
 	if !ok {
 		return nil, syscall.ENOENT
 	}
-	child := &Node{tree: n.tree, item: e}
+	if e.cloud != nil && n.tree.opts.RefreshFileMetadata {
+		fresh, err := n.tree.lookupCloudMetadata(ctx, e.cloud)
+		if errors.Is(err, errInfoNotFound) {
+			return nil, syscall.ENOENT
+		}
+		if err != nil {
+			return nil, toErrno(err)
+		}
+		copy := *e
+		copy.cloud = fresh
+		e = &copy
+	}
+	child := &Node{tree: n.tree, item: e, parent: n}
 	var attr fuse.AttrOut
 	child.Getattr(ctx, nil, &attr)
 	out.Attr = attr.Attr
@@ -554,6 +878,26 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 		ino += 2
 	}
 	return n.NewInode(ctx, child, fs.StableAttr{Mode: child.mode() & syscall.S_IFMT, Ino: ino}), 0
+}
+
+func setFileTimes(attr *fuse.Attr, file panapi.File) {
+	updated := file.UpdatedAt
+	if updated.IsZero() {
+		updated = file.CreatedAt
+	}
+	setFuseTime(&attr.Mtime, &attr.Mtimensec, updated)
+	setFuseTime(&attr.Ctime, &attr.Ctimensec, updated)
+}
+func setFuseTime(seconds *uint64, nanos *uint32, value time.Time) {
+	if value.IsZero() {
+		return
+	}
+	unix := value.Unix()
+	if unix < 0 {
+		return
+	}
+	*seconds = uint64(unix)
+	*nanos = uint32(value.Nanosecond())
 }
 func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	entries, err := n.list(ctx)
@@ -576,6 +920,18 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(result), 0
 }
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	if n.tree.prefetch != nil {
+		done := n.tree.prefetch.foreground(n)
+		defer done()
+	}
+	h, flagsOut, errno := n.openRaw(ctx, flags)
+	if errno == 0 && n.tree.prefetch != nil && n.parent != nil && imageName(n.item.name) {
+		return &imageHandle{FileHandle: h, node: n}, flagsOut, errno
+	}
+	return h, flagsOut, errno
+}
+
+func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if flags&(syscall.O_ACCMODE|syscall.O_TRUNC|syscall.O_APPEND|syscall.O_CREAT) != syscall.O_RDONLY {
 		return nil, 0, syscall.EROFS
 	}
@@ -589,11 +945,11 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		}
 		return &handle{remote: source, size: uint64(n.item.cloud.Size)}, fuse.FOPEN_DIRECT_IO, 0
 	}
+	if n.item.member.format != "" {
+		return n.openOtherArchive(ctx)
+	}
 	m := n.item.member
 	src := n.item.source
-	if m.flags&1 != 0 || (m.method != zip.Store && m.method != zip.Deflate) {
-		return nil, 0, syscall.EOPNOTSUPP
-	}
 	idx, err := n.tree.getZIP(ctx, src, n.item.archiveSize)
 	if err != nil {
 		return nil, 0, toErrno(err)
@@ -601,6 +957,26 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	full := idx.members[m.name]
 	if full == nil {
 		return nil, 0, syscall.EIO
+	}
+	if m.flags&1 != 0 {
+		password, err := n.tree.passwordForArchive(ctx, n.item.archive)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		defer clear(password)
+		tag := passwordTag(n.tree.passwordKey, n.item.archive, password)
+		key := src.Key() + ":encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
+		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error { return encryptedMember(ctx, src, full, password, w) })
+		if err != nil {
+			if isPasswordError(err) {
+				return nil, 0, syscall.EACCES
+			}
+			return nil, 0, toErrno(err)
+		}
+		return &handle{reader: cached, closer: cached, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+	}
+	if m.method != zip.Store && m.method != zip.Deflate {
+		return nil, 0, syscall.EOPNOTSUPP
 	}
 	if m.method == zip.Store {
 		if m.compressed != m.size {

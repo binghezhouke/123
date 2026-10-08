@@ -1,5 +1,5 @@
-// Package panapi implements the read-only subset of the 123 Open Platform API
-// used by mount123.
+// Package panapi implements the 123 Open Platform API reads used by mount123
+// and the explicit unlock command's narrowly scoped password-sidecar upload.
 package panapi
 
 import (
@@ -25,11 +25,15 @@ const defaultBaseURL = "https://open-api.123pan.com"
 
 // File is the subset of remote file metadata needed by the mount.
 type File struct {
-	ID      int64
-	Name    string
-	Size    int64
-	IsDir   bool
-	Version string
+	ID        int64
+	ParentID  int64
+	Name      string
+	Size      int64
+	IsDir     bool
+	Version   string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+	Trashed   bool
 }
 
 // Config contains Open Platform credentials and optional token settings.
@@ -89,13 +93,37 @@ func New(cfg Config) (*Client, error) {
 }
 
 type remoteFile struct {
-	ID       json.RawMessage `json:"fileId"`
-	Name     string          `json:"filename"`
-	Size     json.RawMessage `json:"size"`
-	Type     json.RawMessage `json:"type"`
-	ETag     string          `json:"etag"`
-	UpdateAt string          `json:"updateAt"`
-	Trashed  json.RawMessage `json:"trashed"`
+	ID        json.RawMessage `json:"fileId"`
+	ParentID  json.RawMessage `json:"parentFileId"`
+	Name      string          `json:"filename"`
+	Size      json.RawMessage `json:"size"`
+	Type      json.RawMessage `json:"type"`
+	ETag      string          `json:"etag"`
+	UpdateAt  apiTime         `json:"updateAt"`
+	CreateAt  apiTime         `json:"createAt"`
+	CreatedAt apiTime         `json:"createdAt"`
+	UpdatedAt apiTime         `json:"updatedAt"`
+	Trashed   json.RawMessage `json:"trashed"`
+}
+
+type apiTime string
+
+func (t *apiTime) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*t = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*t = apiTime(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*t = apiTime(n.String())
+		return nil
+	}
+	return errors.New("invalid timestamp")
 }
 
 // List returns every non-trashed item in parentID. The API is paged in batches
@@ -132,7 +160,9 @@ func (c *Client) List(ctx context.Context, parentID int64) ([]File, error) {
 			if err != nil {
 				return nil, errors.New("panapi: invalid file type in response")
 			}
-			files = append(files, File{ID: id, Name: item.Name, Size: size, IsDir: typ == 1, Version: item.ETag + ":" + strconv.FormatInt(size, 10) + ":" + item.UpdateAt})
+			file := decodeFile(item, id, size, typ == 1)
+			file.ParentID = parentID
+			files = append(files, file)
 		}
 		if len(body.LastID) == 0 || string(body.LastID) == "null" {
 			return files, nil
@@ -156,6 +186,145 @@ func (c *Client) List(ctx context.Context, parentID int64) ([]File, error) {
 	return nil, errors.New("panapi: pagination exceeded safety limit")
 }
 
+// Infos returns metadata for the supplied file IDs, including items in trash.
+func (c *Client) Infos(ctx context.Context, ids []int64) ([]File, error) {
+	uniqueIDs := make([]int64, 0, len(ids))
+	seenIDs := make(map[int64]struct{}, len(ids))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, errors.New("panapi: file IDs must be positive")
+		}
+		if _, ok := seenIDs[id]; ok {
+			continue
+		}
+		seenIDs[id] = struct{}{}
+		uniqueIDs = append(uniqueIDs, id)
+	}
+	if len(uniqueIDs) == 0 {
+		return []File{}, nil
+	}
+	// Keep each request small; this is a local safety cap, not a documented API limit.
+	if len(uniqueIDs) > 100 {
+		return nil, errors.New("panapi: file infos exceeds local 100-ID safety cap")
+	}
+	var body struct {
+		Files []remoteFile `json:"fileList"`
+		Data  []remoteFile `json:"files"`
+	}
+	payload, err := json.Marshal(struct {
+		FileIDs []int64 `json:"fileIds"`
+	}{uniqueIDs})
+	if err != nil {
+		return nil, errors.New("panapi: could not encode file IDs")
+	}
+	if err := c.requestJSON(ctx, http.MethodPost, "/api/v1/file/infos", nil, payload, &body); err != nil {
+		return nil, err
+	}
+	items := body.Files
+	if items == nil {
+		items = body.Data
+	}
+	files := make([]File, 0, len(items))
+	byID := make(map[int64]File, len(items))
+	for _, item := range items {
+		id, err := nonNegativeInt(item.ID)
+		if err != nil {
+			return nil, errors.New("panapi: invalid file ID in response")
+		}
+		size, err := nonNegativeInt(item.Size)
+		if err != nil {
+			return nil, errors.New("panapi: invalid file size in response")
+		}
+		typ, err := nonNegativeInt(item.Type)
+		if err != nil {
+			return nil, errors.New("panapi: invalid file type in response")
+		}
+		file := decodeFile(item, id, size, typ == 1)
+		if len(item.ParentID) > 0 && string(item.ParentID) != "null" {
+			file.ParentID, err = nonNegativeInt(item.ParentID)
+			if err != nil {
+				return nil, errors.New("panapi: invalid parent file ID in response")
+			}
+		}
+		byID[id] = file
+	}
+	for _, id := range uniqueIDs {
+		if file, ok := byID[id]; ok {
+			files = append(files, file)
+		}
+	}
+	return files, nil
+}
+
+// Detail returns metadata for one file, including its trashed state.
+func (c *Client) Detail(ctx context.Context, id int64) (File, error) {
+	if id <= 0 {
+		return File{}, errors.New("panapi: file ID must be positive")
+	}
+	var item remoteFile
+	q := url.Values{"fileID": {strconv.FormatInt(id, 10)}}
+	if err := c.getJSON(ctx, "/api/v1/file/detail", q, &item); err != nil {
+		return File{}, err
+	}
+	fid, err := nonNegativeInt(item.ID)
+	if err != nil {
+		return File{}, errors.New("panapi: invalid file ID in response")
+	}
+	if fid != id {
+		return File{}, errors.New("panapi: detail response ID does not match request")
+	}
+	parentID, err := nonNegativeInt(item.ParentID)
+	if err != nil {
+		return File{}, errors.New("panapi: invalid parent file ID in detail response")
+	}
+	size, err := nonNegativeInt(item.Size)
+	if err != nil {
+		return File{}, errors.New("panapi: invalid file size in response")
+	}
+	typ, err := nonNegativeInt(item.Type)
+	if err != nil {
+		return File{}, errors.New("panapi: invalid file type in response")
+	}
+	file := decodeFile(item, fid, size, typ == 1)
+	file.ParentID = parentID
+	return file, nil
+}
+
+func decodeFile(item remoteFile, id, size int64, isDir bool) File {
+	updated := parseAPITime(firstNonempty(string(item.UpdatedAt), string(item.UpdateAt)))
+	created := parseAPITime(firstNonempty(string(item.CreatedAt), string(item.CreateAt)))
+	return File{ID: id, Name: item.Name, Size: size, IsDir: isDir, Version: item.ETag + ":" + strconv.FormatInt(size, 10), CreatedAt: created, UpdatedAt: updated, Trashed: isTrashed(item.Trashed)}
+}
+
+func firstNonempty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func parseAPITime(s string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	// The API emits local China time without an offset in createAt/updateAt.
+	china := time.FixedZone("China Standard Time", 8*60*60)
+	if t, err := time.ParseInLocation("2006-01-02 15:04:05", s, china); err == nil {
+		return t
+	}
+	if n, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if n > 1e12 {
+			return time.UnixMilli(n)
+		}
+		return time.Unix(n, 0)
+	}
+	return time.Time{}
+}
+
 // DownloadURL returns the short-lived URL supplied by download_info. Callers
 // should not log this value because it may contain signed credentials.
 func (c *Client) DownloadURL(ctx context.Context, id int64) (string, error) {
@@ -173,7 +342,14 @@ func (c *Client) DownloadURL(ctx context.Context, id int64) (string, error) {
 }
 
 func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values, out any) error {
-	for attempt := 0; attempt < 2; attempt++ {
+	return c.requestJSON(ctx, http.MethodGet, endpoint, query, nil, out)
+}
+
+func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query url.Values, payload []byte, out any) error {
+	const maxThrottleRetries = 4
+	const maxCompletionRetries = 5
+	throttleRetries, completionRetries, authRetried := 0, 0, false
+	for {
 		token, err := c.accessToken(ctx)
 		if err != nil {
 			return err
@@ -185,23 +361,40 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 		if len(query) > 0 {
 			u += "?" + query.Encode()
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+		req, err := http.NewRequestWithContext(ctx, method, u, strings.NewReader(string(payload)))
 		if err != nil {
 			return errors.New("panapi: could not create request")
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Platform", "open_platform")
+		if method == http.MethodPost {
+			req.Header.Set("Content-Type", "application/json")
+		}
 		resp, err := c.http.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return fmt.Errorf("panapi: request failed: %s", safeError(err.Error(), c.config))
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 		resp.Body.Close()
 		if readErr != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			return errors.New("panapi: could not read API response")
 		}
-		if resp.StatusCode == http.StatusUnauthorized && attempt == 0 && c.config.AccessToken == "" {
-			c.invalidateToken()
+		if resp.StatusCode == http.StatusUnauthorized && !authRetried && c.config.AccessToken == "" {
+			authRetried = true
+			c.invalidateTokenIf(token)
+			continue
+		}
+		if resp.StatusCode == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries {
+			throttleRetries++
+			if err := waitThrottle(ctx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
+				return err
+			}
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -212,6 +405,25 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 			return errors.New("panapi: malformed API response")
 		}
 		if envelope.Code != 0 {
+			if envelope.Code == http.StatusUnauthorized && !authRetried && c.config.AccessToken == "" {
+				authRetried = true
+				c.invalidateTokenIf(token)
+				continue
+			}
+			if envelope.Code == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries {
+				throttleRetries++
+				if err := waitThrottle(ctx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
+					return err
+				}
+				continue
+			}
+			if envelope.Code == 20103 && endpoint == "/upload/v2/file/upload_complete" && completionRetries < maxCompletionRetries {
+				completionRetries++
+				if err := waitCompletionRetry(ctx, completionRetries); err != nil {
+					return err
+				}
+				continue
+			}
 			msg := safeError(envelope.Message, c.config, token)
 			if msg == "" {
 				return fmt.Errorf("panapi: API error code %d", envelope.Code)
@@ -226,7 +438,69 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 		}
 		return nil
 	}
-	return errors.New("panapi: unauthorized")
+}
+
+func waitCompletionRetry(ctx context.Context, attempt int) error {
+	delay := time.Duration(1<<uint(attempt-1)) * 200 * time.Millisecond
+	if delay > 2*time.Second {
+		delay = 2 * time.Second
+	}
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func waitThrottle(ctx context.Context, attempt int, retryAfter string) error {
+	var delay time.Duration
+	if value := strings.TrimSpace(retryAfter); value != "" {
+		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+			if seconds > 30 {
+				return errors.New("panapi: Retry-After exceeds 30-second limit")
+			}
+			delay = time.Duration(seconds) * time.Second
+		} else if _, numericErr := strconv.ParseUint(value, 10, 64); numericErr == nil || strings.Trim(value, "0123456789") == "" {
+			return errors.New("panapi: invalid or excessive Retry-After value")
+		} else if when, err := http.ParseTime(value); err == nil {
+			delay = time.Until(when)
+			if delay > 30*time.Second {
+				return errors.New("panapi: Retry-After exceeds 30-second limit")
+			}
+		} else {
+			delay = throttleBackoff(attempt)
+		}
+	} else if when, err := http.ParseTime(retryAfter); err == nil {
+		delay = time.Until(when)
+	} else {
+		delay = throttleBackoff(attempt)
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func throttleBackoff(attempt int) time.Duration {
+	base := time.Duration(1<<uint(attempt-1)) * 100 * time.Millisecond
+	if base > 2*time.Second {
+		base = 2 * time.Second
+	}
+	var b [1]byte
+	if _, err := rand.Read(b[:]); err == nil {
+		return base/2 + time.Duration(int(b[0])*int(base/2)/255)
+	}
+	return base
 }
 
 func (c *Client) accessToken(ctx context.Context) (string, error) {
@@ -263,6 +537,9 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 	req.Header.Set("Platform", "open_platform")
 	resp, err := c.http.Do(req)
 	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
 		return "", fmt.Errorf("panapi: token request failed: %s", safeError(err.Error(), c.config))
 	}
 	defer resp.Body.Close()
@@ -295,10 +572,12 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 	return c.token, nil
 }
 
-func (c *Client) invalidateToken() {
+func (c *Client) invalidateTokenIf(failed string) {
 	c.mu.Lock()
-	c.token = ""
-	c.expires = time.Time{}
+	if c.token == failed {
+		c.token = ""
+		c.expires = time.Time{}
+	}
 	c.mu.Unlock()
 }
 
