@@ -2,13 +2,13 @@ package mountfs
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
-	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 func (n *Node) progressiveRAR(ctx context.Context) (*zipIndex, *storage.Remote, *archiveDescriptor, bool, error) {
@@ -157,10 +157,31 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 // Reopening observes newer entries; an ordinary ls can always reach this
 // snapshot's EOF without waiting for a large archive to finish scanning.
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
-	idx, _, _, handled, err := n.progressiveRAR(ctx)
+	idx, source, archive, handled, err := n.progressiveRAR(ctx)
 	if !handled {
-		ds, errno := n.Readdir(ctx)
-		return ds, 0, errno
+		if n.item.directory && n.item.cloud != nil && n.item.cloud.IsDir && n.item.source == nil {
+			directory, err := n.tree.cloudDirectory(ctx, n.item.cloud.ID)
+			if err != nil {
+				return nil, 0, toErrno(err)
+			}
+			release, err := n.tree.pinDirectorySnapshot(directory, directory.bytes)
+			if err != nil {
+				return nil, 0, syscall.ENOMEM
+			}
+			return newDirectoryHandle(n, directory.entries, directory.names, release), 0, 0
+		}
+		if n.item.directory && (n.item.source != nil || (n.item.cloud != nil && !n.item.cloud.IsDir)) {
+			idx, source, archive, err := n.archiveDirectoryIndex(ctx)
+			if err != nil {
+				return nil, 0, toErrno(err)
+			}
+			return n.indexedDirectoryHandle(idx, source, archive)
+		}
+		entries, err := n.list(ctx)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		return newDirectoryHandle(n, entries, nil, nil), 0, 0
 	}
 	if err != nil {
 		return nil, 0, toErrno(err)
@@ -176,19 +197,30 @@ func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, 
 			return nil, 0, toErrno(err)
 		}
 		if idx.complete || (dir != nil && len(dir.order) > 0) {
-			entries := []fuse.DirEntry{}
+			var names []string
+			entries := make(map[string]*entry)
+			bytes := int64(128)
 			if dir != nil {
-				entries = make([]fuse.DirEntry, 0, len(dir.order))
-				for _, name := range dir.order {
-					mode := uint32(fuse.S_IFREG)
-					if dir.dirs[name] != nil {
-						mode = fuse.S_IFDIR
+				names = append([]string(nil), dir.order...)
+				bytes += int64(16 * len(names))
+				for _, name := range names {
+					if e := indexEntry(dir, n.item.zipPath, name, source, archive); e != nil {
+						entries[name] = e
+						if e.directory {
+							bytes += int64(128 + len(name))
+						} else {
+							bytes += int64(384 + len(name))
+						}
 					}
-					entries = append(entries, fuse.DirEntry{Name: name, Mode: mode})
 				}
 			}
+			snapshot := &frozenDirectorySnapshot{entries: entries}
 			idx.mu.RUnlock()
-			return fs.NewListDirStream(entries), 0, 0
+			release, err := n.tree.pinDirectorySnapshot(snapshot, bytes)
+			if err != nil {
+				return nil, 0, syscall.ENOMEM
+			}
+			return newFrozenDirectoryHandle(n, snapshot, names, release), 0, 0
 		}
 		changed := idx.changed
 		idx.mu.RUnlock()
@@ -202,4 +234,58 @@ func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, 
 			return nil, 0, syscall.EAGAIN
 		}
 	}
+}
+
+func (n *Node) archiveDirectoryIndex(ctx context.Context) (*zipIndex, *storage.Remote, *archiveDescriptor, error) {
+	archive := n.item.archive
+	if archive == nil && n.item.cloud != nil {
+		f := n.item.cloud
+		archive = &archiveDescriptor{id: f.ID, parentID: f.ParentID, name: f.Name, version: f.Version, size: f.Size}
+	}
+	if archive == nil || archiveKind(archive.name) == "" {
+		return nil, nil, nil, syscall.ENOTDIR
+	}
+	source := n.item.source
+	var err error
+	if source == nil {
+		source, err = n.source(ctx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	var idx *zipIndex
+	if archiveKind(archive.name) == ".zip" {
+		idx, err = n.tree.getZIP(ctx, source, archive.size, archive)
+	} else {
+		password, passwordErr := n.tree.otherPassword(ctx, archive)
+		if passwordErr != nil {
+			return nil, nil, nil, passwordErr
+		}
+		idx, err = n.tree.otherIndex(ctx, source, archive, password)
+		clear(password)
+	}
+	return idx, source, archive, err
+}
+
+func (n *Node) indexedDirectoryHandle(idx *zipIndex, source *storage.Remote, archive *archiveDescriptor) (fs.FileHandle, uint32, syscall.Errno) {
+	idx.mu.RLock()
+	dir := idx.dirLocked(n.item.zipPath)
+	var names []string
+	if dir != nil {
+		names = make([]string, 0, len(dir.dirs)+len(dir.files))
+		for name := range dir.dirs {
+			names = append(names, name)
+		}
+		for name := range dir.files {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	pinBytes := idx.bytes
+	idx.mu.RUnlock()
+	release, err := n.tree.pinDirectorySnapshotWithHandle(idx, pinBytes, int64(16*len(names)))
+	if err != nil {
+		return nil, 0, syscall.ENOMEM
+	}
+	return newIndexedDirectoryHandle(n, idx, n.item.zipPath, source, archive, names, release), 0, 0
 }

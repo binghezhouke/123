@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 
 	"github.com/binghezhouke/123/mount123/internal/panapi"
 )
@@ -12,8 +13,10 @@ import (
 // password-sidecar discovery and split-volume discovery.
 type cloudDirectory struct {
 	files   []panapi.File
+	names   []string
 	byName  map[string]panapi.File
 	entries map[string]*entry
+	bytes   int64
 }
 
 func (n *Node) listCloud(ctx context.Context) (map[string]*entry, error) {
@@ -59,14 +62,17 @@ func (t *Tree) cloudDirectory(ctx context.Context, parentID int64) (*cloudDirect
 			if _, exists := directory.byName[f.Name]; exists {
 				return nil, 0, errDuplicateCloudName
 			}
-			size += int64(384 + len(f.Name) + len(f.Version))
+			size += int64(400 + len(f.Name) + len(f.Version))
 			if size > t.opts.MetadataBytes {
 				return nil, 0, fmt.Errorf("directory exceeds metadata budget; increase -metadata-mib")
 			}
 			file := f
 			directory.byName[f.Name] = f
 			directory.entries[f.Name] = &entry{name: f.Name, cloud: &file, directory: f.IsDir || (t.zipDirs && archiveKind(f.Name) != "")}
+			directory.names = append(directory.names, f.Name)
 		}
+		sort.Strings(directory.names)
+		directory.bytes = size
 		return directory, size, nil
 	})
 	if err != nil {

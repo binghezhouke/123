@@ -112,29 +112,37 @@ func defaults(o Options) Options {
 }
 
 type Tree struct {
-	prefetch         *imagePrefetch
-	ctx              context.Context
-	api              API
-	cache            *storage.Cache
-	zipDirs          bool
-	opts             Options
-	mu               sync.Mutex
-	meta             map[string]*metaItem
-	metaBytes        int64
-	seq              uint64
-	builds           chan struct{}
-	buildGate        *workqueue.Gate
-	buildOnce        sync.Once
-	sources          map[string]*sourceCall
-	archiveTasks     map[string]*sourceCall
-	indexStatuses    *indexStatusTracker
-	refreshing       map[string]bool
-	infoMu           sync.Mutex
-	infoPending      []*infoRequest
-	infoRunning      bool
-	passwordKey      [32]byte
-	passwordKeyValid bool
-	cacheScope       string
+	prefetch          *imagePrefetch
+	ctx               context.Context
+	api               API
+	cache             *storage.Cache
+	zipDirs           bool
+	opts              Options
+	mu                sync.Mutex
+	directoryPinMu    sync.Mutex
+	directoryPins     map[any]directoryPin
+	directoryPinBytes int64
+	meta              map[string]*metaItem
+	metaBytes         int64
+	seq               uint64
+	builds            chan struct{}
+	buildGate         *workqueue.Gate
+	buildOnce         sync.Once
+	sources           map[string]*sourceCall
+	archiveTasks      map[string]*sourceCall
+	indexStatuses     *indexStatusTracker
+	refreshing        map[string]bool
+	infoMu            sync.Mutex
+	infoPending       []*infoRequest
+	infoRunning       bool
+	passwordKey       [32]byte
+	passwordKeyValid  bool
+	cacheScope        string
+}
+type directoryPin struct {
+	refs        int
+	bytes       int64
+	handleBytes int64
 }
 type entry struct {
 	name        string
@@ -888,31 +896,38 @@ func (r *contextZIPReaderAt) withIndexContext(ctx context.Context, fn func() err
 }
 
 func (n *Node) mode() uint32 {
-	if n.item.directory {
+	return modeForEntry(n.item)
+}
+func modeForEntry(item *entry) uint32 {
+	if item.directory {
 		return fuse.S_IFDIR | 0555
 	}
 	return fuse.S_IFREG | 0444
 }
 func (n *Node) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
-	out.Mode = n.mode()
+	n.getattrEntry(ctx, n.item, out, !n.root)
+	return 0
+}
+
+func (n *Node) getattrEntry(_ context.Context, item *entry, out *fuse.AttrOut, refresh bool) {
+	out.Mode = modeForEntry(item)
 	out.Nlink = 1
-	if !n.item.directory {
-		if n.item.member != nil {
-			out.Size = n.item.member.size
+	if !item.directory {
+		if item.member != nil {
+			out.Size = item.member.size
 		} else {
-			out.Size = uint64(n.item.cloud.Size)
+			out.Size = uint64(item.cloud.Size)
 		}
 	}
-	if n.item.cloud != nil {
-		file := n.item.cloud
-		if !n.root && n.tree.opts.RefreshFileMetadata {
+	if item.cloud != nil {
+		file := item.cloud
+		if refresh && n.tree.opts.RefreshFileMetadata {
 			file = n.tree.cachedCloudMetadata(file)
 		}
 		setFileTimes(&out.Attr, *file)
 	}
 	out.Blksize = 4096
 	out.Blocks = (out.Size + 511) / 512
-	return 0
 }
 func (n *Node) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.AttrOut) syscall.Errno {
 	return syscall.EROFS
@@ -941,12 +956,20 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 		copy.cloud = fresh
 		e = &copy
 	}
+	return n.inodeForEntry(ctx, e, out, true), 0
+}
+
+func (n *Node) inodeForEntry(ctx context.Context, e *entry, out *fuse.EntryOut, refresh bool) *fs.Inode {
 	child := &Node{tree: n.tree, item: e, parent: n}
 	var attr fuse.AttrOut
-	child.Getattr(ctx, nil, &attr)
+	child.getattrEntry(ctx, e, &attr, refresh)
 	out.Attr = attr.Attr
+	return n.NewInode(ctx, child, stableAttrForEntry(n.StableAttr().Ino, e))
+}
+
+func stableAttrForEntry(parentIno uint64, e *entry) fs.StableAttr {
 	hash := fnv.New64a()
-	fmt.Fprintf(hash, "%d/%s", n.StableAttr().Ino, name)
+	fmt.Fprintf(hash, "%d/%s", parentIno, e.name)
 	if e.cloud != nil {
 		fmt.Fprintf(hash, ":%d:%s:%d", e.cloud.ID, e.cloud.Version, e.cloud.Size)
 	}
@@ -960,7 +983,7 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	if ino < 2 {
 		ino += 2
 	}
-	return n.NewInode(ctx, child, fs.StableAttr{Mode: child.mode() & syscall.S_IFMT, Ino: ino}), 0
+	return fs.StableAttr{Mode: modeForEntry(e) & syscall.S_IFMT, Ino: ino}
 }
 
 func setFileTimes(attr *fuse.Attr, file panapi.File) {
