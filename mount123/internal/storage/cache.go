@@ -120,14 +120,12 @@ func (c *Cache) Open(key string) (*Handle, error) {
 	f, err := os.Open(e.path)
 	if err != nil {
 		if e.pins == 0 {
-			delete(c.entries, id)
-			c.used -= e.size
+			c.removeEntryLocked(id, e)
 		}
 		return nil, err
 	}
 	e.pins++
-	e.used = time.Now()
-	_ = os.Chtimes(e.path, e.used, e.used)
+	c.touchLocked(id, e)
 	return &Handle{file: f, cache: c, key: id, size: e.size}, nil
 }
 
@@ -166,8 +164,7 @@ func (c *Cache) Remove(key string) error {
 	if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	delete(c.entries, id)
-	c.used -= e.size
+	c.removeEntryLocked(id, e)
 	return nil
 }
 

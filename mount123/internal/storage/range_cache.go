@@ -231,6 +231,45 @@ func (c *Cache) pinRange(identity string, start, end int64) ([]pinnedRangePart, 
 	return parts, true, nil
 }
 
+// pinAvailableRange pins every currently cached extent intersecting [start,end),
+// even when the range has holes. Callers can copy these bytes into their own
+// destination before filling the holes, so later LRU eviction cannot force a
+// refetch of bytes already available in the cache.
+func (c *Cache) pinAvailableRange(identity string, start, end int64) ([]pinnedRangePart, error) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return nil, ErrClosed
+	}
+	var parts []pinnedRangePart
+	for _, r := range c.ranges[identity] {
+		if r.end <= start || r.start >= end {
+			continue
+		}
+		e := c.entries[r.id]
+		if e == nil {
+			continue
+		}
+		f, err := os.Open(e.path)
+		if err != nil {
+			if e.pins == 0 {
+				c.removeEntryLocked(r.id, e)
+			}
+			c.mu.Unlock()
+			closeRangeParts(parts)
+			if os.IsNotExist(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		e.pins++
+		c.touchLocked(r.id, e)
+		parts = append(parts, pinnedRangePart{handle: &Handle{file: f, cache: c, key: r.id, size: e.size}, start: max(start, r.start), end: min(end, r.end), base: r.start})
+	}
+	c.mu.Unlock()
+	return parts, nil
+}
+
 func closeRangeParts(parts []pinnedRangePart) {
 	for _, part := range parts {
 		_ = part.handle.Close()

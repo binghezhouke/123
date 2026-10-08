@@ -104,6 +104,13 @@ func (c *Client) CacheIdentity() string {
 		token := sha256.Sum256([]byte(c.config.AccessToken))
 		account = hex.EncodeToString(token[:])
 	}
+	// An explicitly supplied token may identify a different user even when
+	// the OAuth client credentials are shared by the application. Keep its
+	// digest in the scope without exposing the token itself.
+	if c.config.AccessToken != "" && c.config.ClientID != "" {
+		token := sha256.Sum256([]byte(c.config.AccessToken))
+		account += ":token:" + hex.EncodeToString(token[:])
+	}
 	h := sha256.Sum256([]byte(c.baseURL + "\x00" + account))
 	return hex.EncodeToString(h[:])
 }

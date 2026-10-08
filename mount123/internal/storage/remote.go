@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -275,10 +276,6 @@ func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off 
 		return 0, io.EOF
 	}
 	want := min(int64(len(p)), r.size-off)
-	end := off + want
-	if err := r.ensureCachedRange(ctx, off, end); err != nil {
-		return 0, err
-	}
 	n, err := r.readRangeWithCache(ctx, p[:want], off)
 	if err != nil {
 		return n, err
@@ -323,11 +320,15 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 			// fetching the rest of the normal 1 MiB read-ahead block.
 			ensureStart, ensureEnd = pos, copyEnd
 		}
-		if err := r.ensureCachedRange(ctx, ensureStart, ensureEnd); err != nil {
-			if read > 0 {
-				return read, err
+		// Preserve the ordinary 1 MiB read-ahead whenever the entire block fits
+		// in the cache. Larger reads go through the copy-as-you-go path below.
+		if ensureEnd-ensureStart <= r.cache.max {
+			if err := r.ensureCachedRange(ctx, ensureStart, ensureEnd); err != nil {
+				if read > 0 {
+					return read, err
+				}
+				return 0, err
 			}
-			return 0, err
 		}
 		got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos)
 		read += got
@@ -349,6 +350,9 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error {
 	if start >= end {
 		return nil
+	}
+	if end-start > r.cache.max {
+		return syscall.ENOSPC
 	}
 	firstPage, lastPage := start/remoteCachePageSize, (end-1)/remoteCachePageSize
 	for page := firstPage; page <= lastPage; page++ {
@@ -447,24 +451,29 @@ func (r *Remote) importLegacyPage(ctx context.Context, page, pageStart, pageEnd 
 	// with persistent caches created before range extents were introduced.
 	blockStart := pageStart / remoteBlockSize * remoteBlockSize
 	blockEnd := min(blockStart+remoteBlockSize, r.size)
-	blockKey := fmt.Sprintf("remote:%s:%d:%d", r.key, blockStart/remoteBlockSize, blockEnd-blockStart)
-	if h, err := r.cache.existing(blockKey, blockEnd-blockStart); err != nil {
-		return err
-	} else if h != nil {
-		data := make([]byte, blockEnd-blockStart)
-		_, readErr := h.ReadAt(data, 0)
-		_ = h.Close()
-		if readErr != nil {
-			return readErr
+	if blockEnd-blockStart <= r.cache.max {
+		blockKey := fmt.Sprintf("remote:%s:%d:%d", r.key, blockStart/remoteBlockSize, blockEnd-blockStart)
+		if h, err := r.cache.existing(blockKey, blockEnd-blockStart); err != nil {
+			return err
+		} else if h != nil {
+			data := make([]byte, blockEnd-blockStart)
+			_, readErr := h.ReadAt(data, 0)
+			_ = h.Close()
+			if readErr != nil {
+				return readErr
+			}
+			extent, fillErr := r.cache.AcquireRange(ctx, r.rangeID, blockStart, blockEnd, func(_ context.Context, w io.Writer) error { _, e := w.Write(data); return e })
+			if fillErr != nil {
+				return fillErr
+			}
+			_ = extent.Close()
+			return nil
 		}
-		extent, fillErr := r.cache.AcquireRange(ctx, r.rangeID, blockStart, blockEnd, func(_ context.Context, w io.Writer) error { _, e := w.Write(data); return e })
-		if fillErr != nil {
-			return fillErr
-		}
-		_ = extent.Close()
-		return nil
 	}
 	pageSize := pageEnd - pageStart
+	if pageSize > r.cache.max {
+		return nil
+	}
 	for _, key := range r.legacyPageKeys(page, pageSize) {
 		h, err := r.cache.existing(key, pageSize)
 		if err != nil {
@@ -490,28 +499,55 @@ func (r *Remote) importLegacyPage(ctx context.Context, page, pageStart, pageEnd 
 }
 
 func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (int, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return 0, err
-		}
-		end := off + int64(len(p))
-		if err := r.ensureCachedRange(ctx, off, end); err != nil {
-			return 0, err
-		}
-		parts, ok, err := r.cache.pinRange(r.rangeID, off, end)
-		if err != nil {
-			return 0, err
-		}
-		if !ok {
-			continue
-		}
-		err = readPinnedRange(parts, p, off)
-		closeRangeParts(parts)
-		if err != nil {
-			return 0, err
-		}
-		return len(p), nil
+	end := off + int64(len(p))
+	// Copy every cache hit before filling holes. As gaps are fetched, LRU may
+	// evict any unpinned extent (including another part of this request); the
+	// caller's buffer preserves those bytes and prevents a refetch loop.
+	parts, err := r.cache.pinAvailableRange(r.rangeID, off, end)
+	if err != nil {
+		return 0, err
 	}
+	err = readPinnedRange(parts, p, off)
+	closeRangeParts(parts)
+	if err != nil {
+		return 0, err
+	}
+	for _, gap := range r.cache.missingRanges(r.rangeID, off, end) {
+		if r.cache.max <= 0 {
+			return 0, syscall.ENOSPC
+		}
+		for pos := gap.start; pos < gap.end; {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+			chunkEnd := min(gap.end, pos+r.cache.max)
+			var chunkParts []pinnedRangePart
+			pinned := false
+			for attempt := 0; attempt < 2; attempt++ {
+				if err := r.ensureCachedRange(ctx, pos, chunkEnd); err != nil {
+					return 0, err
+				}
+				chunkParts, pinned, err = r.cache.pinRange(r.rangeID, pos, chunkEnd)
+				if err != nil {
+					return 0, err
+				}
+				if pinned {
+					break
+				}
+			}
+			if !pinned {
+				return 0, syscall.ENOSPC
+			}
+			start := int(pos - off)
+			err = readPinnedRange(chunkParts, p[start:start+int(chunkEnd-pos)], pos)
+			closeRangeParts(chunkParts)
+			if err != nil {
+				return 0, err
+			}
+			pos = chunkEnd
+		}
+	}
+	return len(p), nil
 }
 
 func (r *Remote) fetchRangeTo(ctx context.Context, start, end int64, w io.Writer) error {

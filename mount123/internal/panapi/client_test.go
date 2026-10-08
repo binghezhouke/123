@@ -112,6 +112,30 @@ func TestExplicitAccessTokenAndDownloadURL(t *testing.T) {
 	}
 }
 
+func TestCacheIdentityScopesExplicitTokenAlongsideSharedClient(t *testing.T) {
+	first, err := New(Config{ClientID: "shared-app", ClientSecret: "shared-secret", AccessToken: "account-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := New(Config{ClientID: "shared-app", ClientSecret: "shared-secret", AccessToken: "account-two"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := New(Config{ClientID: "shared-app", ClientSecret: "shared-secret", AccessToken: "account-one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.CacheIdentity() == second.CacheIdentity() {
+		t.Fatal("different explicit accounts share a cache identity")
+	}
+	if first.CacheIdentity() != reopened.CacheIdentity() {
+		t.Fatal("same explicit account did not retain its cache identity")
+	}
+	if strings.Contains(first.CacheIdentity(), "account-one") {
+		t.Fatal("cache identity exposes the access token")
+	}
+}
+
 func TestDetailRequiresValidParentIDBeforePasswordCanBeSaved(t *testing.T) {
 	var uploadCalls int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

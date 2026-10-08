@@ -796,6 +796,32 @@ func TestCacheRangeExtentsSurviveReopen(t *testing.T) {
 	}
 }
 
+func TestRemoveRangeCleansLRUAndCoverage(t *testing.T) {
+	c, err := NewCache(t.TempDir(), remoteCachePageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	identity := cacheID("remove-range")
+	key := rangeKey(identity, 0, remoteCachePageSize)
+	h, err := c.AcquireRange(context.Background(), identity, 0, remoteCachePageSize, fillBytes(bytes.Repeat([]byte("x"), int(remoteCachePageSize))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = h.Close()
+	if err := c.Remove(key); err != nil {
+		t.Fatal(err)
+	}
+	if missing := c.missingRanges(identity, 0, remoteCachePageSize); len(missing) != 1 || missing[0] != (byteRange{0, remoteCachePageSize}) {
+		t.Fatalf("coverage after remove = %v", missing)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.used != 0 || c.lru.Len() != 0 || len(c.ranges[identity]) != 0 {
+		t.Fatalf("remove left stale state: used=%d lru=%d ranges=%v", c.used, c.lru.Len(), c.ranges[identity])
+	}
+}
+
 func TestRemoteRejectsOverlongChunkedRangeBody(t *testing.T) {
 	data := []byte("0123456789")
 	var calls atomic.Int32
@@ -875,5 +901,59 @@ func TestRemoteLargeWindowUsesOneCacheExtent(t *testing.T) {
 	c.mu.Unlock()
 	if entries != 1 {
 		t.Fatalf("large window created %d cache files, want one extent", entries)
+	}
+}
+
+func TestRemoteRangeLargerThanCacheStreamsWithoutRefetchLoop(t *testing.T) {
+	const pages = 4
+	data := bytes.Repeat([]byte("range-cache-pressure"), int(remoteCachePageSize*pages)/len("range-cache-pressure")+1)[:remoteCachePageSize*pages]
+	var dataRequests atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var start, end int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		if start != 0 || end != 0 {
+			dataRequests.Add(1)
+		}
+		w.Header().Set("ETag", `"capacity-pressure-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start : end+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 2*remoteCachePageSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "capacity-pressure", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed two disjoint extents so satisfying the intervening gaps under full
+	// capacity can evict earlier bytes from the same requested range.
+	for _, page := range []int64{0, 2} {
+		seed := make([]byte, remoteCachePageSize)
+		if n, err := r.ReadRangeAtContext(context.Background(), seed, page*remoteCachePageSize); err != nil || n != len(seed) {
+			t.Fatalf("seed page %d = %d, %v", page, n, err)
+		}
+	}
+	dataRequests.Store(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	out := make([]byte, len(data))
+	n, err := r.ReadRangeAtContext(ctx, out, 0)
+	if err != nil || n != len(out) {
+		t.Fatalf("range read = %d, %v", n, err)
+	}
+	if !bytes.Equal(out, data) {
+		t.Fatal("range read returned incorrect bytes")
+	}
+	if got := dataRequests.Load(); got != 2 {
+		t.Fatalf("data range requests = %d, want 2 cache-sized fetches", got)
 	}
 }
