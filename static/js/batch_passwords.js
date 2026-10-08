@@ -2,6 +2,7 @@
     const form = document.getElementById('batch-password-form');
     if (!form) return;
     const input = document.getElementById('batch-password');
+    const skipValidation = document.getElementById('batch-skip-validation');
     const start = document.getElementById('batch-start');
     const stop = document.getElementById('batch-stop');
     const status = document.getElementById('batch-status');
@@ -10,6 +11,12 @@
     let running = false;
     let stopping = false;
     let password = '';
+
+    function updateAction() {
+        start.textContent = skipValidation.checked ? '直接生成密码文件' : '验证并保存密码';
+    }
+    skipValidation.addEventListener('change', updateAction);
+    updateAction();
 
     async function post(url, body) {
         const response = await fetch(url, {method: 'POST', cache: 'no-store',
@@ -32,8 +39,10 @@
         running = true;
         stopping = false;
         password = input.value;
+        const skip = skipValidation.checked;
         input.value = '';
         input.disabled = true;
+        skipValidation.disabled = true;
         start.disabled = true;
         stop.hidden = false;
         stop.disabled = false;
@@ -61,9 +70,9 @@
                 if (stopping) break;
                 let result = item;
                 if (item.status === 'pending') {
-                    outcome.textContent = '正在验证并保存…';
+                    outcome.textContent = skip ? '正在生成密码文件…' : '正在验证并保存…';
                     status.textContent = `正在处理 ${finished + 1} / ${items.length}：${item.name}`;
-                    try { result = await post(item.url, {password}); }
+                    try { result = await post(item.url, {password, skip_validation: skip}); }
                     catch (error) { result = {status: 'failed', message: error.message}; }
                 }
                 const state = Object.hasOwn(counts, result.status) ? result.status : 'failed';
@@ -84,6 +93,7 @@
             password = '';
             input.value = '';
             input.disabled = false;
+            skipValidation.disabled = false;
             start.disabled = false;
             stop.hidden = true;
             running = false;

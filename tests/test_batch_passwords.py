@@ -92,6 +92,38 @@ def test_wrong_or_invalid_password_never_saves(batch, password):
     assert not batch.saves
 
 
+def test_skip_validation_saves_without_resolving_or_reading_zip(batch, monkeypatch, remote):
+    # Even an unavailable/corrupt ZIP must not be opened in direct-save mode.
+    remote.data = b"not a readable zip"
+    monkeypatch.setattr(batch.client, "get_final_download_url",
+                        lambda *a, **kw: pytest.fail("must not resolve a download URL"))
+    monkeypatch.setattr(batch.web.application.extensions["archive_cache"], "run",
+                        lambda *a, **kw: pytest.fail("must not inspect ZIP contents"))
+    response = batch.web.post(BASE + "/file/1", json={
+        "csrf_token": batch.csrf, "password": PASSWORD, "skip_validation": True})
+    assert response.json == {"status": "saved", "validated": False,
+                             "message": "已直接保存同级 .pwd（未验证密码）"}
+    assert batch.saves == [((1, PASSWORD), {"archive_kind": ".zip", "skip_existing": True,
+                                          "expected_archive": batch.archive})]
+    assert not remote.ranges
+    assert PASSWORD.encode() not in response.data
+
+
+@pytest.mark.parametrize("value", [None, "false", "true", 0, 1, []])
+def test_skip_validation_requires_boolean(batch, remote, value):
+    response = batch.web.post(BASE + "/file/1", json={
+        "csrf_token": batch.csrf, "password": PASSWORD, "skip_validation": value})
+    assert response.status_code == 400
+    assert not batch.saves and not remote.ranges
+
+
+def test_skip_validation_still_rejects_empty_password(batch, remote):
+    response = batch.web.post(BASE + "/file/1", json={
+        "csrf_token": batch.csrf, "password": "", "skip_validation": True})
+    assert response.status_code == 400
+    assert not batch.saves and not remote.ranges
+
+
 @pytest.mark.parametrize("endpoint", ["/plan", "/file/1"])
 def test_invalid_csrf_never_reads_or_saves(batch, endpoint):
     response = batch.web.post(BASE + endpoint, json={"password": PASSWORD, "csrf_token": "bad"})
@@ -106,11 +138,13 @@ def test_unencrypted_zip_is_skipped(batch, remote):
     assert not batch.saves
 
 
+@pytest.mark.parametrize("skip_validation", [False, True])
 @pytest.mark.parametrize("change", [{"parentFileId": 9}, {"filename": "other.rar"}, {"trashed": 1}, {"type": 1}])
-def test_moved_deleted_or_non_zip_target_is_skipped(batch, monkeypatch, remote, change):
+def test_moved_deleted_or_non_zip_target_is_skipped(batch, monkeypatch, remote, change, skip_validation):
     altered = File({**batch.archive.to_dict(), **change})
     monkeypatch.setattr(batch.client, "get_file_detail", lambda *_: altered)
-    response = batch.web.post(BASE + "/file/1", json={"password": PASSWORD, "csrf_token": batch.csrf})
+    response = batch.web.post(BASE + "/file/1", json={"password": PASSWORD, "csrf_token": batch.csrf,
+                                                    "skip_validation": skip_validation})
     assert response.json["status"] == "skipped"
     assert not batch.saves and not remote.ranges
 
@@ -129,9 +163,11 @@ def test_save_failure_is_sanitized_and_next_request_can_succeed(batch, monkeypat
     assert batch.web.post(BASE + "/file/1", json={"password": PASSWORD, "csrf_token": batch.csrf}).json["status"] == "saved"
 
 
-def test_sidecar_appearing_during_validation_is_reported_skipped(batch, monkeypatch):
+@pytest.mark.parametrize("skip_validation", [False, True])
+def test_sidecar_appearing_during_validation_is_reported_skipped(batch, monkeypatch, skip_validation):
     monkeypatch.setattr(batch.client, "save_archive_password", lambda *a, **kw: {"skipped": True})
-    response = batch.web.post(BASE + "/file/1", json={"password": PASSWORD, "csrf_token": batch.csrf})
+    response = batch.web.post(BASE + "/file/1", json={"password": PASSWORD, "csrf_token": batch.csrf,
+                                                    "skip_validation": skip_validation})
     assert response.json["status"] == "skipped"
 
 
@@ -145,8 +181,9 @@ def test_duplicate_names_and_partial_scan_never_schedule_writes(batch, monkeypat
     assert not batch.saves
 
 
+@pytest.mark.parametrize("skip_validation", [False, True])
 @pytest.mark.parametrize("stop_early", [False, True])
-def test_browser_runs_serially_continues_failures_and_stops_after_current(batch, stop_early):
+def test_browser_runs_serially_continues_failures_and_stops_after_current(batch, stop_early, skip_validation):
     from playwright.sync_api import sync_playwright
     from werkzeug.serving import make_server
     from test_favorites import launch_chromium
@@ -176,12 +213,19 @@ def test_browser_runs_serially_continues_failures_and_stops_after_current(batch,
             page.route("**/zip-passwords/file/*", apply_route)
             page.goto(f"http://127.0.0.1:{server.server_port}{BASE}", wait_until="domcontentloaded")
             page.locator("#batch-password").fill(PASSWORD)
+            assert not page.locator("#batch-skip-validation").is_checked()
+            if skip_validation:
+                page.locator("#batch-skip-validation").check()
+                assert page.locator("#batch-start").inner_text() == "直接生成密码文件"
             page.locator("#batch-start").click()
-            page.wait_for_function("document.querySelector('#batch-results li span:last-child')?.textContent === '正在验证并保存…'")
+            pending_message = "正在生成密码文件…" if skip_validation else "正在验证并保存…"
+            page.wait_for_function("text => document.querySelector('#batch-results li span:last-child')?.textContent === text",
+                                   arg=pending_message)
             # The first request remains pending, so later targets must not start.
             page.wait_for_timeout(100)
             assert len(requests_seen) == 1 and held
             assert page.locator("#batch-password").input_value() == ""
+            assert page.locator("#batch-skip-validation").is_disabled()
             if stop_early:
                 page.locator("#batch-stop").click()
             held[0].fulfill(json={"status": "failed", "message": "密码错误"})
@@ -190,6 +234,8 @@ def test_browser_runs_serially_continues_failures_and_stops_after_current(batch,
             assert ("已停止" if stop_early else "处理完成") in summary
             assert len(requests_seen) == (1 if stop_early else 2)
             assert all(item["password"] == PASSWORD for item in requests_seen)
+            assert all(item["skip_validation"] is skip_validation for item in requests_seen)
+            assert page.locator("#batch-skip-validation").is_enabled()
             assert "未处理 2" in summary if stop_early else "成功 1，跳过 1，失败 1" in summary
             assert page.locator("#batch-results img").count() == 0
             assert page.locator("#batch-password").input_value() == ""

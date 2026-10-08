@@ -142,7 +142,7 @@ class Pan123Client:
 
     def save_archive_password(self, file_id: int, password: str, archive_kind=None,
                               *, skip_existing=False, expected_archive=None) -> dict:
-        """上传已验证压缩包的同目录明文 .pwd 文件。"""
+        """上传压缩包的同目录明文 .pwd 文件，密码验证由调用方决定。"""
         return self.file_service.save_archive_password(
             file_id, password, archive_kind=archive_kind,
             skip_existing=skip_existing, expected_archive=expected_archive)

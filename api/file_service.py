@@ -730,13 +730,13 @@ class FileService:
 
     def save_archive_password(self, file_id: int, password: str, archive_kind=None,
                               *, skip_existing=False, expected_archive=None) -> Dict[str, Any]:
-        """Save a pre-validated archive password as a sibling `<archive>.pwd`.
+        """Save an archive password as a sibling `<archive>.pwd`.
 
-        The caller must validate the password against the encrypted archive
-        before invoking this method. It stores the exact UTF-8 bytes in a
+        The caller validates the password or explicitly offers direct saving
+        without validation. This method stores the exact UTF-8 bytes in a
         private temporary file, then uses the regular upload flow to replace
         any existing sibling sidecar. Batch callers pass skip_existing to
-        preserve siblings and expected_archive to recheck the validated source.
+        preserve siblings and expected_archive to recheck the selected source.
         """
         if not isinstance(file_id, int) or isinstance(file_id, bool) or file_id <= 0:
             raise ValidationError("file_id 必须是正整数")
@@ -754,7 +754,7 @@ class FileService:
             identity_fields = ("file_id", "parent_file_id", "filename", "size", "etag", "update_at")
             if archive is None or any(getattr(archive, key) != getattr(expected_archive, key)
                                       for key in identity_fields):
-                raise ValidationError("压缩包在验证期间已移动或变化，请重新扫描目录")
+                raise ValidationError("压缩包在处理期间已移动或变化，请重新扫描目录")
         from .split_archive import SPLIT_7Z
         split = SPLIT_7Z.fullmatch(archive.filename) if archive is not None else None
         supported = archive is not None and (split or archive.filename.lower().endswith((".zip", ".7z", ".7zz", ".rar")))

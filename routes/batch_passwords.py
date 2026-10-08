@@ -57,6 +57,9 @@ def apply(parent_id, file_id):
     data = checked_json()
     if data is None:
         return jsonify(error="请求校验失败，请刷新页面后重试"), 400
+    skip_validation = data.get("skip_validation", False)
+    if not isinstance(skip_validation, bool):
+        return jsonify(error="跳过验证选项必须为布尔值"), 400
     password = data.get("password")
     if not isinstance(password, str) or not password or len(password) > 1024:
         return jsonify(error="请输入 1 到 1024 个字符的密码"), 400
@@ -84,11 +87,12 @@ def apply(parent_id, file_id):
             return True
 
         key = (file_id, ".zip", file.get("etag"), file.get("size"), file.get("updateAt"))
-        encrypted = current_app.extensions["archive_cache"].run(
-            key, ".zip", lambda: client.get_final_download_url(file_id, prefer_webdav=False),
-            validate, password=password)
-        if not encrypted:
-            return jsonify(status="skipped", message="ZIP 未加密，无需密码文件")
+        if not skip_validation:
+            encrypted = current_app.extensions["archive_cache"].run(
+                key, ".zip", lambda: client.get_final_download_url(file_id, prefer_webdav=False),
+                validate, password=password)
+            if not encrypted:
+                return jsonify(status="skipped", message="ZIP 未加密，无需密码文件")
         result = client.save_archive_password(
             file_id, password, archive_kind=".zip", skip_existing=True, expected_archive=file)
         if result.get("skipped"):
@@ -96,7 +100,8 @@ def apply(parent_id, file_id):
         current_app.extensions["directory_pages"].invalidate_directory(parent_id)
         owner = session.setdefault("archive_session", secrets.token_urlsafe(32))
         current_app.extensions["archive_passwords"].set(owner, key, password)
-        return jsonify(status="saved", message="密码已验证，已保存同级 .pwd")
+        message = "已直接保存同级 .pwd（未验证密码）" if skip_validation else "密码已验证，已保存同级 .pwd"
+        return jsonify(status="saved", validated=not skip_validation, message=message)
     except ArchivePasswordRequired:
         return jsonify(status="failed", message="密码不正确或加密数据已损坏")
     except ChangedArchive:
