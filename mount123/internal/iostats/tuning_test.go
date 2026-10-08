@@ -117,3 +117,33 @@ func TestAnalyzeIncludesDirectoryAndRecoveryActivity(t *testing.T) {
 		t.Fatalf("decreasing directory counter report = %+v", r)
 	}
 }
+
+func TestAnalyzeStageDeltasAndLegacyFillOutcomeUnknown(t *testing.T) {
+	p, c := tuningSamples()
+	p.Cache.FillOutcomeVersion = 1
+	c.Cache.FillOutcomeVersion = 1
+	p.StageSchemaVersion = 1
+	c.StageSchemaVersion = 1
+	p.Cache.FillCancelled, c.Cache.FillCancelled = 2, 5
+	p.Cache.FillErrors, c.Cache.FillErrors = 1, 3
+	p.Stages.BuildQueue = DurationSummary{Status: "measured", Samples: ptr(uint64(4)), TotalNanos: ptr(uint64(40))}
+	c.Stages.BuildQueue = DurationSummary{Status: "measured", Samples: ptr(uint64(10)), TotalNanos: ptr(uint64(190))}
+	r := Analyze(p, c)
+	if r.FillOutcomeStatus != "measured" || r.FillCancelled == nil || *r.FillCancelled != 3 || r.FillErrors == nil || *r.FillErrors != 2 {
+		t.Fatalf("fill outcomes = %+v", r)
+	}
+	if got := r.Stages.BuildQueue; got.Status != "measured" || got.Samples == nil || *got.Samples != 6 || got.TotalNanos == nil || *got.TotalNanos != 150 || got.MeanNanos == nil || *got.MeanNanos != 25 {
+		t.Fatalf("build queue interval = %+v", got)
+	}
+	p.Cache.FillOutcomeVersion = 0 // old JSON logs omit this field.
+	c.Cache.FillOutcomeVersion = 0
+	r = Analyze(p, c)
+	if r.FillOutcomeStatus != "unknown" || r.FillCancelled != nil || r.FillErrors != nil {
+		t.Fatalf("legacy fill outcome was presented as measured: %+v", r)
+	}
+	p.StageSchemaVersion = 0
+	r = Analyze(p, c)
+	if r.Stages.BuildQueue.Status != "unknown" || r.Stages.BuildQueue.Samples != nil {
+		t.Fatalf("legacy stage schema was treated as a valid baseline: %+v", r.Stages.BuildQueue)
+	}
+}

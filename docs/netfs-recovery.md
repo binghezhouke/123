@@ -28,9 +28,9 @@ previous saved snapshot may be restored until its TTL or an explicit refresh.
 Ephemeral caches do not provide cross-restart directory reuse.
 
 This is not a complete offline filesystem. A nonzero mount root still uses
-the platform detail endpoint for root validation. Creating a file's remote
-reader still resolves/probes the source; uncached bytes require a network
-connection. A cached directory is evidence of a previous listing, not a lease
+the platform detail endpoint for root validation. A file source with a valid persisted identity can open from cache first;
+otherwise source resolution/probing still requires networking. Uncached bytes
+require a network connection. See `netfs-cache-first.md`. A cached directory is evidence of a previous listing, not a lease
 from the cloud server.
 
 ## HTTP recovery

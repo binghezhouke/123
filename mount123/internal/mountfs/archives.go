@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/bodgit/sevenzip"
 	"github.com/hanwen/go-fuse/v2/fs"
@@ -259,6 +260,8 @@ func (t *Tree) waitArchiveIndex(ctx context.Context, key string, wait time.Durat
 }
 
 func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *archiveDescriptor, password []byte) (*zipIndex, error) {
+	started := time.Now()
+	defer t.observeStage(iostats.StageArchiveIndex, started)
 	statusKey := t.archiveTaskKey(source, a, password)
 	t.indexStatuses.update(statusKey, func(s *ArchiveIndexStatus) {
 		if s.State == "" {
@@ -481,7 +484,10 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 			return err
 		}
 		defer release()
-		return archiveReadError(fillCtx, extractArchiveMember(fillCtx, fillReader, fillSize, m, streamPassword, w), streamPassword)
+		started := time.Now()
+		err = extractArchiveMember(fillCtx, fillReader, fillSize, m, streamPassword, w)
+		t.observeStage(iostats.StageDecompression, started)
+		return archiveReadError(fillCtx, err, streamPassword)
 	}); err != nil {
 		clear(streamPassword)
 		return nil, 0, toErrno(err)
@@ -495,7 +501,10 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 			return err
 		}
 		defer release()
-		return archiveReadError(ctx, extractArchiveMember(ctx, reader, size, m, password, w), password)
+		started := time.Now()
+		err = extractArchiveMember(ctx, reader, size, m, password, w)
+		t.observeStage(iostats.StageDecompression, started)
+		return archiveReadError(ctx, err, password)
 	})
 	if err != nil {
 		return nil, 0, toErrno(err)

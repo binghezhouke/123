@@ -9,7 +9,7 @@ import (
 
 func TestSnapshotMarksUnobservedMetricsUnknown(t *testing.T) {
 	snapshot := New().Snapshot()
-	if snapshot.ForegroundReadLatency.Status != "unknown" || snapshot.ForegroundReadLatency.Samples != nil || snapshot.DownloadedBytes.Status != "unknown" || snapshot.DownloadedBytes.Bytes != nil || snapshot.DirectoryLookup.Status != "unknown" {
+	if snapshot.ForegroundReadLatency.Status != "unknown" || snapshot.ForegroundReadLatency.Samples != nil || snapshot.DownloadedBytes.Status != "unknown" || snapshot.DownloadedBytes.Bytes != nil || snapshot.DirectoryLookup.Status != "unknown" || snapshot.Stages.ArchiveIndex.Status != "unknown" || snapshot.ImagePrefetch.Status != "unknown" {
 		t.Fatalf("unobserved snapshot = %#v", snapshot)
 	}
 	encoded, err := json.Marshal(snapshot)
@@ -54,5 +54,21 @@ func TestReadAheadAndSchedulerStatsAreBoundedAggregates(t *testing.T) {
 	}
 	if snapshot.DownloadScheduler.Status != "measured" || snapshot.DownloadScheduler.MaximumRequests != 8 || snapshot.DownloadScheduler.MaximumInFlightBytes != 64<<20 || snapshot.DownloadScheduler.WaitingForeground != 1 {
 		t.Fatalf("scheduler aggregate = %#v", snapshot.DownloadScheduler)
+	}
+}
+
+func TestStageTrackerUsesFixedShapeAndUnknownUntilObserved(t *testing.T) {
+	stats := New()
+	if got := stats.Snapshot().Stages; got.DirectoryLookup.Status != "unknown" || got.Decompression.Status != "unknown" {
+		t.Fatalf("empty stage summary = %+v", got)
+	}
+	stats.ObserveStage(StageDecompression, 11*time.Millisecond)
+	stats.ObserveStage(stageCount, time.Second) // invalid stage is ignored.
+	snapshot := stats.Snapshot()
+	if got := snapshot.Stages.Decompression; got.Status != "measured" || got.Samples == nil || *got.Samples != 1 || got.TotalNanos == nil || *got.TotalNanos != uint64(11*time.Millisecond) {
+		t.Fatalf("decompression stage = %+v", got)
+	}
+	if snapshot.Stages.DirectoryLookup.Status != "unknown" {
+		t.Fatalf("unobserved stage changed: %+v", snapshot.Stages.DirectoryLookup)
 	}
 }

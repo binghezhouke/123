@@ -4,24 +4,29 @@ package iostats
 // operation counters. Capacity and resident-byte values are measured directly
 // from the cache index; counters reset when the cache is reopened.
 type CacheSummary struct {
-	Status                 string               `json:"status"`
-	CapacityBytes          int64                `json:"capacity_bytes"`
-	UsedBytes              int64                `json:"used_bytes"`
-	ReservedBytes          int64                `json:"reserved_bytes"`
-	Entries                uint64               `json:"entries"`
-	PinnedBytes            int64                `json:"pinned_bytes"`
-	IndexBudgetBytes       int64                `json:"index_budget_bytes"`
-	IndexUsedBytes         int64                `json:"index_used_bytes"`
-	Classes                []CacheClassSummary  `json:"classes"`
-	CapacityEvictions      uint64               `json:"capacity_evictions"`
-	CapacityEvictionBytes  int64                `json:"capacity_eviction_bytes"`
-	ENOSPC                 uint64               `json:"enospc"`
-	FillSuccesses          uint64               `json:"fill_successes"`
-	FillFailures           uint64               `json:"fill_failures"`
-	ExistingFillWaits      uint64               `json:"existing_fill_waits"`
-	Foreground             CacheRangeSummary    `json:"foreground"`
-	Background             CacheRangeSummary    `json:"background"`
-	Refaults               CacheRefaultSummary  `json:"refaults"`
+	Status                string              `json:"status"`
+	CapacityBytes         int64               `json:"capacity_bytes"`
+	UsedBytes             int64               `json:"used_bytes"`
+	ReservedBytes         int64               `json:"reserved_bytes"`
+	Entries               uint64              `json:"entries"`
+	PinnedBytes           int64               `json:"pinned_bytes"`
+	IndexBudgetBytes      int64               `json:"index_budget_bytes"`
+	IndexUsedBytes        int64               `json:"index_used_bytes"`
+	Classes               []CacheClassSummary `json:"classes"`
+	CapacityEvictions     uint64              `json:"capacity_evictions"`
+	CapacityEvictionBytes int64               `json:"capacity_eviction_bytes"`
+	ENOSPC                uint64              `json:"enospc"`
+	FillSuccesses         uint64              `json:"fill_successes"`
+	FillFailures          uint64              `json:"fill_failures"`
+	// FillOutcomeVersion is 1 when FillCancelled and FillErrors are populated.
+	// Older snapshots omit this field and must treat the new counters as unknown.
+	FillOutcomeVersion uint8               `json:"fill_outcome_version,omitempty"`
+	FillCancelled      uint64              `json:"fill_cancelled,omitempty"`
+	FillErrors         uint64              `json:"fill_errors,omitempty"`
+	ExistingFillWaits  uint64              `json:"existing_fill_waits"`
+	Foreground         CacheRangeSummary   `json:"foreground"`
+	Background         CacheRangeSummary   `json:"background"`
+	Refaults           CacheRefaultSummary `json:"refaults"`
 }
 
 // CacheClassSummary describes current residency and capacity evictions for one

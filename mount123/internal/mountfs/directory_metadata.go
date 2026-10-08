@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/panapi"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
@@ -52,6 +53,8 @@ func (n *Node) lookupCloud(ctx context.Context, name string) (map[string]*entry,
 }
 
 func (t *Tree) cloudDirectory(ctx context.Context, parentID int64) (*cloudDirectory, error) {
+	started := time.Now()
+	defer t.observeStage(iostats.StageDirectoryLookup, started)
 	key := fmt.Sprintf("dir:%d", parentID)
 	value, err := t.loadRefreshingDirectoryMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		if !workqueue.IsBackground(ctx) {

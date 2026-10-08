@@ -28,6 +28,52 @@ type Tracker struct {
 	readAheadCompleted  counter
 	readAheadConsumed   counter
 	readAheadWasted     counter
+	stages              [stageCount]duration
+}
+
+// Stage is a fixed-cardinality operation family. Stage durations are
+// inclusive and can overlap with HTTP, cache, or other stage timings.
+type Stage uint8
+
+const (
+	StageDirectoryLookup Stage = iota
+	StageSourcePrepare
+	StageURLResolve
+	StageSourceProbe
+	StageBuildQueue
+	StageArchiveIndex
+	StageDecompression
+	StageFileOpen
+	stageCount
+)
+
+// StageSummary is deliberately a fixed shape so metrics cannot grow with
+// paths, URLs, or operation names.
+type StageSummary struct {
+	DirectoryLookup DurationSummary `json:"directory_lookup"`
+	SourcePrepare   DurationSummary `json:"source_prepare"`
+	URLResolve      DurationSummary `json:"url_resolve"`
+	SourceProbe     DurationSummary `json:"source_probe"`
+	BuildQueue      DurationSummary `json:"build_queue"`
+	ArchiveIndex    DurationSummary `json:"archive_index"`
+	Decompression   DurationSummary `json:"decompression"`
+	FileOpen        DurationSummary `json:"file_open"`
+}
+
+// ImagePrefetchSummary is filled by mountfs when the feature is enabled and
+// its bounded tracker is available. Status is unknown when disabled or when
+// the tracker is unavailable; measured zero counts mean it is enabled but no
+// work has started yet.
+type ImagePrefetchSummary struct {
+	Status             string `json:"status"`
+	Planned            uint64 `json:"planned"`
+	Started            uint64 `json:"started"`
+	Reused             uint64 `json:"reused"`
+	Completed          uint64 `json:"completed"`
+	Cancelled          uint64 `json:"cancelled"`
+	Failed             uint64 `json:"failed"`
+	ForegroundReady    uint64 `json:"foreground_ready"`
+	ForegroundInFlight uint64 `json:"foreground_in_flight"`
 }
 
 // DurationSummary is unknown until at least one observation has been made.
@@ -50,29 +96,32 @@ type CounterSummary struct {
 
 // Snapshot contains process-lifetime aggregate measurements only.
 type Snapshot struct {
-	StartedAt             time.Time        `json:"started_at"`
-	CollectedAt           time.Time        `json:"collected_at"`
-	UptimeSeconds         float64          `json:"uptime_seconds"`
-	Cache                 CacheSummary     `json:"cache"`
-	DirectoryCache        DirectorySummary `json:"directory_cache"`
-	RemoteRecovery        RecoverySummary  `json:"remote_recovery"`
-	Configuration         RuntimeConfig    `json:"configuration"`
-	ForegroundReadLatency DurationSummary  `json:"foreground_read_latency"`
-	ForegroundReadTime    DurationSummary  `json:"foreground_read_success_time"`
-	TransferQueueLatency  DurationSummary  `json:"transfer_queue_latency"`
-	HTTPBodyTTFB          DurationSummary  `json:"http_body_ttfb"`
-	HTTPTransferLatency   DurationSummary  `json:"http_transfer_latency"`
-	CachePublication      DurationSummary  `json:"cache_publication_latency"`
-	ReadAheadWait         DurationSummary  `json:"read_ahead_foreground_wait"`
-	DownloadedBytes       CounterSummary   `json:"downloaded_bytes"`
-	ForegroundReadBytes   CounterSummary   `json:"foreground_read_bytes"`
-	CacheHitBytes         CounterSummary   `json:"cache_hit_bytes"`
-	ReadAheadScheduled    CounterSummary   `json:"read_ahead_scheduled_bytes"`
-	ReadAheadCompleted    CounterSummary   `json:"read_ahead_completed_bytes"`
-	ReadAheadConsumed     CounterSummary   `json:"read_ahead_consumed_bytes"`
-	ReadAheadWasted       CounterSummary   `json:"read_ahead_wasted_bytes"`
-	DownloadScheduler     SchedulerSummary `json:"download_scheduler"`
-	DirectoryLookup       CounterSummary   `json:"directory_lookup"`
+	StartedAt             time.Time            `json:"started_at"`
+	CollectedAt           time.Time            `json:"collected_at"`
+	UptimeSeconds         float64              `json:"uptime_seconds"`
+	Cache                 CacheSummary         `json:"cache"`
+	DirectoryCache        DirectorySummary     `json:"directory_cache"`
+	RemoteRecovery        RecoverySummary      `json:"remote_recovery"`
+	Configuration         RuntimeConfig        `json:"configuration"`
+	ForegroundReadLatency DurationSummary      `json:"foreground_read_latency"`
+	ForegroundReadTime    DurationSummary      `json:"foreground_read_success_time"`
+	TransferQueueLatency  DurationSummary      `json:"transfer_queue_latency"`
+	HTTPBodyTTFB          DurationSummary      `json:"http_body_ttfb"`
+	HTTPTransferLatency   DurationSummary      `json:"http_transfer_latency"`
+	CachePublication      DurationSummary      `json:"cache_publication_latency"`
+	ReadAheadWait         DurationSummary      `json:"read_ahead_foreground_wait"`
+	DownloadedBytes       CounterSummary       `json:"downloaded_bytes"`
+	ForegroundReadBytes   CounterSummary       `json:"foreground_read_bytes"`
+	CacheHitBytes         CounterSummary       `json:"cache_hit_bytes"`
+	ReadAheadScheduled    CounterSummary       `json:"read_ahead_scheduled_bytes"`
+	ReadAheadCompleted    CounterSummary       `json:"read_ahead_completed_bytes"`
+	ReadAheadConsumed     CounterSummary       `json:"read_ahead_consumed_bytes"`
+	ReadAheadWasted       CounterSummary       `json:"read_ahead_wasted_bytes"`
+	DownloadScheduler     SchedulerSummary     `json:"download_scheduler"`
+	DirectoryLookup       CounterSummary       `json:"directory_lookup"`
+	Stages                StageSummary         `json:"stages"`
+	StageSchemaVersion    uint8                `json:"stage_schema_version,omitempty"`
+	ImagePrefetch         ImagePrefetchSummary `json:"image_prefetch"`
 }
 
 // SchedulerSummary is a point-in-time aggregate from the shared cache.
@@ -108,9 +157,17 @@ type counter struct {
 func New() *Tracker { return &Tracker{startedAt: time.Now()} }
 
 func (t *Tracker) ObserveForegroundRead(d time.Duration) { t.foregroundRead.observe(d) }
-func (t *Tracker) ObserveTransferQueue(d time.Duration)  { t.transferQueue.observe(d) }
-func (t *Tracker) ObserveHTTPBodyTTFB(d time.Duration)   { t.httpBodyTTFB.observe(d) }
-func (t *Tracker) ObserveHTTPTransfer(d time.Duration)   { t.httpTransfer.observe(d) }
+
+// ObserveStage adds one inclusive stage-duration observation. Invalid stage
+// values are ignored to keep metrics cardinality fixed.
+func (t *Tracker) ObserveStage(stage Stage, d time.Duration) {
+	if stage < stageCount {
+		t.stages[stage].observe(d)
+	}
+}
+func (t *Tracker) ObserveTransferQueue(d time.Duration) { t.transferQueue.observe(d) }
+func (t *Tracker) ObserveHTTPBodyTTFB(d time.Duration)  { t.httpBodyTTFB.observe(d) }
+func (t *Tracker) ObserveHTTPTransfer(d time.Duration)  { t.httpTransfer.observe(d) }
 func (t *Tracker) ObserveCachePublication(d time.Duration) {
 	t.cachePublish.observe(d)
 }
@@ -188,6 +245,18 @@ func (t *Tracker) Snapshot() Snapshot {
 		ReadAheadWasted:       t.readAheadWasted.snapshot(),
 		DownloadScheduler:     SchedulerSummary{Status: "unknown"},
 		DirectoryLookup:       CounterSummary{Status: "unknown"},
+		Stages: StageSummary{
+			DirectoryLookup: t.stages[StageDirectoryLookup].snapshot(),
+			SourcePrepare:   t.stages[StageSourcePrepare].snapshot(),
+			URLResolve:      t.stages[StageURLResolve].snapshot(),
+			SourceProbe:     t.stages[StageSourceProbe].snapshot(),
+			BuildQueue:      t.stages[StageBuildQueue].snapshot(),
+			ArchiveIndex:    t.stages[StageArchiveIndex].snapshot(),
+			Decompression:   t.stages[StageDecompression].snapshot(),
+			FileOpen:        t.stages[StageFileOpen].snapshot(),
+		},
+		StageSchemaVersion: 1,
+		ImagePrefetch:      ImagePrefetchSummary{Status: "unknown"},
 	}
 }
 

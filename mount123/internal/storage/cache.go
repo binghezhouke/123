@@ -776,6 +776,11 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 				c.telemetry.fillSuccesses++
 			} else {
 				c.telemetry.fillFailures++
+				if errors.Is(f.err, context.Canceled) {
+					c.telemetry.fillCancelled++
+				} else {
+					c.telemetry.fillErrors++
+				}
 			}
 		}
 		close(f.done)

@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/faults"
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
@@ -26,19 +28,23 @@ const remoteRequestTimeout = 45 * time.Second
 type ResolveURL func(context.Context) (string, error)
 
 type Remote struct {
-	lifetimeCtx    context.Context
-	cache          *Cache
-	size           int64
-	key            string
-	linkKey        string
-	resolve        ResolveURL
-	client         *http.Client
-	mu             sync.Mutex
-	rangeID        string
-	url            string
-	resolvedURL    string
-	urlUntil       time.Time
-	etag, modified string
+	lifetimeCtx           context.Context
+	cache                 *Cache
+	size                  int64
+	key                   string
+	linkKey               string
+	resolve               ResolveURL
+	client                *http.Client
+	mu                    sync.Mutex
+	rangeID               string
+	url                   string
+	resolvedURL           string
+	urlUntil              time.Time
+	etag, modified        string
+	identityExpiresAt     time.Time
+	identityDescriptorKey string
+	identityInvalidated   atomic.Bool
+	onIdentityInvalidated func()
 }
 
 // NewRemote probes byte zero to establish the remote entity validator and
@@ -145,7 +151,11 @@ func (r *Remote) refresh(ctx context.Context) error {
 	r.mu.Lock()
 	previous := r.resolvedURL
 	r.mu.Unlock()
-	link, err := r.cache.downloadLink(cctx, r.linkKey, previous, r.resolve)
+	link, err := r.cache.downloadLink(cctx, r.linkKey, previous, func(ctx context.Context) (string, error) {
+		started := time.Now()
+		defer func() { r.cache.IOStats().ObserveStage(iostats.StageURLResolve, time.Since(started)) }()
+		return r.resolve(ctx)
+	})
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

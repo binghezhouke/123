@@ -160,7 +160,7 @@ func TestCacheStatsFillFailureAndRestart(t *testing.T) {
 	}
 	defer c.Close()
 	s := c.Stats()
-	if s.Status != "measured" || s.Entries != 1 || s.UsedBytes != 5 || s.FillSuccesses != 0 || s.FillFailures != 0 || s.CapacityEvictions != 0 {
+	if s.Status != "measured" || s.Entries != 1 || s.UsedBytes != 5 || s.FillSuccesses != 0 || s.FillFailures != 0 || s.FillOutcomeVersion != 1 || s.FillCancelled != 0 || s.FillErrors != 0 || s.CapacityEvictions != 0 {
 		t.Fatalf("reopened stats = %+v", s)
 	}
 	h, err := c.Open("resident")
@@ -171,6 +171,40 @@ func TestCacheStatsFillFailureAndRestart(t *testing.T) {
 	got := make([]byte, 5)
 	if _, err := h.ReadAt(got, 0); err != nil || !bytes.Equal(got, []byte("saved")) {
 		t.Fatalf("restored value %q, %v", got, err)
+	}
+}
+
+func TestCacheStatsSeparateActiveCancellationFromFailureAndTimeout(t *testing.T) {
+	c, err := NewCache(t.TempDir(), 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	started := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, acquireErr := c.Acquire(ctx, "cancelled", 1, func(ctx context.Context, _ io.Writer) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+		result <- acquireErr
+	}()
+	<-started
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled fill error = %v", err)
+	}
+	if _, err := c.Acquire(context.Background(), "timed-out", 1, func(context.Context, io.Writer) error {
+		return context.DeadlineExceeded
+	}); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("timed-out fill error = %v", err)
+	}
+	s := c.Stats()
+	if s.FillFailures != 2 || s.FillOutcomeVersion != 1 || s.FillCancelled != 1 || s.FillErrors != 1 {
+		t.Fatalf("fill outcome counters = %+v", s)
 	}
 }
 

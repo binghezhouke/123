@@ -12,6 +12,8 @@ type cacheTelemetry struct {
 	enospc                uint64
 	fillSuccesses         uint64
 	fillFailures          uint64
+	fillCancelled         uint64
+	fillErrors            uint64
 	existingFillWaits     uint64
 	classes               [cacheClassCount]cacheClassTelemetry
 	rangeReads            [2]cacheRangeTelemetry
@@ -63,6 +65,9 @@ func (c *Cache) Stats() iostats.CacheSummary {
 		ENOSPC:                c.telemetry.enospc,
 		FillSuccesses:         c.telemetry.fillSuccesses,
 		FillFailures:          c.telemetry.fillFailures,
+		FillOutcomeVersion:    1,
+		FillCancelled:         c.telemetry.fillCancelled,
+		FillErrors:            c.telemetry.fillErrors,
 		ExistingFillWaits:     c.telemetry.existingFillWaits,
 		Refaults:              c.telemetry.refaults,
 		Classes:               make([]iostats.CacheClassSummary, cacheClassCount),

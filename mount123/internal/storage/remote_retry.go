@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/faults"
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 )
 
 const (
@@ -140,6 +141,7 @@ func (r *Remote) fetchOneRangeWithRecovery(ctx context.Context, start, end int64
 
 		if resp.StatusCode == http.StatusPreconditionFailed {
 			_ = resp.Body.Close()
+			r.invalidateIdentityDescriptor()
 			return &faults.Error{Kind: faults.RemoteChanged, Message: "remote file changed"}
 		}
 		if statusErr := remoteStatusError(resp); statusErr != nil {
@@ -244,6 +246,8 @@ func (w *remoteRetryWriter) Write(p []byte) (int, error) {
 }
 
 func (r *Remote) probeRange(ctx context.Context, key string, priority *downloadPriority) (etag, modified string, retErr error) {
+	started := time.Now()
+	defer func() { r.cache.IOStats().ObserveStage(iostats.StageSourceProbe, time.Since(started)) }()
 	budgetCtx, cancel := context.WithTimeout(ctx, remoteRecoveryBudget)
 	defer cancel()
 	retryBudget := recoveryBudgetFrom(budgetCtx)
@@ -277,6 +281,7 @@ func (r *Remote) probeRange(ctx context.Context, key string, priority *downloadP
 		}
 		if resp.StatusCode == http.StatusPreconditionFailed {
 			_ = resp.Body.Close()
+			r.invalidateIdentityDescriptor()
 			return "", "", &faults.Error{Kind: faults.RemoteChanged, Message: "remote file changed"}
 		}
 		if statusErr := remoteStatusError(resp); statusErr != nil {
@@ -335,9 +340,11 @@ func (r *Remote) probeRange(ctx context.Context, key string, priority *downloadP
 
 func (r *Remote) checkEntityValidator(resp *http.Response) error {
 	if r.etag != "" && resp.Header.Get("ETag") != r.etag {
+		r.invalidateIdentityDescriptor()
 		return &faults.Error{Kind: faults.RemoteChanged, Message: "remote file changed"}
 	}
 	if r.etag == "" && r.modified != "" && resp.Header.Get("Last-Modified") != r.modified {
+		r.invalidateIdentityDescriptor()
 		return &faults.Error{Kind: faults.RemoteChanged, Message: "remote file changed"}
 	}
 	return nil

@@ -54,6 +54,58 @@ func TestImagePredictionWindowsAndBudget(t *testing.T) {
 	}
 }
 
+func TestImagePredictionResetsAfterIdleAndHonorsConfiguredWindow(t *testing.T) {
+	tree := &Tree{opts: Options{PrefetchFiles: 64, PrefetchBytes: 1 << 30, PrefetchWorkers: 2}}
+	p := newImagePrefetch(tree)
+	parent := &Node{item: &entry{directory: true, cloud: &panapi.File{ID: 9, IsDir: true}}}
+	entries := make(map[string]*entry, 100)
+	for i := 1; i <= 100; i++ {
+		name := fmt.Sprintf("%d.jpg", i)
+		entries[name] = &entry{name: name, cloud: &panapi.File{ID: int64(i), Version: "v1", Size: 1}}
+	}
+	for _, name := range []string{"1.jpg", "2.jpg", "3.jpg"} {
+		p.plan(&Node{parent: parent, item: entries[name]}, entries)
+	}
+	if got := len(p.plan(&Node{parent: parent, item: entries["4.jpg"]}, entries)); got != 64 {
+		t.Fatalf("configured 64-image window was truncated: got %d", got)
+	}
+	p.lastRead = time.Now().Add(-31 * time.Second)
+	if got := len(p.plan(&Node{parent: parent, item: entries["5.jpg"]}, entries)); got != 2 {
+		t.Fatalf("idle prediction did not restart with a two-image window: got %d", got)
+	}
+}
+
+func TestPrefetchDeadlineIsFailureButCancellationIsCancelled(t *testing.T) {
+	tree := &Tree{ctx: context.Background(), opts: Options{PrefetchWorkers: 1}}
+	p := newImagePrefetch(tree)
+	target := prefetchTarget{directory: "d", name: "x.jpg", content: "v1"}
+	jobCtx, cancel := context.WithCancel(context.Background())
+	job := &prefetchJob{cancel: cancel}
+	p.running[target] = job
+	cancel()
+	p.runTarget(jobCtx, target, job, &Node{})
+	stats := p.treeStatsForTest()
+	if stats.Cancelled != 1 || stats.Failed != 0 {
+		t.Fatalf("active cancellation stats = cancelled %d failed %d", stats.Cancelled, stats.Failed)
+	}
+
+	deadlineCtx, deadlineCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer deadlineCancel()
+	deadlineJob := &prefetchJob{cancel: func() {}}
+	p.running[target] = deadlineJob
+	p.runTarget(deadlineCtx, target, deadlineJob, &Node{})
+	stats = p.treeStatsForTest()
+	if stats.Cancelled != 1 || stats.Failed != 1 {
+		t.Fatalf("deadline stats = cancelled %d failed %d", stats.Cancelled, stats.Failed)
+	}
+}
+
+func (p *imagePrefetch) treeStatsForTest() ImagePrefetchStatsSnapshot {
+	p.statsMu.Lock()
+	defer p.statsMu.Unlock()
+	return p.stats
+}
+
 type prefetchAPI struct {
 	url   string
 	files []panapi.File
@@ -163,6 +215,110 @@ func TestImagePrefetchWarmsHTTPDataWithoutMetadataTrigger(t *testing.T) {
 	root.tree.prefetch.interrupt()
 }
 
+func TestImagePrefetchReusesOverlappingWindowAcrossForegroundReads(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	hits := map[string]int{}
+	startedThree := make(chan struct{}, 1)
+	releaseThree := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseThree) }) }
+	data := bytes.Repeat([]byte("window-image"), 1024)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if r.Header.Get("Range") != "bytes=0-0" {
+			hits[r.URL.Path]++
+		}
+		mu.Unlock()
+		if r.URL.Path == "/3" && r.Header.Get("Range") != "bytes=0-0" {
+			select {
+			case startedThree <- struct{}{}:
+			default:
+			}
+			select {
+			case <-releaseThree:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Header().Set("ETag", `"window"`)
+		http.ServeContent(w, r, "image", time.Unix(1, 0), bytes.NewReader(data))
+	}))
+	defer server.Close()
+	cache, err := storage.NewCache(t.TempDir(), 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := make([]panapi.File, 0, 8)
+	for i := 1; i <= 8; i++ {
+		files = append(files, panapi.File{ID: int64(i), Name: fmt.Sprintf("%d.jpg", i), Size: int64(len(data)), Version: "v1"})
+	}
+	root := NewWithOptions(ctx, prefetchAPI{server.URL, files}, cache, 0, true, Options{PrefetchFiles: 9, PrefetchBytes: 256 << 20, PrefetchWorkers: 1})
+	fs.NewNodeFS(root, &fs.Options{})
+	if _, errno := root.Readdir(ctx); errno != 0 {
+		t.Fatal(errno)
+	}
+	defer func() {
+		release()
+		root.tree.prefetch.interrupt()
+		waitPrefetchIdle(t, root.tree.prefetch)
+		cache.Close()
+	}()
+	read := func(name string) {
+		t.Helper()
+		node := lookup(t, root, name)
+		h, _, errno := node.Open(ctx, syscall.O_RDONLY)
+		if errno != 0 {
+			t.Fatal(errno)
+		}
+		result, errno := h.(fs.FileReader).Read(ctx, make([]byte, len(data)), 0)
+		if errno != 0 {
+			t.Fatal(errno)
+		}
+		result.Done()
+		if errno := h.(fs.FileReleaser).Release(ctx); errno != 0 {
+			t.Fatal(errno)
+		}
+	}
+	read("1.jpg")
+	select {
+	case <-startedThree:
+	case <-time.After(3 * time.Second):
+		t.Fatal("prefetch did not start the overlapping image")
+	}
+	// Let image 2 finish while image 3 remains blocked in HTTP.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		twoFetched := hits["/2"] > 0
+		mu.Unlock()
+		if twoFetched {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("first window did not request image 2")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	read("2.jpg")
+	deadline = time.Now().Add(3 * time.Second)
+	for root.ImagePrefetchStats().Reused == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("overlapping image task was not reused")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	release()
+	waitPrefetchIdle(t, root.tree.prefetch)
+	mu.Lock()
+	threeHits := hits["/3"]
+	mu.Unlock()
+	if threeHits != 1 {
+		t.Fatalf("overlapping target fetched %d times, want once", threeHits)
+	}
+}
+
 func TestImagePrefetchCancellationAndNaturalOrder(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -170,12 +326,13 @@ func TestImagePrefetchCancellationAndNaturalOrder(t *testing.T) {
 	p := newImagePrefetch(tree)
 	child, stop := context.WithCancel(ctx)
 	defer stop()
-	p.cancel = stop
+	target := prefetchTarget{directory: "test-dir", name: "x.jpg", content: "v1"}
+	p.running[target] = &prefetchJob{cancel: stop}
 	p.interrupt()
 	finish := p.foreground(&Node{item: &entry{name: "x.jpg"}})
-	generation := p.generation
+	sequence := p.sequence
 	p.observe(&Node{})
-	if p.generation != generation {
+	if p.sequence != sequence {
 		t.Fatal("prefetch started during foreground Open")
 	}
 	finish()
@@ -190,10 +347,108 @@ func TestImagePrefetchCancellationAndNaturalOrder(t *testing.T) {
 	}
 }
 
+func TestPrefetchTargetIdentityTracksDirectoryAndContentVersion(t *testing.T) {
+	tree := &Tree{meta: map[string]*metaItem{}}
+	parent := &Node{tree: tree, item: &entry{name: "folder", directory: true, cloud: &panapi.File{ID: 7, IsDir: true}}}
+	tree.meta["dir:7"] = &metaItem{value: &cloudDirectory{generation: 11}}
+	p := newImagePrefetch(tree)
+	first := &Node{tree: tree, parent: parent, item: &entry{name: "same.jpg", cloud: &panapi.File{ID: 20, Version: "v1", Size: 100}}}
+	initial := p.targetIdentity(first)
+	newVersion := &Node{tree: tree, parent: parent, item: &entry{name: "same.jpg", cloud: &panapi.File{ID: 20, Version: "v2", Size: 100}}}
+	if p.targetIdentity(newVersion) == initial {
+		t.Fatal("same-name content version change reused the old task identity")
+	}
+	tree.meta["dir:7"].value = &cloudDirectory{generation: 12}
+	if p.targetIdentity(first) == initial {
+		t.Fatal("refreshed directory generation reused old task identity")
+	}
+}
+
+func TestPrefetchCompletionHistoryDeduplicatesBeforeEviction(t *testing.T) {
+	tree := &Tree{}
+	p := newImagePrefetch(tree)
+	target := prefetchTarget{directory: "d", name: "same.jpg", content: "v1"}
+	p.completed[target] = struct{}{}
+	p.completedOrder = append(p.completedOrder, target, target)
+	for i := 0; i < 63; i++ {
+		other := prefetchTarget{directory: "d", name: fmt.Sprintf("%d.jpg", i), content: "v1"}
+		p.completed[other] = struct{}{}
+		p.completedOrder = append(p.completedOrder, other)
+	}
+	p.rememberCompletedLocked(target)
+	if len(p.completedOrder) != 64 {
+		t.Fatalf("completion recency has %d entries, want 64", len(p.completedOrder))
+	}
+	if _, exists := p.completed[target]; !exists {
+		t.Fatal("duplicate stale recency key deleted the newest completion")
+	}
+}
+
+func TestRapidPlannerCancellationFinishesEachStartedTaskOnce(t *testing.T) {
+	tree := &Tree{ctx: context.Background(), opts: Options{PrefetchWorkers: 1}}
+	p := newImagePrefetch(tree)
+	p.slots <- struct{}{} // Keep each task pending in its dispatcher.
+	defer func() { <-p.slots }()
+	var firstTarget prefetchTarget
+	var firstJob *prefetchJob
+	for i := 0; i < 5; i++ {
+		target := prefetchTarget{directory: "d", name: fmt.Sprintf("%d.jpg", i), content: "v1"}
+		jobCtx, jobCancel := context.WithTimeout(context.Background(), time.Minute)
+		job := &prefetchJob{cancel: jobCancel, ctx: jobCtx}
+		p.mu.Lock()
+		p.sequence++
+		sequence := p.sequence
+		p.running[target] = job
+		p.mu.Unlock()
+		context.AfterFunc(jobCtx, func() { p.finishUnstarted(target, job, jobCtx.Err()) })
+		p.addStat(func(s *ImagePrefetchStatsSnapshot) { s.Started++ })
+		if i == 0 {
+			firstTarget, firstJob = target, job
+		}
+		plannerCtx, plannerCancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			p.dispatch(plannerCtx, sequence, []pendingPrefetch{{target: target, job: job}})
+			close(done)
+		}()
+		plannerCancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("dispatcher waited for a worker after its planner was cancelled")
+		}
+	}
+	p.interrupt()
+	deadline := time.After(time.Second)
+	for {
+		stats := p.treeStatsForTest()
+		if stats.Started == stats.Completed+stats.Cancelled+stats.Failed {
+			break
+		}
+		select {
+		case <-time.After(time.Millisecond):
+		case <-deadline:
+			t.Fatal("unstarted jobs were not cleaned up after cancellation")
+		}
+	}
+	// A late duplicate terminal callback must not count the same job twice.
+	p.finishTarget(firstTarget, firstJob, true, nil)
+	stats := p.treeStatsForTest()
+	if stats.Started != 5 || stats.Cancelled != 5 || stats.Completed != 0 || stats.Failed != 0 {
+		t.Fatalf("non-terminal task accounting: started=%d completed=%d cancelled=%d failed=%d", stats.Started, stats.Completed, stats.Cancelled, stats.Failed)
+	}
+}
+
 func waitPrefetchIdle(t *testing.T, p *imagePrefetch) {
 	t.Helper()
 	deadline := time.After(3 * time.Second)
-	for len(p.slots) > 0 {
+	for {
+		p.mu.Lock()
+		jobs := len(p.running)
+		p.mu.Unlock()
+		if jobs == 0 && len(p.slots) == 0 {
+			return
+		}
 		select {
 		case <-time.After(time.Millisecond):
 		case <-deadline:
@@ -246,6 +501,7 @@ func TestImagePrefetchInflatesZIPMembersIntoSharedCache(t *testing.T) {
 	h.(fs.FileReleaser).Release(ctx)
 	p := root.tree.prefetch
 	p.run(ctx, first, 0)
+	waitPrefetchIdle(t, p)
 	source, err := dir.source(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -331,16 +587,26 @@ func TestPrefetchForegroundKeepsItsActiveTarget(t *testing.T) {
 	node := &Node{parent: parent, item: &entry{name: "2.jpg"}}
 	job, stop := context.WithCancel(ctx)
 	defer stop()
-	p.cancel = stop
-	p.running[prefetchTarget{parent, "2.jpg"}] = 1
+	p.running[p.targetIdentity(node)] = &prefetchJob{cancel: stop}
 	finish := p.foreground(node)
 	if job.Err() != nil {
 		t.Fatal("foreground cancelled the fill it needs")
 	}
 	finish()
 	finish = p.foreground(&Node{parent: parent, item: &entry{name: "9.jpg"}})
-	if job.Err() != context.Canceled {
-		t.Fatal("unrelated prefetch not cancelled")
+	if job.Err() != nil {
+		t.Fatal("same-directory overlap cancelled before the next window was planned")
+	}
+	finish()
+	otherParent := &Node{item: &entry{cloud: &panapi.File{ID: 42, IsDir: true}, directory: true}, tree: tree}
+	otherNode := &Node{parent: otherParent, item: &entry{name: "10.jpg", cloud: &panapi.File{ID: 10, Version: "v1", Size: 1}}, tree: tree}
+	otherJob, otherStop := context.WithCancel(ctx)
+	defer otherStop()
+	otherTarget := p.targetIdentity(&Node{parent: parent, item: &entry{name: "x.jpg"}})
+	p.running[otherTarget] = &prefetchJob{cancel: otherStop}
+	finish = p.foreground(otherNode)
+	if otherJob.Err() != context.Canceled {
+		t.Fatal("directory change did not cancel unrelated prefetch")
 	}
 	finish()
 }

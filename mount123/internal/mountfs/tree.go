@@ -212,6 +212,15 @@ func (n *Node) IOStats() iostats.Snapshot {
 		Recovered: recovery.Recovered, Exhausted: recovery.Exhausted,
 		Cancelled: recovery.Cancelled, SuffixBytes: recovery.SuffixBytes,
 	}
+	if n.tree.prefetch != nil {
+		prefetch := n.ImagePrefetchStats()
+		snapshot.ImagePrefetch = iostats.ImagePrefetchSummary{
+			Status: "measured", Planned: prefetch.Planned,
+			Started: prefetch.Started, Reused: prefetch.Reused,
+			Completed: prefetch.Completed, Cancelled: prefetch.Cancelled, Failed: prefetch.Failed,
+			ForegroundReady: prefetch.ForegroundReady, ForegroundInFlight: prefetch.ForegroundInFlight,
+		}
+	}
 	opts := n.tree.opts
 	snapshot.Configuration = iostats.RuntimeConfig{DirectoryTTLSeconds: opts.DirectoryTTL.Seconds(), SourceTTLSeconds: opts.SourceTTL.Seconds(), MetadataBytes: opts.MetadataBytes, ReadAheadMaxBytes: opts.ReadAheadMaxBytes, PrefetchFiles: opts.PrefetchFiles, PrefetchWorkers: opts.PrefetchWorkers, PrefetchBytes: opts.PrefetchBytes}
 	if opts.DisableReadAhead {
@@ -391,6 +400,12 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 			expires := time.Time{}
 			if ttl > 0 {
 				expires = fetchedAt.Add(ttl)
+			}
+			if source, ok := value.(interface{ IdentityExpiresAt() time.Time }); ok {
+				identityExpiry := source.IdentityExpiresAt()
+				if !identityExpiry.IsZero() && (expires.IsZero() || identityExpiry.Before(expires)) {
+					expires = identityExpiry
+				}
 			}
 			t.meta[key] = &metaItem{key: key, value: value, bytes: size, expires: expires, seq: t.seq, fetchedAt: fetchedAt}
 			t.metaBytes += size
@@ -580,6 +595,8 @@ func (t *Tree) cloudCacheKey(f *panapi.File) string {
 	return t.diskCacheScope() + ":" + cloudKey(f)
 }
 func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
+	started := time.Now()
+	defer n.observeStage(iostats.StageSourcePrepare, started)
 	f := n.item.cloud
 	t := n.tree
 	key := t.cloudCacheKey(f)
@@ -588,7 +605,28 @@ func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 		ttl = max(ttl, 6*24*time.Hour)
 	}
 	value, err := t.loadMeta(ctx, "source:"+key, ttl, func(ctx context.Context) (any, int64, error) {
-		r, err := storage.NewRemoteContext(t.ctx, ctx, t.cache, key, f.Size, func(ctx context.Context) (string, error) { return t.api.DownloadURL(ctx, f.ID) })
+		resolve := func(ctx context.Context) (string, error) { return t.api.DownloadURL(ctx, f.ID) }
+		var r *storage.Remote
+		var err error
+		if t.cacheScopeStable {
+			r, err = storage.NewCachedRemoteContext(t.ctx, ctx, t.cache, key, f.Size, resolve, storage.RemoteIdentity{
+				Account: t.diskCacheScope(),
+				FileID:  f.ID,
+				Version: f.Version,
+				TTL:     ttl,
+				OnInvalidated: func() {
+					metaKey := "source:" + key
+					t.mu.Lock()
+					if item := t.meta[metaKey]; item != nil && item.value == r {
+						delete(t.meta, metaKey)
+						t.metaBytes -= item.bytes
+					}
+					t.mu.Unlock()
+				},
+			})
+		} else {
+			r, err = storage.NewRemoteContext(t.ctx, ctx, t.cache, key, f.Size, resolve)
+		}
 		if err != nil {
 			return nil, 0, err
 		}
@@ -800,6 +838,8 @@ func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) 
 }
 
 func buildZIPWithProgress(ctx context.Context, t *Tree, source *storage.Remote, size int64, progress func(int64)) (*zipIndex, error) {
+	started := time.Now()
+	defer t.observeStage(iostats.StageArchiveIndex, started)
 	adapter := &contextZIPReaderAt{source: source, ctx: ctx, gate: make(chan struct{}, 1), progress: progress}
 	var zr *zip.Reader
 	err := adapter.withIndexContext(ctx, func() error {
@@ -1079,6 +1119,8 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(result), 0
 }
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	started := time.Now()
+	defer n.observeStage(iostats.StageFileOpen, started)
 	if n.tree.prefetch != nil {
 		done := n.tree.prefetch.foreground(n)
 		defer done()
@@ -1149,7 +1191,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 				return err
 			}
 			defer release()
-			return encryptedMember(fillCtx, src, full, streamPassword, w)
+			started := time.Now()
+			err = encryptedMember(fillCtx, src, full, streamPassword, w)
+			n.tree.observeStage(iostats.StageDecompression, started)
+			return err
 		}); err != nil {
 			clear(streamPassword)
 			if isPasswordError(err) {
@@ -1166,7 +1211,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 				return err
 			}
 			defer release()
-			return encryptedMember(ctx, src, full, password, w)
+			started := time.Now()
+			err = encryptedMember(ctx, src, full, password, w)
+			n.tree.observeStage(iostats.StageDecompression, started)
+			return err
 		})
 		if err != nil {
 			if isPasswordError(err) {
@@ -1196,7 +1244,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			return err
 		}
 		defer release()
-		return inflateMember(fillCtx, src, full, w)
+		started := time.Now()
+		err = inflateMember(fillCtx, src, full, w)
+		n.tree.observeStage(iostats.StageDecompression, started)
+		return err
 	}); err != nil {
 		return nil, 0, toErrno(err)
 	} else if growing != nil {
@@ -1208,7 +1259,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			return err
 		}
 		defer release()
-		return inflateMember(ctx, src, full, w)
+		started := time.Now()
+		err = inflateMember(ctx, src, full, w)
+		n.tree.observeStage(iostats.StageDecompression, started)
+		return err
 	})
 	if err != nil {
 		return nil, 0, toErrno(err)
