@@ -257,9 +257,29 @@ func (r *Remote) ReadMetadataAtContext(ctx context.Context, p []byte, off int64)
 	return r.readAtContext(ctx, p, off, remoteCachePageSize)
 }
 
-// ReadRangeAtContext reads an exact range through the shared page cache. It is
-// intended for archive scanners that download a larger window in one HTTP
-// request while retaining the same bytes for later ordinary reads.
+// PrefetchRangeAtContext fetches and caches an exact range without retaining a
+// caller-sized buffer. Callers must keep the requested range within their own
+// logical file or archive member boundaries.
+func (r *Remote) PrefetchRangeAtContext(operationCtx context.Context, off, size int64) error {
+	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if off < 0 || size < 0 {
+		return errors.New("invalid remote range")
+	}
+	if size == 0 {
+		return nil
+	}
+	if off > r.size || size > r.size-off {
+		return io.EOF
+	}
+	return r.ensureCachedRange(ctx, off, off+size)
+}
+
+// ReadRangeAtContext reads an exact range through the shared cache. It is
+// intended for archive scanners and sequential prefetchers.
 func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off int64) (int, error) {
 	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
 	defer cancel()

@@ -49,6 +49,8 @@ type PasswordAPI interface {
 // Options sets mount-local metadata and source reuse lifetimes. Zero values
 // select documented defaults.
 type Options struct {
+	ReadAheadMaxBytes       int64
+	DisableReadAhead        bool
 	PrefetchFiles           int
 	PrefetchWorkers         int
 	PrefetchBytes           int64
@@ -75,6 +77,9 @@ func defaults(o Options) Options {
 	}
 	if o.MetadataBytes <= 0 {
 		o.MetadataBytes = 64 << 20
+	}
+	if o.ReadAheadMaxBytes <= 0 && !o.DisableReadAhead {
+		o.ReadAheadMaxBytes = 16 << 20
 	}
 	if o.MaxEntries <= 0 {
 		o.MaxEntries = 100000
@@ -1007,7 +1012,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		if err != nil {
 			return nil, 0, toErrno(err)
 		}
-		return &handle{remote: source, size: uint64(n.item.cloud.Size)}, fuse.FOPEN_DIRECT_IO, 0
+		return n.newRemoteHandle(source, 0, uint64(n.item.cloud.Size)), fuse.FOPEN_DIRECT_IO, 0
 	}
 	if n.item.member.format != "" {
 		return n.openOtherArchive(ctx)
@@ -1057,7 +1062,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		if err != nil {
 			return nil, 0, toErrno(err)
 		}
-		return &handle{remote: src, base: offset, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
+		return n.newRemoteHandle(src, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
 	}
 	cached, err := n.tree.cache.Acquire(ctx, n.tree.diskCacheScope()+":"+src.Key()+":.zip:member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(ctx)
@@ -1078,6 +1083,14 @@ func (t *Tree) archiveCacheOpenFlags() uint32 {
 		return fuse.FOPEN_DIRECT_IO
 	}
 	return fuse.FOPEN_KEEP_CACHE
+}
+
+func (n *Node) newRemoteHandle(remote *storage.Remote, base int64, size uint64) *handle {
+	h := &handle{remote: remote, base: base, size: size}
+	if !n.tree.opts.DisableReadAhead && n.tree.opts.ReadAheadMaxBytes > 0 && base >= 0 && size <= uint64(math.MaxInt64-base) {
+		h.readAhead = newReadAhead(n.tree.ctx, remote, base, size, n.tree.opts.ReadAheadMaxBytes)
+	}
+	return h
 }
 
 type contextRemote struct {
@@ -1123,11 +1136,12 @@ func (r *contextReader) Read(p []byte) (int, error) {
 }
 
 type handle struct {
-	reader io.ReaderAt
-	closer io.Closer
-	remote *storage.Remote
-	base   int64
-	size   uint64
+	reader    io.ReaderAt
+	closer    io.Closer
+	remote    *storage.Remote
+	base      int64
+	size      uint64
+	readAhead *readAhead
 }
 
 func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
@@ -1153,9 +1167,15 @@ func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 	if err != nil && err != io.EOF {
 		return nil, toErrno(err)
 	}
+	if h.remote != nil && h.readAhead != nil && n > 0 {
+		h.readAhead.observe(off, int64(n))
+	}
 	return fuse.ReadResultData(dest[:n]), 0
 }
 func (h *handle) Release(context.Context) syscall.Errno {
+	if h.readAhead != nil {
+		h.readAhead.Close()
+	}
 	if h.closer != nil {
 		return toErrno(h.closer.Close())
 	}
