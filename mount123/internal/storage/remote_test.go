@@ -195,6 +195,7 @@ func TestNewRemoteContextProbeCancellationAndOperationLifetime(t *testing.T) {
 
 func TestRemoteReadAtContextOperationsAreIndependent(t *testing.T) {
 	started := make(chan struct{}, 2)
+	continueResponse := make(chan struct{})
 	var calls atomic.Int32
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		call := calls.Add(1)
@@ -207,8 +208,11 @@ func TestRemoteReadAtContextOperationsAreIndependent(t *testing.T) {
 		}
 		started <- struct{}{}
 		if call == 2 {
-			<-req.Context().Done()
-			return
+			select {
+			case <-continueResponse:
+			case <-req.Context().Done():
+				return
+			}
 		}
 		w.Header().Set("ETag", `"v1"`)
 		w.Header().Set("Content-Range", "bytes 0-0/1")
@@ -238,11 +242,10 @@ func TestRemoteReadAtContextOperationsAreIndependent(t *testing.T) {
 	if err = <-first; !errors.Is(err, context.Canceled) {
 		t.Fatalf("first read error = %v", err)
 	}
-	select {
-	case <-started: // the live waiter took over and retried the canceled fill
-	case <-time.After(time.Second):
-		t.Fatal("live waiter did not retry canceled fill")
+	if calls.Load() != 2 {
+		t.Fatalf("shared fill restarted %d HTTP requests", calls.Load()-1)
 	}
+	close(continueResponse)
 	if err = <-second; err != nil {
 		t.Fatalf("independent read failed: %v", err)
 	}

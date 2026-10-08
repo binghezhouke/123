@@ -25,11 +25,15 @@ import (
 )
 
 func openCache(dir string, maxBytes int64, durability string) (*storage.Cache, error) {
+	return openCacheWithDownloadConfig(dir, maxBytes, durability, storage.DefaultDownloadConfig())
+}
+
+func openCacheWithDownloadConfig(dir string, maxBytes int64, durability string, download storage.DownloadConfig) (*storage.Cache, error) {
 	switch durability {
 	case "durable":
-		return storage.NewCache(dir, maxBytes)
+		return storage.NewCacheWithDownloadConfig(dir, maxBytes, download)
 	case "ephemeral":
-		return storage.NewEphemeralCache(dir, maxBytes)
+		return storage.NewEphemeralCacheWithDownloadConfig(dir, maxBytes, download)
 	default:
 		return nil, fmt.Errorf("invalid cache durability: choose durable or ephemeral")
 	}
@@ -66,6 +70,9 @@ func run() error {
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 20, "maximum disk cache size in GiB")
 	cacheDurability := flag.String("cache-durability", "durable", "cache durability: durable or ephemeral")
+	downloadRequests := flag.Int("download-requests", 32, "maximum simultaneous HTTP range responses")
+	downloadBytesMiB := flag.Int64("download-bytes-mib", 128, "global in-flight HTTP response byte budget in MiB")
+	downloadReserveMiB := flag.Int64("download-foreground-reserve-mib", 16, "in-flight byte capacity reserved for foreground reads in MiB")
 	readAheadMiB := flag.Int64("read-ahead-mib", 16, "maximum sequential per-file read-ahead window in MiB (0 disables)")
 	rootID := flag.Int64("root-id", 0, "123 cloud root directory ID")
 	metadataMiB := flag.Int64("metadata-mib", 64, "shared directory and archive index cache budget in MiB")
@@ -91,6 +98,9 @@ func run() error {
 	}
 	if *readAheadMiB < 0 || *readAheadMiB > 16 {
 		return fmt.Errorf("read-ahead window must be between 0 and 16 MiB")
+	}
+	if *downloadRequests < 1 || *downloadRequests > 256 || *downloadBytesMiB < 1 || *downloadBytesMiB > 1<<20 || *downloadReserveMiB < 0 || *downloadReserveMiB >= *downloadBytesMiB {
+		return fmt.Errorf("invalid download request or in-flight byte limits")
 	}
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
@@ -160,7 +170,8 @@ func run() error {
 			return fmt.Errorf("invalid config JSON: %w", err)
 		}
 	}
-	cache, err := openCache(cacheAbs, *cacheGiB<<30, *cacheDurability)
+	downloadConfig := storage.DownloadConfig{MaxRequests: *downloadRequests, MaxInFlightBytes: *downloadBytesMiB << 20, ForegroundReservedBytes: *downloadReserveMiB << 20}
+	cache, err := openCacheWithDownloadConfig(cacheAbs, *cacheGiB<<30, *cacheDurability, downloadConfig)
 	if err != nil {
 		return err
 	}

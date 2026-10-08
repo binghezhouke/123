@@ -13,6 +13,12 @@ import (
 // process removes stale ephemeral directories only after acquiring their lock,
 // so bytes left by a crash are never reused.
 func NewEphemeralCache(root string, maxBytes int64) (*Cache, error) {
+	return NewEphemeralCacheWithDownloadConfig(root, maxBytes, DefaultDownloadConfig())
+}
+
+// NewEphemeralCacheWithDownloadConfig creates a process-private cache with a
+// configured process-wide HTTP transfer budget.
+func NewEphemeralCacheWithDownloadConfig(root string, maxBytes int64, download DownloadConfig) (*Cache, error) {
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("cache size must be non-negative")
 	}
@@ -41,7 +47,7 @@ func NewEphemeralCache(root string, maxBytes int64) (*Cache, error) {
 		_ = guard.Close()
 		return nil, err
 	}
-	c, err := NewCache(dir, maxBytes)
+	c, err := NewCacheWithDownloadConfig(dir, maxBytes, download)
 	_ = syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
 	_ = guard.Close()
 	if err != nil {

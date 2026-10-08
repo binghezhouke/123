@@ -9,8 +9,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/binghezhouke/123/mount123/internal/iostats"
-	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"io"
 	"os"
 	"path/filepath"
@@ -19,6 +17,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 )
 
 var ErrClosed = errors.New("storage cache is closed")
@@ -41,8 +41,10 @@ type flight struct {
 // Cache is a persistent, size-bounded cache. Its directory is exclusively
 // owned by one process for the lifetime of the Cache.
 type Cache struct {
-	downloadGate        *workqueue.Gate
+	downloads           *downloadScheduler
 	stats               *iostats.Tracker
+	lifetimeCtx         context.Context
+	cancel              context.CancelFunc
 	links               map[string]cachedLink
 	linkFlights         map[string]chan struct{}
 	mu                  sync.Mutex
@@ -63,6 +65,17 @@ type Cache struct {
 
 // NewCache opens an exclusive cache directory with the requested byte limit.
 func NewCache(dir string, maxBytes int64) (*Cache, error) {
+	return NewCacheWithDownloadConfig(dir, maxBytes, DefaultDownloadConfig())
+}
+
+// NewCacheWithDownloadConfig opens a cache with a process-wide HTTP transfer
+// budget. The budget covers in-flight response bytes, not memory or disk use.
+func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadConfig) (*Cache, error) {
+	var err error
+	download, err = download.normalized()
+	if err != nil {
+		return nil, err
+	}
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("cache size must be non-negative")
 	}
@@ -85,7 +98,8 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, stats: iostats.New()}
+	lifetimeCtx, cancel := context.WithCancel(context.Background())
+	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -97,7 +111,10 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 	return c, nil
 }
 
-// IOStats returns the mount-lifetime aggregate statistics tracker.
+// DownloadStats returns a point-in-time snapshot of transfer scheduler usage.
+func (c *Cache) DownloadStats() DownloadStats { return c.downloads.snapshot() }
+
+// IOStats returns the fixed-size aggregate I/O tracker owned by this cache.
 func (c *Cache) IOStats() *iostats.Tracker { return c.stats }
 
 // StableDigest returns a keyed digest for cache identities. The key is unique
@@ -522,12 +539,14 @@ func (c *Cache) Close() error {
 		return nil
 	}
 	c.closed = true
+	c.cancel()
 	var pending []<-chan struct{}
 	for _, f := range c.flights {
 		pending = append(pending, f.done)
 	}
 	for _, group := range c.rangeFlights {
 		for _, f := range group {
+			f.cancel()
 			pending = append(pending, f.done)
 		}
 	}
@@ -539,6 +558,7 @@ func (c *Cache) Close() error {
 	for _, done := range pending {
 		<-done
 	}
+	c.downloads.waitIdle()
 	e := syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN)
 	ce := c.lock.Close()
 	if c.ephemeral {

@@ -16,6 +16,9 @@ func Background(ctx context.Context) context.Context {
 
 // IsBackground reports the scheduling priority inherited by an operation.
 func IsBackground(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
 	bg, _ := ctx.Value(backgroundKey{}).(bool)
 	return bg
 }

@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 type cacheRange struct {
@@ -22,6 +24,11 @@ type rangeFlight struct {
 	start, end int64
 	done       chan struct{}
 	err        error
+	ctx        context.Context
+	cancel     context.CancelFunc
+	priority   *downloadPriority
+	refs       int
+	finished   bool
 }
 
 type byteRange struct{ start, end int64 }
@@ -138,10 +145,12 @@ func (c *Cache) missingRanges(identity string, start, end int64) []byteRange {
 	return missing
 }
 
-// beginRangeFlight waits for overlapping fills of the same remote object.
-// Disjoint ranges proceed independently. A non-owner retries its coverage
-// check after the active flight completes.
+// beginRangeFlight joins overlapping fills. The flight owns its context so a
+// canceled initiating reader cannot stop work still needed by another reader.
 func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, end int64) (*rangeFlight, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
@@ -149,26 +158,41 @@ func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, en
 	}
 	for _, active := range c.rangeFlights[identity] {
 		if start < active.end && active.start < end {
-			done := active.done
+			active.refs++
 			c.mu.Unlock()
-			select {
-			case <-ctx.Done():
-				return nil, false, ctx.Err()
-			case <-done:
-				return nil, false, nil
+			if !workqueue.IsBackground(ctx) {
+				c.downloads.promote(active.priority)
 			}
+			return active, false, nil
 		}
 	}
-	f := &rangeFlight{start: start, end: end, done: make(chan struct{})}
+	flightCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	priority := &downloadPriority{}
+	if !workqueue.IsBackground(ctx) {
+		priority.promoted.Store(true)
+	}
+	f := &rangeFlight{start: start, end: end, done: make(chan struct{}), ctx: flightCtx, cancel: cancel, priority: priority, refs: 1}
 	c.rangeFlights[identity] = append(c.rangeFlights[identity], f)
 	c.mu.Unlock()
 	return f, true, nil
+}
+
+func (c *Cache) releaseRangeFlight(f *rangeFlight) {
+	c.mu.Lock()
+	if f.refs > 0 {
+		f.refs--
+	}
+	if f.refs == 0 && !f.finished {
+		f.cancel()
+	}
+	c.mu.Unlock()
 }
 
 func (c *Cache) finishRangeFlight(identity string, f *rangeFlight, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	f.err = err
+	f.finished = true
 	group := c.rangeFlights[identity]
 	for i, active := range group {
 		if active == f {
@@ -182,6 +206,7 @@ func (c *Cache) finishRangeFlight(identity string, f *rangeFlight, err error) {
 		c.rangeFlights[identity] = group
 	}
 	close(f.done)
+	f.cancel()
 }
 
 // pinRange atomically pins every extent needed for [start,end). A coverage

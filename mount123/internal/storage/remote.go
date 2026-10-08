@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 const remoteBlockSize int64 = 1 << 20
@@ -55,6 +57,8 @@ func NewRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, k
 	}
 	ctx, cancel := combineContexts(lifetimeCtx, operationCtx)
 	defer cancel()
+	ctx, stopCache := combineContexts(cache.lifetimeCtx, ctx)
+	defer stopCache()
 	r := &Remote{lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: key, linkKey: key, resolve: resolve, client: http.DefaultClient}
 	if size == 0 {
 		r.key = namespaceWithoutValidator(key)
@@ -64,7 +68,11 @@ func NewRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, k
 	if err := r.refresh(ctx); err != nil {
 		return nil, err
 	}
-	resp, err := r.requestRange(ctx, 0, 0, false)
+	probePriority := &downloadPriority{}
+	if !workqueue.IsBackground(operationCtx) {
+		probePriority.promoted.Store(true)
+	}
+	resp, err := r.requestRangeScheduled(ctx, 0, 0, false, cacheID(key), probePriority)
 	if err != nil {
 		return nil, err
 	}
@@ -151,23 +159,34 @@ func (r *Remote) refresh(ctx context.Context) error {
 }
 
 func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional bool) (*http.Response, error) {
+	priority := &downloadPriority{}
+	if !workqueue.IsBackground(ctx) {
+		priority.promoted.Store(true)
+	}
+	return r.requestRangeScheduled(ctx, start, end, conditional, cacheID(r.key), priority)
+}
+
+func (r *Remote) requestRangeScheduled(ctx context.Context, start, end int64, conditional bool, file string, priority *downloadPriority) (*http.Response, error) {
 	for attempt := 0; attempt < 2; attempt++ {
+		requestCtx, stopCache := combineContexts(r.cache.lifetimeCtx, ctx)
 		r.mu.Lock()
 		u := r.url
 		expired := u == "" || time.Now().After(r.urlUntil)
 		r.mu.Unlock()
 		if expired {
-			if err := r.refresh(ctx); err != nil {
+			if err := r.refresh(requestCtx); err != nil {
+				stopCache()
 				return nil, err
 			}
 			r.mu.Lock()
 			u = r.url
 			r.mu.Unlock()
 		}
-		cctx, cancel := context.WithTimeout(ctx, remoteRequestTimeout)
+		cctx, cancel := context.WithTimeout(requestCtx, remoteRequestTimeout)
 		req, err := http.NewRequestWithContext(cctx, http.MethodGet, u, nil)
 		if err != nil {
 			cancel()
+			stopCache()
 			return nil, errors.New("could not create remote range request")
 		}
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
@@ -179,9 +198,10 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 				req.Header.Set("If-Unmodified-Since", r.modified)
 			}
 		}
-		release, err := r.cache.acquireTransfer(cctx)
+		release, err := r.cache.acquireTransfer(cctx, end-start+1, file, priority)
 		if err != nil {
 			cancel()
+			stopCache()
 			return nil, err
 		}
 		requestStarted := time.Now()
@@ -189,12 +209,16 @@ func (r *Remote) requestRange(ctx context.Context, start, end int64, conditional
 		if err != nil {
 			release()
 			cancel()
+			stopCache()
 			return nil, contextError(ctx, err, "remote range request failed")
 		}
-		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: func() { cancel(); release() }, started: requestStarted, stats: r.cache.IOStats()}
+		resp.Body = &cancelBody{ReadCloser: resp.Body, cancel: func() { cancel(); stopCache(); release() }, started: requestStarted, stats: r.cache.IOStats()}
 		if (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone) && attempt == 0 {
 			resp.Body.Close()
-			if err = r.refresh(ctx); err != nil {
+			refreshCtx, stopRefresh := combineContexts(r.cache.lifetimeCtx, ctx)
+			err = r.refresh(refreshCtx)
+			stopRefresh()
+			if err != nil {
 				return nil, err
 			}
 			continue
@@ -443,27 +467,42 @@ func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error 
 		if err != nil {
 			return err
 		}
-		if !owner {
-			continue
+		if owner {
+			go r.runRangeFlight(flight)
 		}
-		// The previous owner may have published the bytes just before this
-		// flight was registered. Recheck coverage before issuing HTTP.
-		for _, gap := range r.cache.missingRanges(r.rangeID, run.start, run.end) {
-			gap := gap
-			h, fillErr := r.cache.AcquireRange(ctx, r.rangeID, gap.start, gap.end, func(fetchCtx context.Context, w io.Writer) error {
-				return r.fetchRangeTo(fetchCtx, gap.start, gap.end, w)
-			})
-			if fillErr != nil {
-				err = fillErr
-				break
+		select {
+		case <-ctx.Done():
+			r.cache.releaseRangeFlight(flight)
+			return ctx.Err()
+		case <-flight.done:
+			err = flight.err
+			r.cache.releaseRangeFlight(flight)
+			if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+				continue
 			}
-			_ = h.Close()
-		}
-		r.cache.finishRangeFlight(r.rangeID, flight, err)
-		if err != nil {
-			return err
+			if err != nil {
+				return err
+			}
 		}
 	}
+}
+
+func (r *Remote) runRangeFlight(flight *rangeFlight) {
+	var err error
+	// Recheck coverage in case an extent was published just before this flight
+	// was registered.
+	for _, gap := range r.cache.missingRanges(r.rangeID, flight.start, flight.end) {
+		gap := gap
+		h, fillErr := r.cache.AcquireRange(flight.ctx, r.rangeID, gap.start, gap.end, func(fetchCtx context.Context, w io.Writer) error {
+			return r.fetchRangeTo(fetchCtx, gap.start, gap.end, w, flight.priority)
+		})
+		if fillErr != nil {
+			err = fillErr
+			break
+		}
+		_ = h.Close()
+	}
+	r.cache.finishRangeFlight(r.rangeID, flight, err)
 }
 
 func (r *Remote) rangeHasCachedPages(start, end int64) bool {
@@ -618,8 +657,26 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 	return len(p), nil
 }
 
-func (r *Remote) fetchRangeTo(ctx context.Context, start, end int64, w io.Writer) error {
-	resp, err := r.requestRange(ctx, start, end-1, true)
+func (r *Remote) fetchRangeTo(ctx context.Context, start, end int64, w io.Writer, priority *downloadPriority) error {
+	chunkLimit := r.cache.downloads.cfg.RequestChunkBytes
+	if maxBackground := r.cache.downloads.cfg.MaxInFlightBytes - r.cache.downloads.cfg.ForegroundReservedBytes; chunkLimit > maxBackground {
+		chunkLimit = maxBackground
+	}
+	for cursor := start; cursor < end; {
+		chunkEnd := min(end, cursor+chunkLimit)
+		if priority != nil && priority.promoted.Load() {
+			chunkEnd = min(end, cursor+r.cache.downloads.cfg.RequestChunkBytes)
+		}
+		if err := r.fetchOneRange(ctx, cursor, chunkEnd, w, priority); err != nil {
+			return err
+		}
+		cursor = chunkEnd
+	}
+	return nil
+}
+
+func (r *Remote) fetchOneRange(ctx context.Context, start, end int64, w io.Writer, priority *downloadPriority) error {
+	resp, err := r.requestRangeScheduled(ctx, start, end-1, true, r.rangeID, priority)
 	if err != nil {
 		return err
 	}
