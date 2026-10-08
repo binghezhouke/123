@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 const remoteBlockSize int64 = 1 << 20
+const remoteCachePageSize int64 = 64 << 10
 const remoteRequestTimeout = 45 * time.Second
 
 // ResolveURL obtains a temporary download URL. Authorization belongs in this
@@ -29,6 +31,7 @@ type Remote struct {
 	resolve        ResolveURL
 	client         *http.Client
 	mu             sync.Mutex
+	fetchGate      chan struct{}
 	url            string
 	resolvedURL    string
 	urlUntil       time.Time
@@ -52,7 +55,7 @@ func NewRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, k
 	}
 	ctx, cancel := combineContexts(lifetimeCtx, operationCtx)
 	defer cancel()
-	r := &Remote{lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: key, linkKey: key, resolve: resolve, client: http.DefaultClient}
+	r := &Remote{lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: key, linkKey: key, resolve: resolve, client: http.DefaultClient, fetchGate: make(chan struct{}, 1)}
 	if size == 0 {
 		r.key = namespaceWithoutValidator(key)
 		return r, nil
@@ -243,40 +246,49 @@ func (r *Remote) ReadAt(p []byte, off int64) (int, error) {
 // ReadAtContext reads from the remote while observing both ctx and the
 // lifetime context supplied when the Remote was constructed.
 func (r *Remote) ReadAtContext(operationCtx context.Context, p []byte, off int64) (int, error) {
-	return r.readAtContext(operationCtx, p, off, remoteBlockSize, "remote")
+	return r.readAtContext(operationCtx, p, off, remoteBlockSize)
 }
 
-// ReadMetadataAtContext avoids fetching a whole 1 MiB data block for
-// every small header. Existing data blocks remain usable after upgrading.
+// ReadMetadataAtContext reads sparse archive metadata through the same cached
+// pages as ordinary reads. A small request only downloads the pages it needs.
 func (r *Remote) ReadMetadataAtContext(ctx context.Context, p []byte, off int64) (int, error) {
-	ctx, cancel := combineContexts(r.lifetimeCtx, ctx)
+	return r.readAtContext(ctx, p, off, remoteCachePageSize)
+}
+
+// ReadRangeAtContext reads an exact range through the shared page cache. It is
+// intended for archive scanners that download a larger window in one HTTP
+// request while retaining the same bytes for later ordinary reads.
+func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off int64) (int, error) {
+	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
-	if off >= 0 && off < r.size && len(p) > 0 {
-		block := off / remoteBlockSize
-		start := block * remoteBlockSize
-		size := remoteBlockSize
-		if size > r.size-start {
-			size = r.size - start
-		}
-		if int64(len(p)) <= size-(off-start) {
-			key := fmt.Sprintf("remote:%s:%d:%d", r.key, block, size)
-			h, err := r.cache.existing(key, size)
-			if err != nil {
-				return 0, err
-			}
-			if h != nil {
-				defer h.Close()
-				return h.ReadAt(p, off-start)
-			}
-		}
+	if off < 0 {
+		return 0, errors.New("negative offset")
 	}
-	return r.readAtContext(ctx, p, off, 64<<10, "remote-meta")
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if off >= r.size {
+		return 0, io.EOF
+	}
+	want := min(int64(len(p)), r.size-off)
+	end := off + want
+	if err := r.ensureCachedRange(ctx, off, end); err != nil {
+		return 0, err
+	}
+	n, err := r.readCachedRange(ctx, p[:want], off)
+	if err != nil {
+		return n, err
+	}
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
 }
 
-func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64, blockSize int64, prefix string) (int, error) {
+func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64, fetchSize int64) (int, error) {
 	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -301,36 +313,27 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 			return read, err
 		}
 		pos := off + int64(read)
-		block := pos / blockSize
-		start := block * blockSize
-		end := start + blockSize - 1
-		if end >= r.size {
-			end = r.size - 1
+		blockStart := pos / fetchSize * fetchSize
+		blockEnd := min(blockStart+fetchSize, r.size)
+		copyEnd := min(off+int64(want), blockEnd)
+		ensureStart, ensureEnd := blockStart, blockEnd
+		if r.rangeHasCachedPages(pos, copyEnd) {
+			// If a scanner or previous read already populated this area, avoid
+			// fetching the rest of the normal 1 MiB read-ahead block.
+			ensureStart, ensureEnd = pos, copyEnd
 		}
-		nblock := end - start + 1
-		cacheKey := fmt.Sprintf("%s:%s:%d:%d", prefix, r.key, block, nblock)
-		h, err := r.cache.Acquire(ctx, cacheKey, nblock, func(ctx context.Context, w io.Writer) error { return r.fetchBlock(ctx, start, end, w) })
-		if err != nil {
+		if err := r.ensureCachedRange(ctx, ensureStart, ensureEnd); err != nil {
 			if read > 0 {
 				return read, err
 			}
 			return 0, err
 		}
-		within := pos - start
-		n := want - read
-		if int64(n) > nblock-within {
-			n = int(nblock - within)
-		}
-		got, e := h.ReadAt(p[read:read+n], within)
-		ce := h.Close()
-		if e != nil && e != io.EOF {
-			return read, e
-		}
-		if ce != nil {
-			return read, ce
-		}
+		got, err := r.readCachedRange(ctx, p[read:read+int(copyEnd-pos)], pos)
 		read += got
-		if got < n {
+		if err != nil && err != io.EOF {
+			return read, err
+		}
+		if got < int(copyEnd-pos) {
 			break
 		}
 	}
@@ -340,30 +343,222 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 	return read, nil
 }
 
-func (r *Remote) fetchBlock(ctx context.Context, start, end int64, w io.Writer) error {
-	resp, err := r.requestRange(ctx, start, end, true)
+// ensureCachedRange stores every byte in [start,end) as canonical 64 KiB pages.
+// One contiguous missing run is fetched with one HTTP range regardless of how
+// many cache pages it spans.
+func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error {
+	if start >= end {
+		return nil
+	}
+	firstPageStart := start / remoteCachePageSize * remoteCachePageSize
+	coveredEnd := min(((end-1)/remoteCachePageSize+1)*remoteCachePageSize, r.size)
+	if coveredEnd-firstPageStart > r.cache.max {
+		return syscall.ENOSPC
+	}
+	select {
+	case r.fetchGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-r.fetchGate }()
+	first := start / remoteCachePageSize
+	last := (end - 1) / remoteCachePageSize
+	missing := make([]bool, last-first+1)
+	for i := range missing {
+		page := first + int64(i)
+		pageStart := page * remoteCachePageSize
+		pageSize := min(remoteCachePageSize, r.size-pageStart)
+		h, err := r.cache.existing(r.pageKey(page), pageSize)
+		if err != nil {
+			return err
+		}
+		if h != nil {
+			_ = h.Close()
+			continue
+		}
+		if err := r.copyLegacyPage(ctx, page, pageSize); err != nil {
+			return err
+		}
+		missing[i] = true
+		h, err = r.cache.existing(r.pageKey(page), pageSize)
+		if err != nil {
+			return err
+		}
+		if h != nil {
+			_ = h.Close()
+			missing[i] = false
+		}
+	}
+	for i := 0; i < len(missing); {
+		if !missing[i] {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(missing) && missing[j] {
+			j++
+		}
+		runStart := (first + int64(i)) * remoteCachePageSize
+		runEnd := min((first+int64(j))*remoteCachePageSize, r.size)
+		buf := make([]byte, runEnd-runStart)
+		n, err := r.fetchRange(ctx, runStart, runEnd, buf)
+		if err != nil {
+			return err
+		}
+		if n != len(buf) {
+			return errors.New("remote range body length mismatch")
+		}
+		for k := i; k < j; k++ {
+			page := first + int64(k)
+			pageStart := page * remoteCachePageSize
+			pageEnd := min(pageStart+remoteCachePageSize, r.size)
+			part := buf[pageStart-runStart : pageEnd-runStart]
+			h, err := r.cache.Acquire(ctx, r.pageKey(page), int64(len(part)), func(_ context.Context, w io.Writer) error { _, writeErr := w.Write(part); return writeErr })
+			if err != nil {
+				return err
+			}
+			_ = h.Close()
+		}
+		i = j
+	}
+	return nil
+}
+
+func (r *Remote) rangeHasCachedPages(start, end int64) bool {
+	if start >= end {
+		return false
+	}
+	first, last := start/remoteCachePageSize, (end-1)/remoteCachePageSize
+	for page := first; page <= last; page++ {
+		pageStart := page * remoteCachePageSize
+		size := min(remoteCachePageSize, r.size-pageStart)
+		h, err := r.cache.existing(r.pageKey(page), size)
+		if err == nil && h != nil {
+			_ = h.Close()
+			return true
+		}
+		if r.legacyPageExists(page, size) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Remote) legacyPageKeys(page, pageSize int64) []string {
+	keys := []string{fmt.Sprintf("remote-meta:%s:%d:%d", r.key, page, pageSize)}
+	pageStart := page * remoteCachePageSize
+	block := pageStart / remoteBlockSize
+	blockStart := block * remoteBlockSize
+	blockSize := min(remoteBlockSize, r.size-blockStart)
+	keys = append(keys, fmt.Sprintf("remote:%s:%d:%d", r.key, block, blockSize))
+	return keys
+}
+
+func (r *Remote) legacyPageExists(page, pageSize int64) bool {
+	for _, key := range r.legacyPageKeys(page, pageSize) {
+		size := pageSize
+		if strings.HasPrefix(key, "remote:") {
+			size = min(remoteBlockSize, r.size-(page*remoteCachePageSize)/remoteBlockSize*remoteBlockSize)
+		}
+		h, err := r.cache.existing(key, size)
+		if err == nil && h != nil {
+			_ = h.Close()
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Remote) copyLegacyPage(ctx context.Context, page, pageSize int64) error {
+	pageStart := page * remoteCachePageSize
+	for _, key := range r.legacyPageKeys(page, pageSize) {
+		legacySize := pageSize
+		within := pageStart % remoteCachePageSize
+		if strings.HasPrefix(key, "remote:") {
+			blockStart := pageStart / remoteBlockSize * remoteBlockSize
+			legacySize = min(remoteBlockSize, r.size-blockStart)
+			within = pageStart - blockStart
+		}
+		h, err := r.cache.existing(key, legacySize)
+		if err != nil {
+			return err
+		}
+		if h == nil {
+			continue
+		}
+		data := make([]byte, pageSize)
+		_, readErr := h.ReadAt(data, within)
+		_ = h.Close()
+		if readErr != nil {
+			return readErr
+		}
+		pageHandle, err := r.cache.Acquire(ctx, r.pageKey(page), pageSize, func(_ context.Context, w io.Writer) error { _, e := w.Write(data); return e })
+		if err != nil {
+			return err
+		}
+		_ = pageHandle.Close()
+		return nil
+	}
+	return nil
+}
+
+func (r *Remote) pageKey(page int64) string { return fmt.Sprintf("remote-page:%s:%d", r.key, page) }
+
+func (r *Remote) readCachedRange(ctx context.Context, p []byte, off int64) (int, error) {
+	read := 0
+	for read < len(p) {
+		if err := ctx.Err(); err != nil {
+			return read, err
+		}
+		pos := off + int64(read)
+		page := pos / remoteCachePageSize
+		start := page * remoteCachePageSize
+		size := min(remoteCachePageSize, r.size-start)
+		h, err := r.cache.existing(r.pageKey(page), size)
+		if err != nil {
+			return read, err
+		}
+		if h == nil {
+			return read, errors.New("remote cache page disappeared")
+		}
+		n := min(int64(len(p)-read), size-(pos-start))
+		got, e := h.ReadAt(p[read:read+int(n)], pos-start)
+		_ = h.Close()
+		read += got
+		if e != nil && e != io.EOF {
+			return read, e
+		}
+		if int64(got) < n {
+			break
+		}
+	}
+	if read < len(p) {
+		return read, io.EOF
+	}
+	return read, nil
+}
+
+func (r *Remote) fetchRange(ctx context.Context, start, end int64, dst []byte) (int, error) {
+	resp, err := r.requestRange(ctx, start, end-1, true)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusPreconditionFailed {
-		return errors.New("remote file changed")
+		return 0, errors.New("remote file changed")
 	}
-	if err = checkRangeResponse(resp, start, end, r.size); err != nil {
-		return err
+	if err = checkRangeResponse(resp, start, end-1, r.size); err != nil {
+		return 0, err
 	}
 	if r.etag != "" && resp.Header.Get("ETag") != r.etag {
-		return errors.New("remote file changed")
+		return 0, errors.New("remote file changed")
 	}
 	if r.etag == "" && r.modified != "" && resp.Header.Get("Last-Modified") != r.modified {
-		return errors.New("remote file changed")
+		return 0, errors.New("remote file changed")
 	}
-	n, err := io.Copy(w, io.LimitReader(resp.Body, end-start+2))
+	n, err := io.ReadFull(io.LimitReader(resp.Body, end-start+1), dst)
 	if err != nil {
-		return contextError(ctx, err, "could not read remote range")
+		return n, contextError(ctx, err, "could not read remote range")
 	}
-	if n != end-start+1 {
-		return errors.New("remote range body length mismatch")
-	}
-	return nil
+	return n, nil
 }

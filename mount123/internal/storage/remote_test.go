@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -402,5 +404,195 @@ func TestRemoteRefreshesExpiredStatusAndSanitizesResolverError(t *testing.T) {
 	})
 	if err == nil || strings.Contains(err.Error(), "signature=secret") {
 		t.Fatalf("resolver error leaked URL: %v", err)
+	}
+}
+
+func TestRemoteRangeWindowsSharePagesWithMetadataAndData(t *testing.T) {
+	data := []byte(strings.Repeat("range-window-data-", int((8<<20)/18+1)))[:8<<20]
+	var mu sync.Mutex
+	var ranges []string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		rangeHeader := req.Header.Get("Range")
+		mu.Lock()
+		ranges = append(ranges, rangeHeader)
+		mu.Unlock()
+		var a, b int64
+		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"window-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 10<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "window-sharing", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	window := make([]byte, 3*int(remoteCachePageSize))
+	windowOff := 2*remoteCachePageSize + 123
+	if n, err := r.ReadRangeAtContext(context.Background(), window, windowOff); err != nil || n != len(window) {
+		t.Fatalf("window read = %d, %v", n, err)
+	}
+	if !bytes.Equal(window, data[windowOff:windowOff+int64(len(window))]) {
+		t.Fatal("window bytes differ")
+	}
+	before := countRemoteRanges(&mu, &ranges)
+	ordinary := make([]byte, 200)
+	if n, err := r.ReadAt(ordinary, windowOff+remoteCachePageSize+99); err != nil || n != len(ordinary) {
+		t.Fatalf("ordinary read = %d, %v", n, err)
+	}
+	if !bytes.Equal(ordinary, data[windowOff+remoteCachePageSize+99:windowOff+remoteCachePageSize+99+int64(len(ordinary))]) {
+		t.Fatal("ordinary bytes differ")
+	}
+	if got := countRemoteRanges(&mu, &ranges); got != before {
+		t.Fatalf("ordinary read refetched window data: ranges %d -> %d", before, got)
+	}
+
+	// A sparse metadata read populates a page that a later window read reuses.
+	metadataOff := 6*remoteCachePageSize + 17
+	metadata := make([]byte, 100)
+	if n, err := r.ReadMetadataAtContext(context.Background(), metadata, metadataOff); err != nil || n != len(metadata) {
+		t.Fatalf("metadata read = %d, %v", n, err)
+	}
+	before = countRemoteRanges(&mu, &ranges)
+	window2 := make([]byte, int(remoteCachePageSize))
+	if n, err := r.ReadRangeAtContext(context.Background(), window2, 6*remoteCachePageSize); err != nil || n != len(window2) {
+		t.Fatalf("overlapping window read = %d, %v", n, err)
+	}
+	if got := countRemoteRanges(&mu, &ranges); got != before {
+		t.Fatalf("window failed to reuse metadata page: ranges %d -> %d", before, got)
+	}
+
+	// A normal cold read keeps its 1 MiB request granularity; sparse metadata
+	// and a later exact window over those bytes should both reuse its pages.
+	cold := make([]byte, 32)
+	if n, err := r.ReadAt(cold, 0); err != nil || n != len(cold) {
+		t.Fatalf("cold ordinary read = %d, %v", n, err)
+	}
+	before = countRemoteRanges(&mu, &ranges)
+	if n, err := r.ReadMetadataAtContext(context.Background(), metadata, remoteCachePageSize+7); err != nil || n != len(metadata) {
+		t.Fatalf("metadata reuse read = %d, %v", n, err)
+	}
+	if n, err := r.ReadRangeAtContext(context.Background(), window2, remoteCachePageSize); err != nil || n != len(window2) {
+		t.Fatalf("ordinary overlap window = %d, %v", n, err)
+	}
+	if got := countRemoteRanges(&mu, &ranges); got != before {
+		t.Fatalf("metadata/window failed to reuse ordinary pages: ranges %d -> %d", before, got)
+	}
+}
+
+func TestRemoteRangeWindowFetchesOnlyMissingOverlap(t *testing.T) {
+	data := []byte(strings.Repeat("0123456789abcdef", (2<<20)/16))
+	var mu sync.Mutex
+	var ranges []string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		rangeHeader := req.Header.Get("Range")
+		mu.Lock()
+		ranges = append(ranges, rangeHeader)
+		mu.Unlock()
+		var a, b int64
+		if _, err := fmt.Sscanf(rangeHeader, "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"overlap-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "overlap-sharing", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := remoteCachePageSize
+	first := make([]byte, 4*int(page))
+	if n, err := r.ReadRangeAtContext(context.Background(), first, 8*page); err != nil || n != len(first) {
+		t.Fatalf("first range read = %d, %v", n, err)
+	}
+	before := countRemoteRanges(&mu, &ranges)
+	second := make([]byte, 4*int(page))
+	if n, err := r.ReadRangeAtContext(context.Background(), second, 10*page); err != nil || n != len(second) {
+		t.Fatalf("overlap read = %d, %v", n, err)
+	}
+	if !bytes.Equal(second, data[10*page:14*page]) {
+		t.Fatal("overlap bytes differ")
+	}
+	if got := countRemoteRanges(&mu, &ranges); got != before+1 {
+		t.Fatalf("partial overlap made %d requests, want one missing run", got-before)
+	}
+	mu.Lock()
+	last := ranges[len(ranges)-1]
+	mu.Unlock()
+	if want := fmt.Sprintf("bytes=%d-%d", 12*page, 14*page-1); last != want {
+		t.Fatalf("missing range = %q, want %q", last, want)
+	}
+}
+
+func countRemoteRanges(mu *sync.Mutex, ranges *[]string) int {
+	mu.Lock()
+	defer mu.Unlock()
+	// Include the byte-zero construction probe in the same count.
+	return len(*ranges)
+}
+
+func TestRemoteMigratesLegacyDataBlockIntoSharedPages(t *testing.T) {
+	data := []byte(strings.Repeat("legacy-cache", int(remoteBlockSize/12)))[:remoteBlockSize]
+	var calls atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		calls.Add(1)
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"legacy-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 3*remoteBlockSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "legacy-migration", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := fmt.Sprintf("remote:%s:0:%d", r.key, len(data))
+	old, err := c.Acquire(context.Background(), oldKey, int64(len(data)), func(_ context.Context, w io.Writer) error { _, e := w.Write(data); return e })
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = old.Close()
+	before := calls.Load()
+	out := make([]byte, 128)
+	if n, err := r.ReadAt(out, 123); err != nil || n != len(out) {
+		t.Fatalf("legacy read = %d, %v", n, err)
+	}
+	if !bytes.Equal(out, data[123:123+len(out)]) {
+		t.Fatal("legacy cache bytes differ")
+	}
+	if calls.Load() != before {
+		t.Fatalf("legacy cache migration made HTTP request: %d -> %d", before, calls.Load())
 	}
 }

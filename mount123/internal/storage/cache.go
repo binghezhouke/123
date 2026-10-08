@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"container/list"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -12,6 +13,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -21,10 +23,12 @@ import (
 var ErrClosed = errors.New("storage cache is closed")
 
 type cacheEntry struct {
-	path string
-	size int64
-	used time.Time
-	pins int
+	path      string
+	size      int64
+	used      time.Time
+	lastTouch time.Time
+	pins      int
+	lru       *list.Element
 }
 type flight struct {
 	done chan struct{}
@@ -41,6 +45,7 @@ type Cache struct {
 	dir                 string
 	max, used, reserved int64
 	entries             map[string]*cacheEntry
+	lru                 *list.List // newest at the front
 	flights             map[string]*flight
 	lock                *os.File
 	identityKey         [32]byte
@@ -71,7 +76,7 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 		_ = lock.Close()
 		return nil, err
 	}
-	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), flights: make(map[string]*flight), lock: lock}
+	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), lru: list.New(), flights: make(map[string]*flight), lock: lock}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -226,6 +231,11 @@ func (c *Cache) load() error {
 	if err != nil {
 		return err
 	}
+	type loadedEntry struct {
+		id    string
+		entry *cacheEntry
+	}
+	var loaded []loadedEntry
 	for _, item := range items {
 		name := item.Name()
 		if strings.HasPrefix(name, ".fill-") {
@@ -244,8 +254,14 @@ func (c *Cache) load() error {
 			continue
 		}
 		key := name[:64]
-		c.entries[key] = &cacheEntry{path: p, size: st.Size(), used: st.ModTime()}
+		entry := &cacheEntry{path: p, size: st.Size(), used: st.ModTime(), lastTouch: st.ModTime()}
+		loaded = append(loaded, loadedEntry{id: key, entry: entry})
 		c.used += st.Size()
+	}
+	sort.Slice(loaded, func(i, j int) bool { return loaded[i].entry.used.Before(loaded[j].entry.used) })
+	for _, item := range loaded {
+		item.entry.lru = c.lru.PushFront(item.id)
+		c.entries[item.id] = item.entry
 	}
 	// Old and oversized entries are removed using the same bounded eviction rule.
 	return c.evictLocked(0)
@@ -253,23 +269,52 @@ func (c *Cache) load() error {
 
 func (c *Cache) evictLocked(need int64) error {
 	for c.used+c.reserved+need > c.max {
-		var oldestKey string
-		var oldest *cacheEntry
-		for k, e := range c.entries {
-			if e.pins == 0 && (oldest == nil || e.used.Before(oldest.used)) {
-				oldestKey, oldest = k, e
+		var victim *list.Element
+		for node := c.lru.Back(); node != nil; node = node.Prev() {
+			id := node.Value.(string)
+			if e := c.entries[id]; e != nil && e.pins == 0 {
+				victim = node
+				break
 			}
 		}
-		if oldest == nil {
+		if victim == nil {
 			return syscall.ENOSPC
 		}
-		if err := os.Remove(oldest.path); err != nil && !os.IsNotExist(err) {
+		id := victim.Value.(string)
+		e := c.entries[id]
+		if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
 			return err
 		}
-		delete(c.entries, oldestKey)
-		c.used -= oldest.size
+		c.lru.Remove(victim)
+		delete(c.entries, id)
+		c.used -= e.size
 	}
 	return nil
+}
+
+func (c *Cache) touchLocked(id string, e *cacheEntry) {
+	e.used = time.Now()
+	if e.lru != nil {
+		c.lru.MoveToFront(e.lru)
+	} else {
+		e.lru = c.lru.PushFront(id)
+	}
+	// Persist recency at most once per minute per file; ordinary cache hits
+	// only update the in-memory LRU and do not issue a filesystem metadata op.
+	if e.used.Sub(e.lastTouch) >= time.Minute {
+		if os.Chtimes(e.path, e.used, e.used) == nil {
+			e.lastTouch = e.used
+		}
+	}
+}
+
+func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
+	if e.lru != nil {
+		c.lru.Remove(e.lru)
+		e.lru = nil
+	}
+	delete(c.entries, id)
+	c.used -= e.size
 }
 
 // Acquire returns a pinned handle for key, filling and atomically publishing it
@@ -293,8 +338,7 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 			f, err := os.Open(e.path)
 			if err == nil {
 				e.pins++
-				e.used = time.Now()
-				_ = os.Chtimes(e.path, e.used, e.used)
+				c.touchLocked(id, e)
 				c.mu.Unlock()
 				return &Handle{file: f, cache: c, key: id, size: size}, nil
 			}
@@ -302,16 +346,14 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 				c.mu.Unlock()
 				return nil, err
 			}
-			delete(c.entries, id)
-			c.used -= e.size
+			c.removeEntryLocked(id, e)
 		} else if e != nil {
 			if e.pins != 0 {
 				c.mu.Unlock()
 				return nil, syscall.ENOSPC
 			}
 			_ = os.Remove(e.path)
-			delete(c.entries, id)
-			c.used -= e.size
+			c.removeEntryLocked(id, e)
 		}
 		if f := c.flights[id]; f != nil {
 			done := f.done
@@ -351,7 +393,9 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 			if err != nil || st.Size() != size {
 				f.err = fmt.Errorf("cache fill published invalid file")
 			} else {
-				c.entries[id] = &cacheEntry{path: p, size: size, used: time.Now()}
+				entry := &cacheEntry{path: p, size: size, used: time.Now(), lastTouch: time.Now()}
+				entry.lru = c.lru.PushFront(id)
+				c.entries[id] = entry
 				c.used += size
 			}
 		} else if f.err == nil {
@@ -498,7 +542,6 @@ func (c *Cache) existing(key string, size int64) (*Handle, error) {
 		return nil, err
 	}
 	e.pins++
-	e.used = time.Now()
-	_ = os.Chtimes(e.path, e.used, e.used)
+	c.touchLocked(id, e)
 	return &Handle{file: f, cache: c, key: id, size: size}, nil
 }

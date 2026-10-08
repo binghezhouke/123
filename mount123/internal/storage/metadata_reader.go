@@ -65,23 +65,18 @@ func (r *metadataReader) ReadAt(p []byte, off int64) (int, error) {
 		// Each fill is one large Range request, not a loop of 1 MiB requests.
 		start := pos
 		size := min(r.windowSize, r.remote.size-start)
-		key := fmt.Sprintf("metadata-window:%s:%d:%d", r.remote.key, start, size)
-		h, err := r.remote.cache.Acquire(ctx, key, size, func(ctx context.Context, w io.Writer) error {
-			return r.remote.fetchBlock(ctx, start, start+size-1, w)
-		})
-		if err != nil {
-			return n, err
-		}
 		if cap(r.buffer) < int(size) {
 			r.buffer = make([]byte, size)
 		} else {
 			r.buffer = r.buffer[:size]
 		}
-		_, err = h.ReadAt(r.buffer, 0)
-		h.Close()
-		if err != nil {
-			r.buffer = nil
+		got, err := r.remote.ReadRangeAtContext(ctx, r.buffer, start)
+		if err != nil && err != io.EOF {
 			return n, err
+		}
+		if got != int(size) {
+			r.buffer = nil
+			return n, io.ErrUnexpectedEOF
 		}
 		r.start = start
 		r.windowSize = min(r.windowSize*4, 16<<20)
