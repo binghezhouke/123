@@ -339,7 +339,10 @@ func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, e
 			}
 			return 0, fillErr
 		}
-		if written >= end || (state == growingComplete && written >= end) {
+		// The last byte may already be visible before the producer has finished
+		// validating it (for example, a decompressor's final CRC). Keep prefix
+		// reads streaming, but only satisfy a read ending at EOF after publish.
+		if written >= end && (end < h.size || state == growingComplete) {
 			h.mu.Lock()
 			if h.closed {
 				h.mu.Unlock()

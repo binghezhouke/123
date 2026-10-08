@@ -162,6 +162,78 @@ func TestAcquireGrowingFailureDoesNotPublishPartialBytes(t *testing.T) {
 	}
 }
 
+func TestGrowingReadAtFinalRangeWaitsForValidation(t *testing.T) {
+	for _, fail := range []bool{false, true} {
+		name := "success"
+		if fail {
+			name = "failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			c, err := NewCache(t.TempDir(), 16)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			written := make(chan struct{})
+			validate := make(chan struct{})
+			h, err := c.AcquireGrowing(context.Background(), context.Background(), "final-validation", 6, func(ctx context.Context, w io.Writer) error {
+				if _, err := io.WriteString(w, "abcdef"); err != nil {
+					return err
+				}
+				close(written)
+				select {
+				case <-validate:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				if fail {
+					return syscall.EIO
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer h.Close()
+			<-written
+
+			prefix := make([]byte, 3)
+			if n, err := h.ReadAt(context.Background(), prefix, 0); n != 3 || err != nil || string(prefix) != "abc" {
+				t.Fatalf("prefix read = %q, %d, %v", prefix, n, err)
+			}
+			waitCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+			defer cancel()
+			final := make([]byte, 3)
+			if n, err := h.ReadAt(waitCtx, final, 3); n != 0 || !errors.Is(err, context.DeadlineExceeded) {
+				t.Fatalf("final read before validation = %q, %d, %v; want deadline", final, n, err)
+			}
+
+			close(validate)
+			if fail {
+				if n, err := h.ReadAt(context.Background(), final, 3); n != 0 || !errors.Is(err, syscall.EIO) {
+					t.Fatalf("final read after failed validation = %q, %d, %v; want EIO", final, n, err)
+				}
+				if err := h.Wait(context.Background()); !errors.Is(err, syscall.EIO) {
+					t.Fatalf("Wait after failed validation = %v, want EIO", err)
+				}
+				if _, err := c.Open("final-validation"); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("failed data was published: %v", err)
+				}
+				return
+			}
+			if n, err := h.ReadAt(context.Background(), final, 3); n != 3 || err != nil || string(final) != "def" {
+				t.Fatalf("final read after validation = %q, %d, %v", final, n, err)
+			}
+			if err := h.Wait(context.Background()); err != nil {
+				t.Fatalf("Wait after validation: %v", err)
+			}
+			if !h.Materialized() {
+				t.Fatal("successful data was not materialized")
+			}
+		})
+	}
+}
+
 func TestAcquireGrowingPublishesLRUAndRangeCoverage(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 6)
 	if err != nil {
