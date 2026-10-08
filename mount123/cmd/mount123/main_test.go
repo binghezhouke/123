@@ -3,12 +3,20 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestOpenCacheDurabilityModes(t *testing.T) {
 	root := t.TempDir()
+	tokenPath := filepath.Join(root, "ephemeral", "token.json")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("simulated token"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	durable, err := openCache(filepath.Join(root, "durable"), 1024, "durable")
 	if err != nil {
 		t.Fatal(err)
@@ -29,6 +37,9 @@ func TestOpenCacheDurabilityModes(t *testing.T) {
 	}
 	if err = ephemeral.Close(); err != nil {
 		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(tokenPath); err != nil || string(got) != "simulated token" {
+		t.Fatalf("ephemeral cleanup changed root token cache: %q, %v", got, err)
 	}
 	if ephemeral.Directory() != dir {
 		t.Fatal("cache directory changed while closing")

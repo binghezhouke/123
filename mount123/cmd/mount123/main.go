@@ -164,7 +164,7 @@ func run() error {
 		return err
 	}
 	defer cache.Close()
-	api, err := panapi.New(panapi.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, AccessToken: token, TokenCache: filepath.Join(cache.Directory(), "token.json")})
+	api, err := panapi.New(panapi.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, AccessToken: token, TokenCache: filepath.Join(cacheAbs, "token.json")})
 	if err != nil {
 		return err
 	}

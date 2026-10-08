@@ -124,7 +124,7 @@ MOUNT123_FUSE_TEST=1 go test -race -run TestActualFUSEMount -v ./internal/mountf
 
 普通云文件和 ZIP Store 成员只在实际读取后触发字节级预读，连续读取时窗口从 1 MiB 扩大到 4 MiB、最高 16 MiB；跳读会取消旧窗口并回到 1 MiB。每个打开句柄最多两个后台 Range 请求，窗口总量受缓存预算限制，关闭句柄会取消并等待后台读取。ZIP Store 预读严格限制在成员数据范围内。`-read-ahead-mib=0` 可关闭，默认上限为 16 MiB；打开、stat 和列目录不会触发。
 
-磁盘数据缓存默认使用 `-cache-durability=durable`，写入后同步到磁盘并跨重启复用。可选 `-cache-durability=ephemeral` 使用每个进程独立的临时子目录，省去文件同步并在关闭时删除；异常退出遗留的目录会在下一次启动时清理，不会复用。认证 token 缓存也放在所选模式对应的缓存目录中。
+磁盘数据缓存默认使用 `-cache-durability=durable`，写入后同步到磁盘并跨重启复用。可选 `-cache-durability=ephemeral` 使用每个进程独立的临时子目录，省去文件同步并在关闭时删除；异常退出遗留的目录会在下一次启动时清理，不会复用。认证 token 缓存始终保留在所选缓存根目录的 `token.json`，因此切换到 ephemeral 或重启不会丢失登录 token。
 
 ## 大型 RAR 首次列目录
 
