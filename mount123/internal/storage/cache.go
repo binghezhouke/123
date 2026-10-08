@@ -84,8 +84,8 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 }
 
 // StableDigest returns a keyed digest for cache identities. The key is unique
-// to this private cache root and persists across mount processes; neither the
-// input nor the key is written to disk.
+// to this private cache root and persists across mount processes. The input is
+// never written to disk; the private HMAC key is stored in the cache root.
 func (c *Cache) StableDigest(namespace, value string) string {
 	h := hmac.New(sha256.New, c.identityKey[:])
 	_, _ = io.WriteString(h, namespace)

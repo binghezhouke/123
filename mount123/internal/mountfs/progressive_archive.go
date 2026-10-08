@@ -132,7 +132,7 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 	}
 	var index *zipIndex
 	if archiveKind(archive.name) == ".zip" {
-		index, err = n.tree.getZIP(ctx, packedSource, archive.size)
+		index, err = n.tree.getZIP(ctx, packedSource, archive.size, archive)
 	} else {
 		password, passwordErr := n.tree.otherPassword(ctx, archive)
 		if passwordErr != nil {
