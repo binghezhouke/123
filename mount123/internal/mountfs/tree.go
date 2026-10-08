@@ -985,6 +985,11 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 	}
 	h, flagsOut, errno := n.openRaw(ctx, flags)
 	if errno == 0 && n.tree.prefetch != nil && n.parent != nil && imageName(n.item.name) {
+		// Every image read must reach FUSE while prefetch is enabled so the
+		// prefetch window can follow forward and reverse browsing. Fully
+		// materialized archive images can use the kernel page cache only when
+		// image prefetch is disabled.
+		flagsOut = fuse.FOPEN_DIRECT_IO
 		return &imageHandle{FileHandle: h, node: n}, flagsOut, errno
 	}
 	return h, flagsOut, errno

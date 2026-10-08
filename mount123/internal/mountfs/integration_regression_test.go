@@ -104,6 +104,44 @@ func TestArchivePageCacheFlagsOnlyMaterializedMembers(t *testing.T) {
 	}
 }
 
+func TestArchiveImagePageCacheRespectsPrefetchOptions(t *testing.T) {
+	imageNode := func(t *testing.T) *Node {
+		t.Helper()
+		root, _ := fixture(t)
+		fs.NewNodeFS(root, &fs.Options{})
+		image := lookup(t, lookup(t, lookup(t, root, "photos.zip"), "images"), "8.txt")
+		// Keep the archive member identity while giving the mounted entry an
+		// image extension, as would happen for a real image member.
+		image.item.name = "8.jpg"
+		return image
+	}
+
+	image := imageNode(t)
+	image.tree.prefetch = newImagePrefetch(image.tree)
+	defer image.tree.prefetch.interrupt()
+	h, flags, errno := image.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	h.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_DIRECT_IO {
+		t.Fatalf("image with prefetch enabled flags=%x, want DIRECT_IO", flags)
+	}
+
+	image = imageNode(t)
+	if image.tree.prefetch != nil {
+		t.Fatal("prefetch unexpectedly enabled")
+	}
+	h, flags, errno = image.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatal(errno)
+	}
+	h.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatalf("image with prefetch disabled flags=%x, want KEEP_CACHE", flags)
+	}
+}
+
 func TestDeflateRejectsCorruptCRC(t *testing.T) {
 	root, _ := fixture(t)
 	archive := root.tree.api.(*fakeAPI).archive
