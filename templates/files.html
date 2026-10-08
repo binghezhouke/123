@@ -2,17 +2,29 @@
 
 {% block extra_head %}
 <link href="{{ url_for('static', filename='css/browser_position.css') }}" rel="stylesheet">
+<link href="{{ url_for('static', filename='css/directory_actions.css') }}" rel="stylesheet">
 {% endblock %}
 
 {% block title %}{% if parent_id != 0 %}文件夹 - {% endif %}CloudArchive{% endblock %}
 
 {% block content %}
 <div data-file-page hidden></div>
-<header class="browser-heading">
+<header class="browser-heading directory-heading">
     <div><p class="eyebrow">资料库</p><h1>{{ breadcrumbs[-1].name if breadcrumbs|default([]) else '我的文件' }}</h1></div>
-    <span class="item-count" data-file-count>{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
+    <div class="directory-heading-actions">
+        <span class="item-count" data-file-count>{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
+        <details class="directory-actions">
+            <summary aria-label="更多目录操作" title="更多目录操作">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <circle cx="4" cy="10" r="1.5"/><circle cx="10" cy="10" r="1.5"/><circle cx="16" cy="10" r="1.5"/>
+                </svg>
+            </summary>
+            <nav class="directory-actions-panel" aria-label="目录操作">
+                <a href="{{ url_for('batch_passwords.page', parent_id=parent_id) }}">批量设置 ZIP 密码</a>
+            </nav>
+        </details>
+    </div>
 </header>
-<a class="btn btn-secondary" href="{{ url_for('batch_passwords.page', parent_id=parent_id) }}">批量设置 ZIP 密码</a>
 <form method="get" class="browser-filters">
     <input type="hidden" name="parent_id" value="{{ parent_id }}">
     {% include '_listing_filters.html' %}
@@ -67,6 +79,7 @@
 {% include '_image_gallery.html' %}
 <script src="{{ url_for('static', filename='js/browser_position.js') }}" defer></script>
 <script src="{{ url_for('static', filename='js/file_pagination.js') }}" defer></script>
+<script src="{{ url_for('static', filename='js/directory_actions.js') }}" defer></script>
 <script>
 // View switching - Override the base function for this page
 function switchView(view) {
