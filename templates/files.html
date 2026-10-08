@@ -12,6 +12,7 @@
     <div><p class="eyebrow">资料库</p><h1>{{ breadcrumbs[-1].name if breadcrumbs|default([]) else '我的文件' }}</h1></div>
     <span class="item-count" data-file-count>{{ files|length }} 个项目{% if next_last_file_id and next_last_file_id != -1 %} · 当前页{% endif %}</span>
 </header>
+<a class="btn btn-secondary" href="{{ url_for('batch_passwords.page', parent_id=parent_id) }}">批量设置 ZIP 密码</a>
 <form method="get" class="browser-filters">
     <input type="hidden" name="parent_id" value="{{ parent_id }}">
     {% include '_listing_filters.html' %}

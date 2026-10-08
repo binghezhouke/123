@@ -728,13 +728,15 @@ class FileService:
     def save_zip_password(self, file_id: int, password: str) -> Dict[str, Any]:
         return self.save_archive_password(file_id, password)
 
-    def save_archive_password(self, file_id: int, password: str, archive_kind=None) -> Dict[str, Any]:
+    def save_archive_password(self, file_id: int, password: str, archive_kind=None,
+                              *, skip_existing=False, expected_archive=None) -> Dict[str, Any]:
         """Save a pre-validated archive password as a sibling `<archive>.pwd`.
 
         The caller must validate the password against the encrypted archive
         before invoking this method. It stores the exact UTF-8 bytes in a
         private temporary file, then uses the regular upload flow to replace
-        any existing sibling sidecar.
+        any existing sibling sidecar. Batch callers pass skip_existing to
+        preserve siblings and expected_archive to recheck the validated source.
         """
         if not isinstance(file_id, int) or isinstance(file_id, bool) or file_id <= 0:
             raise ValidationError("file_id 必须是正整数")
@@ -748,6 +750,11 @@ class FileService:
             raise ValidationError("压缩包密码长度必须为1到4096个UTF-8字节")
 
         archive = self.get_file_detail(file_id)
+        if expected_archive is not None:
+            identity_fields = ("file_id", "parent_file_id", "filename", "size", "etag", "update_at")
+            if archive is None or any(getattr(archive, key) != getattr(expected_archive, key)
+                                      for key in identity_fields):
+                raise ValidationError("压缩包在验证期间已移动或变化，请重新扫描目录")
         from .split_archive import SPLIT_7Z
         split = SPLIT_7Z.fullmatch(archive.filename) if archive is not None else None
         supported = archive is not None and (split or archive.filename.lower().endswith((".zip", ".7z", ".7zz", ".rar")))
@@ -774,9 +781,19 @@ class FileService:
         if len(sidecar_name.encode("utf-8")) > 255:
             raise ValidationError("密码侧车文件名超过255个UTF-8字节")
 
-        siblings, _ = self.list_files(
-            parent_id=parent_id, auto_fetch_all=True, use_cache=False)
+        if skip_existing:
+            from .archive_password_batch import password_directory
+            siblings = password_directory(self, parent_id)
+        else:
+            siblings, _ = self.list_files(
+                parent_id=parent_id, auto_fetch_all=True, use_cache=False)
         matches = [item for item in siblings if item.filename == sidecar_name]
+        if skip_existing and matches:
+            return {"skipped": True, "filename": sidecar_name}
+        if skip_existing:
+            archives = [item for item in siblings if item.filename == archive_name]
+            if len(archives) != 1 or archives[0].file_id != file_id:
+                raise ValidationError("压缩包名称不唯一或目录已变化，请重新扫描目录")
         if len(matches) > 1:
             raise ValidationError("同目录存在多个同名密码侧车，拒绝覆盖")
         if matches and matches[0].is_folder:
@@ -790,7 +807,7 @@ class FileService:
                 password_file.write(password_bytes)
                 password_file.flush()
             result = self.upload_file(
-                temp_path, parent_id, filename=sidecar_name, duplicate=2,
+                temp_path, parent_id, filename=sidecar_name, duplicate=1 if skip_existing else 2,
                 skip_if_exists=False, try_sha1_reuse=False, sensitive=True)
             if not isinstance(result, dict) or result.get("fileID") is None:
                 raise FileUploadError("密码侧车上传失败")

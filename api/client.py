@@ -140,9 +140,12 @@ class Pan123Client:
         """上传已验证 ZIP 的同目录明文 .pwd 侧车。"""
         return self.file_service.save_zip_password(file_id, password)
 
-    def save_archive_password(self, file_id: int, password: str, archive_kind=None) -> dict:
+    def save_archive_password(self, file_id: int, password: str, archive_kind=None,
+                              *, skip_existing=False, expected_archive=None) -> dict:
         """上传已验证压缩包的同目录明文 .pwd 文件。"""
-        return self.file_service.save_archive_password(file_id, password, archive_kind=archive_kind)
+        return self.file_service.save_archive_password(
+            file_id, password, archive_kind=archive_kind,
+            skip_existing=skip_existing, expected_archive=expected_archive)
 
     def get_file_path(self, file_id: int, use_cache: bool = True):
         """获取文件完整路径"""

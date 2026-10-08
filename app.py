@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import atexit
+from threading import Lock
 from flask import Flask, render_template
 from routes import main_bp, api_bp
 from routes.zip_browser import zip_bp
@@ -17,6 +18,7 @@ from api.archive_passwords import ArchivePasswordVault
 from api.archive_jobs import ArchivePreparationJobs
 from routes.preview import preview_bp
 from routes.nested_archive import nested_archive_bp
+from routes.batch_passwords import batch_passwords_bp
 
 
 def load_config(config_path='config.json'):
@@ -53,6 +55,7 @@ def create_app(config_path='config.json'):
     app.extensions['directory_pages'] = PageCache()
     app.extensions['archive_cache'] = ArchiveCache()
     app.extensions['archive_passwords'] = ArchivePasswordVault()
+    app.extensions['batch_password_locks'] = [Lock() for _ in range(32)]
     archive_preparation_jobs = ArchivePreparationJobs(
         root=config.get('ARCHIVE_PREP_CACHE_DIR'),
         max_bytes=int(config.get('ARCHIVE_PREP_CACHE_BYTES', 64 * 1024**3)),
@@ -67,6 +70,7 @@ def create_app(config_path='config.json'):
     app.register_blueprint(zip_bp)
     app.register_blueprint(preview_bp)
     app.register_blueprint(nested_archive_bp)
+    app.register_blueprint(batch_passwords_bp)
 
     # 配置日志
     logging.basicConfig(

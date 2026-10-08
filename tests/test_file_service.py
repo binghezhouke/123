@@ -70,6 +70,37 @@ def _zip_file(file_id=41, parent_id=8, filename="archive.zip", type_=0, trashed=
                  "type": type_, "trashed": trashed, "size": 123})
 
 
+@pytest.mark.parametrize("type_", [0, 1])
+def test_batch_password_skips_existing_sidecar_on_later_page(service, monkeypatch, type_):
+    archive = _zip_file()
+    monkeypatch.setattr(service, "get_file_detail", lambda *_: archive)
+    monkeypatch.setattr("api.archive_password_batch.sleep", lambda *_: None)
+    monkeypatch.setattr(service, "list_files", lambda **kw:
+                        (FileList([archive.to_dict()]), 99) if kw["last_file_id"] is None else
+                        (FileList([_zip_file(90, 8, "archive.zip.pwd", type_).to_dict()]), -1))
+    monkeypatch.setattr(service, "upload_file", lambda *a, **kw: pytest.fail("must not upload"))
+    assert service.save_archive_password(41, "password", skip_existing=True,
+                                         expected_archive=archive)["skipped"] is True
+
+
+def test_batch_password_refuses_moved_or_changed_archive(service, monkeypatch):
+    monkeypatch.setattr(service, "get_file_detail", lambda *_: _zip_file(parent_id=9))
+    monkeypatch.setattr(service, "upload_file", lambda *a, **kw: pytest.fail("must not upload"))
+    with pytest.raises(ValidationError, match="移动或变化"):
+        service.save_archive_password(41, "password", skip_existing=True, expected_archive=_zip_file())
+
+
+def test_batch_password_upload_never_uses_replace_mode(service, monkeypatch):
+    archive = _zip_file()
+    monkeypatch.setattr(service, "get_file_detail", lambda *_: archive)
+    monkeypatch.setattr(service, "list_files", lambda **kw: (FileList([archive.to_dict()]), -1))
+    calls = []
+    monkeypatch.setattr(service, "upload_file", lambda *a, **kw: calls.append(kw) or {"fileID": 9})
+    service.save_archive_password(41, "password", skip_existing=True, expected_archive=archive)
+    assert calls[0]["duplicate"] == 1
+    assert calls[0]["sensitive"] is True
+
+
 @pytest.mark.parametrize("name,sidecar", [("archive.zip", "archive.zip.pwd"),
     ("archive.7z", "archive.7z.pwd"), ("archive.rar", "archive.rar.pwd"),
     ("archive.7z.001", "archive.7z.pwd"), ("archive.7z.002", "archive.7z.pwd")])
