@@ -89,6 +89,7 @@ func TestIOStatsLocalRangeColdHotMultiFileAndSlowConsumer(t *testing.T) {
 		t.Fatal(err)
 	}
 	scenarios = append(scenarios, cold)
+	waitUntil(t, time.Second, func() bool { st := cache.DownloadStats(); return st.ActiveRequests == 0 && st.StagingActiveBytes == 0 })
 	afterCold := requests.Load()
 	second := make([]byte, len(first))
 	hot, err := measureScenario("hot", &requests, &responseBytes, uint64(len(second)), func() error {
@@ -183,6 +184,18 @@ func TestIOStatsLocalRangeColdHotMultiFileAndSlowConsumer(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("local Range baseline: %s", metrics)
+}
+
+func waitUntil(t *testing.T, timeout time.Duration, predicate func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if predicate() {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("condition did not become true before timeout")
 }
 
 func TestIOStatsCountsIncompleteHTTPBodyBytes(t *testing.T) {

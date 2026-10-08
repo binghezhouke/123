@@ -48,6 +48,7 @@ type flight struct {
 // owned by one process for the lifetime of the Cache.
 type Cache struct {
 	downloads           *downloadScheduler
+	staging             *downloadScheduler
 	stats               *iostats.Tracker
 	lifetimeCtx         context.Context
 	cancel              context.CancelFunc
@@ -68,6 +69,7 @@ type Cache struct {
 	lock                *os.File
 	identityKey         [32]byte
 	durable             bool
+	syncFile            func(*os.File) error
 	ephemeral           bool
 	closed              bool
 }
@@ -109,7 +111,7 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	indexBudget := min(maxBytes/8, int64(64<<20))
-	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
+	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -122,7 +124,20 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 }
 
 // DownloadStats returns a point-in-time snapshot of transfer scheduler usage.
-func (c *Cache) DownloadStats() DownloadStats { return c.downloads.snapshot() }
+func (c *Cache) DownloadStats() DownloadStats {
+	d, s := c.downloads.snapshot(), c.staging.snapshot()
+	d.StagingActiveBytes, d.StagingPeakBytes = s.ActiveBytes, s.PeakActiveBytes
+	d.StagingWaitingForeground, d.StagingWaitingBackground = s.WaitingForeground, s.WaitingBackground
+	return d
+}
+
+func (c *Cache) promotePriority(p *downloadPriority) {
+	if p == nil || p.promoted.Swap(true) {
+		return
+	}
+	c.downloads.promoteQueued(p)
+	c.staging.promoteQueued(p)
+}
 
 // IOStats returns the fixed-size aggregate I/O tracker owned by this cache.
 func (c *Cache) IOStats() *iostats.Tracker { return c.stats }
@@ -563,6 +578,10 @@ func (c *Cache) Acquire(ctx context.Context, key string, size int64, fill func(c
 }
 
 func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath string, class cacheClass, fill func(context.Context, io.Writer) error) (*Handle, error) {
+	return c.acquireWithProgress(ctx, key, size, targetPath, class, nil, fill)
+}
+
+func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64, targetPath string, class cacheClass, progress *rangeProgress, fill func(context.Context, io.Writer) error) (*Handle, error) {
 	if size < 0 || size > c.max {
 		return nil, syscall.ENOSPC
 	}
@@ -643,27 +662,56 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 			c.reservedIndex += size
 		}
 		c.mu.Unlock()
-		f.err = c.fill(ctx, targetPath, size, fill)
+		f.err = c.fill(ctx, targetPath, key, size, class, progress, fill)
 		c.mu.Lock()
 		c.reserved -= size
 		if class == cacheIndex {
 			c.reservedIndex -= size
 		}
+		var acquired *Handle
 		if f.err == nil && !c.closed {
 			st, err := os.Stat(targetPath)
 			if err != nil || st.Size() != size {
 				f.err = fmt.Errorf("cache fill published invalid file")
 			} else {
-				entry := &cacheEntry{path: targetPath, size: size, class: class, used: time.Now(), lastTouch: time.Now()}
-				entry.lru = c.lru[entry.class].PushFront(id)
-				c.entries[id] = entry
-				if start, end, identity, ok := parseRangeKey(key); ok {
-					entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
-					c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: id})
+				state := rangeProgressState{class: class}
+				if progress != nil {
+					if published, ok := progress.publishState(id); ok {
+						state = published
+					}
 				}
-				c.used += size
-				if class == cacheIndex {
-					c.indexUsed += size
+				finalPath := targetPath
+				if state.class != class {
+					finalPath = c.pathForKey(key, state.class)
+					if err := os.Rename(targetPath, finalPath); err != nil {
+						f.err = err
+					}
+				}
+				if f.err == nil {
+					entry := &cacheEntry{path: finalPath, size: size, class: state.class, hasUse: state.hasUse, scanDir: state.scanDir, lastUseStart: state.lastUseStart, lastUseEnd: state.lastUseEnd, used: time.Now(), lastTouch: time.Now()}
+					entry.lru = c.lru[entry.class].PushFront(id)
+					c.entries[id] = entry
+					if start, end, identity, ok := parseRangeKey(key); ok {
+						entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
+						c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: id})
+					}
+					c.used += size
+					if entry.class == cacheIndex {
+						c.indexUsed += size
+					}
+					file, openErr := os.Open(finalPath)
+					if openErr != nil {
+						f.err = openErr
+					} else {
+						entry.pins++
+						acquired = &Handle{file: file, cache: c, key: id, size: size, promoteOnRead: entry.class != cacheIndex && entry.class != cacheSpeculative}
+					}
+					if f.err != nil {
+						c.removeEntryLocked(id, entry)
+						_ = os.Remove(finalPath)
+					}
+				} else {
+					_ = os.Remove(targetPath)
 				}
 			}
 		} else if f.err == nil {
@@ -675,13 +723,17 @@ func (c *Cache) acquire(ctx context.Context, key string, size int64, targetPath 
 		if f.err != nil {
 			return nil, f.err
 		}
+		if acquired != nil {
+			return acquired, nil
+		}
 	}
 }
 
-func (c *Cache) fill(ctx context.Context, targetPath string, size int64, fill func(context.Context, io.Writer) error) error {
+func (c *Cache) fill(ctx context.Context, targetPath, key string, size int64, class cacheClass, progress *rangeProgress, fill func(context.Context, io.Writer) error) error {
 	if fill == nil {
 		return errors.New("cache fill callback is nil")
 	}
+	id := cacheID(key)
 	tmp, err := os.CreateTemp(c.dir, ".fill-")
 	if err != nil {
 		return err
@@ -692,7 +744,21 @@ func (c *Cache) fill(ctx context.Context, targetPath string, size int64, fill fu
 		tmp.Close()
 		return err
 	}
-	w := &limitedWriter{w: tmp, left: size}
+	var output io.Writer = tmp
+	if progress != nil {
+		progressStart := int64(0)
+		if start, _, _, ok := parseRangeKey(key); ok {
+			progressStart = start
+		}
+		reader, openErr := os.Open(temp)
+		if openErr != nil {
+			_ = tmp.Close()
+			return openErr
+		}
+		part := progress.addFile(progressStart, size, id, class, reader)
+		output = &progressWriter{w: tmp, p: progress, part: part}
+	}
+	w := &limitedWriter{w: output, left: size}
 	if err = fill(ctx, w); err != nil {
 		tmp.Close()
 		return err
@@ -704,7 +770,11 @@ func (c *Cache) fill(ctx context.Context, targetPath string, size int64, fill fu
 	publishStarted := time.Now()
 	defer func() { c.stats.ObserveCachePublication(time.Since(publishStarted)) }()
 	if c.durable {
-		if err = tmp.Sync(); err != nil {
+		syncFile := c.syncFile
+		if syncFile == nil {
+			syncFile = func(f *os.File) error { return f.Sync() }
+		}
+		if err = syncFile(tmp); err != nil {
 			tmp.Close()
 			return err
 		}
@@ -761,6 +831,7 @@ func (c *Cache) Close() error {
 		<-done
 	}
 	c.downloads.waitIdle()
+	c.staging.waitIdle()
 	e := syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN)
 	ce := c.lock.Close()
 	if c.ephemeral {

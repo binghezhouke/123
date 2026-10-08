@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -468,6 +469,7 @@ func TestRemoteRangeWindowsSharePagesWithMetadataAndData(t *testing.T) {
 	if n, err := r.ReadMetadataAtContext(context.Background(), metadata, metadataOff); err != nil || n != len(metadata) {
 		t.Fatalf("metadata read = %d, %v", n, err)
 	}
+	waitUntil(t, time.Second, func() bool { st := c.DownloadStats(); return st.ActiveRequests == 0 && st.StagingActiveBytes == 0 })
 	before = countRemoteRanges(&mu, &ranges)
 	window2 := make([]byte, int(remoteCachePageSize))
 	if n, err := r.ReadRangeAtContext(context.Background(), window2, 6*remoteCachePageSize); err != nil || n != len(window2) {
@@ -673,6 +675,87 @@ func TestRemoteOverlappingRangeFlightsDeduplicateAndKeepMissingTail(t *testing.T
 	}
 }
 
+func TestRemoteInterleavedReaderFillsPrefixBeforeJoiningLaterFlight(t *testing.T) {
+	data := bytes.Repeat([]byte("interleaved-range-"), (2<<20)/18+1)[:2<<20]
+	startedLater, releaseLater := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	var ranges []string
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		mu.Lock()
+		ranges = append(ranges, req.Header.Get("Range"))
+		mu.Unlock()
+		if a == 1<<20 {
+			close(startedLater)
+			<-releaseLater
+		}
+		w.Header().Set("ETag", `"interleave-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "interleaved", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	prefetchDone := make(chan error, 1)
+	go func() { prefetchDone <- r.PrefetchRangeAtContext(context.Background(), 1<<20, 1<<20) }()
+	select {
+	case <-startedLater:
+	case <-time.After(time.Second):
+		t.Fatal("later range did not start")
+	}
+	read := make([]byte, 2<<20)
+	readDone := make(chan error, 1)
+	go func() {
+		n, e := r.ReadRangeAtContext(context.Background(), read, 0)
+		if e == nil && n != len(read) {
+			e = io.ErrUnexpectedEOF
+		}
+		readDone <- e
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		mu.Lock()
+		sawPrefix := false
+		for _, rg := range ranges {
+			if rg == "bytes=0-1048575" {
+				sawPrefix = true
+				break
+			}
+		}
+		mu.Unlock()
+		if sawPrefix {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("reader did not fill the uncovered prefix before joining later flight")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseLater)
+	if err := <-prefetchDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(read, data) {
+		t.Fatal("interleaved read returned incorrect bytes")
+	}
+}
+
 func TestRemoteDisjointRangeFlightsRunInParallel(t *testing.T) {
 	data := []byte(strings.Repeat("parallel-range", int((1<<20)/14+1)))[:1<<20]
 	started := make(chan string, 2)
@@ -856,11 +939,329 @@ func TestRemoteRejectsOverlongChunkedRangeBody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = r.ReadAt(make([]byte, 2), 1); err == nil || !strings.Contains(err.Error(), "body length mismatch") {
-		t.Fatalf("overlong body error = %v", err)
+	if n, readErr := r.ReadAt(make([]byte, 2), 1); readErr != nil || n != 2 {
+		t.Fatalf("progressive prefix read = %d, %v", n, readErr)
+	}
+	if err = r.ensureCachedRange(context.Background(), 0, int64(len(data))); err == nil || !strings.Contains(err.Error(), "body length mismatch") {
+		t.Fatalf("complete overlong response error = %v", err)
 	}
 	if len(c.missingRanges(r.rangeID, 0, remoteCachePageSize)) == 0 {
 		t.Fatal("overlong response was cached")
+	}
+}
+
+func TestRemoteReadReturnsPrefixBeforeRangeTailAndPublishesAfterward(t *testing.T) {
+	data := bytes.Repeat([]byte("progressive-range-"), (1<<20)/18+1)[:1<<20]
+	started := make(chan struct{})
+	releaseTail := make(chan struct{})
+	var requests atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		if requests.Add(1) == 1 {
+			w.Header().Set("ETag", `"progress-v1"`)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+			w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write(data[a : b+1])
+			return
+		}
+		w.Header().Set("ETag", `"progress-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		prefixEnd := min(a+4095, b)
+		_, _ = w.Write(data[a : prefixEnd+1])
+		w.(http.Flusher).Flush()
+		close(started)
+		<-releaseTail
+		_, _ = w.Write(data[prefixEnd+1 : b+1])
+	}))
+	defer s.Close()
+	c, err := NewCache(t.TempDir(), 2<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	r, err := NewRemote(context.Background(), c, "progressive-prefix", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]byte, 8)
+	readDone := make(chan struct {
+		n   int
+		err error
+	}, 1)
+	startedAt := time.Now()
+	go func() {
+		n, e := r.ReadAt(out, 0)
+		readDone <- struct {
+			n   int
+			err error
+		}{n, e}
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("range response did not start")
+	}
+	select {
+	case got := <-readDone:
+		if got.err != nil || got.n != len(out) || !bytes.Equal(out, data[:len(out)]) {
+			t.Fatalf("prefix read = %d, %v, bytes match=%v", got.n, got.err, bytes.Equal(out, data[:len(out)]))
+		}
+		t.Logf("progressive first-read latency: %s; baseline waits for the blocked tail", time.Since(startedAt))
+	case <-time.After(time.Second):
+		t.Fatal("small read waited for blocked Range tail")
+	}
+	if len(c.missingRanges(r.rangeID, 0, int64(len(data)))) == 0 {
+		t.Fatal("incomplete response became cache-visible")
+	}
+	close(releaseTail)
+	deadline := time.Now().Add(time.Second)
+	for len(c.missingRanges(r.rangeID, 0, int64(len(data)))) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(c.missingRanges(r.rangeID, 0, int64(len(data)))) != 0 {
+		t.Fatal("complete response was not published")
+	}
+	if got := c.IOStats().Snapshot().DownloadedBytes.Bytes; got == nil || *got != uint64(len(data)+1) {
+		t.Fatalf("download bytes = %v, want probe plus complete range (%d)", got, len(data)+1)
+	}
+}
+
+func TestRemoteReadDoesNotWaitForSlowCachePublicationAndSurvivesRestart(t *testing.T) {
+	data := bytes.Repeat([]byte("slow-publication-"), 4096)[:64<<10]
+	var dataRequests atomic.Int32
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		if a != 0 || b != 0 {
+			dataRequests.Add(1)
+		}
+		w.Header().Set("ETag", `"slow-publish-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	cacheDir := t.TempDir()
+	c, err := NewCache(cacheDir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncStarted, releaseSync := make(chan struct{}), make(chan struct{})
+	c.syncFile = func(f *os.File) error { close(syncStarted); <-releaseSync; return f.Sync() }
+	r, err := NewRemote(context.Background(), c, "slow-publication", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 16)
+	readDone := make(chan error, 1)
+	go func() {
+		n, e := r.ReadAt(buf, 100)
+		if e == nil && n != len(buf) {
+			e = io.ErrUnexpectedEOF
+		}
+		readDone <- e
+	}()
+	select {
+	case <-syncStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cache publication did not reach Sync")
+	}
+	select {
+	case err := <-readDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reader waited for cache Sync")
+	}
+	if !bytes.Equal(buf, data[100:116]) {
+		t.Fatal("reader returned wrong staged prefix")
+	}
+	if len(c.missingRanges(r.rangeID, 0, int64(len(data)))) == 0 {
+		t.Fatal("cache entry visible before Sync completed")
+	}
+	close(releaseSync)
+	deadline := time.Now().Add(time.Second)
+	for len(c.missingRanges(r.rangeID, 0, int64(len(data)))) != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(c.missingRanges(r.rangeID, 0, int64(len(data)))) != 0 {
+		t.Fatal("completed cache entry missing")
+	}
+	before := dataRequests.Load()
+	c2, err := NewCache(cacheDir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	r2, err := NewRemote(context.Background(), c2, "slow-publication", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r2.ReadAt(buf, 100); err != nil {
+		t.Fatal(err)
+	}
+	if dataRequests.Load() != before {
+		t.Fatalf("restart refetched data Range: %d -> %d", before, dataRequests.Load())
+	}
+}
+
+func TestCacheCloseWaitsForProgressPublicationAndReleasesResources(t *testing.T) {
+	data := bytes.Repeat([]byte("close-progress-"), (64<<10)/15+1)[:64<<10]
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"close-progress-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[a : b+1])
+	}))
+	defer s.Close()
+	dir := t.TempDir()
+	c, err := NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	syncStarted, releaseSync := make(chan struct{}), make(chan struct{})
+	c.syncFile = func(f *os.File) error { close(syncStarted); <-releaseSync; return f.Sync() }
+	r, err := NewRemote(context.Background(), c, "close-progress", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := r.ReadAt(make([]byte, 8), 0); err != nil || n != 8 {
+		t.Fatalf("progress read = %d, %v", n, err)
+	}
+	select {
+	case <-syncStarted:
+	case <-time.After(time.Second):
+		t.Fatal("flight did not reach publication")
+	}
+	closed := make(chan error, 1)
+	closeStarted := make(chan struct{})
+	go func() { close(closeStarted); closed <- c.Close() }()
+	<-closeStarted
+	select {
+	case err := <-closed:
+		t.Fatalf("Close returned before Sync gate released: %v", err)
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(releaseSync)
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cache Close deadlocked with progress cleanup")
+	}
+	items, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range items {
+		if strings.HasPrefix(item.Name(), ".fill-") {
+			t.Fatalf("staging file survived Close: %q", item.Name())
+		}
+	}
+}
+
+func TestProgressiveFirstReadLatencyAndDownloadedByteBaseline(t *testing.T) {
+	data := bytes.Repeat([]byte("baseline-range-"), (1<<20)/15+1)[:1<<20]
+	var serverBytes [2]atomic.Uint64
+	var done [2]chan struct{}
+	done[0], done[1] = make(chan struct{}), make(chan struct{})
+	var completed [2]sync.Once
+	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		phase := 0
+		if req.URL.Path == "/progressive" {
+			phase = 1
+		}
+		var a, b int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
+			http.Error(w, "bad range", 400)
+			return
+		}
+		w.Header().Set("ETag", `"baseline-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", a, b, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(b-a+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		if a == 0 && b == 0 {
+			_, _ = w.Write(data[:1])
+			return
+		}
+		prefixEnd := min(a+4095, b)
+		n, _ := w.Write(data[a : prefixEnd+1])
+		serverBytes[phase].Add(uint64(n))
+		w.(http.Flusher).Flush()
+		time.Sleep(40 * time.Millisecond)
+		if prefixEnd < b {
+			n, _ = w.Write(data[prefixEnd+1 : b+1])
+			serverBytes[phase].Add(uint64(n))
+		}
+		completed[phase].Do(func() { close(done[phase]) })
+	}))
+	defer s.Close()
+	newRemote := func(path string) (*Cache, *Remote) {
+		t.Helper()
+		c, err := NewCache(t.TempDir(), 2<<20)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, err := NewRemote(context.Background(), c, "latency-"+path, int64(len(data)), func(context.Context) (string, error) { return s.URL + path, nil })
+		if err != nil {
+			_ = c.Close()
+			t.Fatal(err)
+		}
+		return c, r
+	}
+
+	baselineCache, baselineRemote := newRemote("/baseline")
+	started := time.Now()
+	if err := baselineRemote.PrefetchRangeAtContext(context.Background(), 0, remoteBlockSize); err != nil {
+		t.Fatal(err)
+	}
+	baselineLatency := time.Since(started)
+	if err := baselineCache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	progressCache, progressRemote := newRemote("/progressive")
+	started = time.Now()
+	if n, err := progressRemote.ReadAt(make([]byte, 8), 0); err != nil || n != 8 {
+		t.Fatalf("progressive read = %d, %v", n, err)
+	}
+	progressiveLatency := time.Since(started)
+	select {
+	case <-done[1]:
+	case <-time.After(time.Second):
+		t.Fatal("progressive response did not finish")
+	}
+	baseBytes := serverBytes[0].Load() + 1 // include the one-byte entity probe
+	progressBytes := serverBytes[1].Load() + 1
+	if baseBytes != uint64(remoteBlockSize+1) || progressBytes != baseBytes {
+		t.Fatalf("download byte baseline=%d progressive=%d, want both %d", baseBytes, progressBytes, remoteBlockSize+1)
+	}
+	t.Logf("local baseline full-fill latency=%s, progressive 8-byte latency=%s; downloaded bytes baseline=%d progressive=%d", baselineLatency, progressiveLatency, baseBytes, progressBytes)
+	if err := progressCache.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -899,6 +1300,7 @@ func TestRemoteLargeWindowUsesOneCacheExtent(t *testing.T) {
 	if dataRanges.Load() != 1 {
 		t.Fatalf("large window made %d HTTP range requests, want one", dataRanges.Load())
 	}
+	waitUntil(t, time.Second, func() bool { st := c.DownloadStats(); return st.ActiveRequests == 0 && st.StagingActiveBytes == 0 })
 	c.mu.Lock()
 	entries := len(c.entries)
 	c.mu.Unlock()
@@ -958,5 +1360,16 @@ func TestRemoteRangeLargerThanCacheStreamsWithoutRefetchLoop(t *testing.T) {
 	}
 	if got := dataRequests.Load(); got != 2 {
 		t.Fatalf("data range requests = %d, want 2 cache-sized fetches", got)
+	}
+	waitUntil(t, time.Second, func() bool { st := c.DownloadStats(); return st.ActiveRequests == 0 && st.StagingActiveBytes == 0 })
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.used > c.max {
+		t.Fatalf("cache disk use %d exceeds limit %d", c.used, c.max)
+	}
+	for id, entry := range c.entries {
+		if entry.pins != 0 {
+			t.Fatalf("published extent %s retained %d pins after readers finished", id, entry.pins)
+		}
 	}
 }

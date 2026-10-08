@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
@@ -43,7 +44,21 @@ func TestCachePolicyRemoteScanKeepsHotExtentAndArchiveIndex(t *testing.T) {
 		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
 		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
 		w.WriteHeader(http.StatusPartialContent)
-		_, _ = w.Write(data[start : end+1])
+		flusher, _ := w.(http.Flusher)
+		for cursor := start; cursor <= end; {
+			chunkEnd := min(cursor+remoteCachePageSize, end+1)
+			n, err := w.Write(data[cursor:chunkEnd])
+			if err != nil {
+				return
+			}
+			cursor += int64(n)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			if cursor <= end {
+				time.Sleep(time.Millisecond)
+			}
+		}
 	}))
 	defer server.Close()
 
@@ -70,7 +85,13 @@ func TestCachePolicyRemoteScanKeepsHotExtentAndArchiveIndex(t *testing.T) {
 		}
 	}
 	hotID := cacheID(rangeKey(hot.rangeID, 0, remoteBlockSize))
-	if got := c.entries[hotID]; got == nil || got.class != cacheHot {
+	if _, ok := cacheEntrySnapshotForTest(c, hotID); ok {
+		t.Fatal("staged prefix test unexpectedly waited for full range publication")
+	}
+	if err := hot.PrefetchRangeAtContext(ctx, 0, remoteBlockSize); err != nil {
+		t.Fatalf("wait for hot range publication: %v", err)
+	}
+	if got, ok := cacheEntrySnapshotForTest(c, hotID); !ok || got.class != cacheHot {
 		t.Fatalf("repeated foreground read class = %v, want hot", got)
 	}
 
@@ -82,22 +103,31 @@ func TestCachePolicyRemoteScanKeepsHotExtentAndArchiveIndex(t *testing.T) {
 		if n, err := scan.ReadAt(buf, off); err != nil || n != len(buf) {
 			t.Fatalf("scan read at %d: n=%d err=%v", off, n, err)
 		}
+		if off%remoteBlockSize == 0 {
+			blockSize := min(remoteBlockSize, scanSize-off)
+			if err := scan.PrefetchRangeAtContext(ctx, off, blockSize); err != nil {
+				t.Fatalf("wait for scan block at %d: %v", off, err)
+			}
+		}
 	}
-	if c.used > c.max || c.reserved != 0 {
-		t.Fatalf("capacity invariant: used=%d reserved=%d max=%d", c.used, c.reserved, c.max)
+	c.mu.Lock()
+	used, reserved, maxBytes := c.used, c.reserved, c.max
+	c.mu.Unlock()
+	if used > maxBytes || reserved != 0 {
+		t.Fatalf("capacity invariant: used=%d reserved=%d max=%d", used, reserved, maxBytes)
 	}
-	if c.entries[hotID] == nil || c.entries[hotID].class != cacheHot {
+	if got, ok := cacheEntrySnapshotForTest(c, hotID); !ok || got.class != cacheHot {
 		t.Fatal("large sequential scan evicted the repeated hot extent")
 	}
-	if c.entries[cacheID(indexKey)] == nil || c.entries[cacheID(indexKey)].class != cacheIndex {
+	if got, ok := cacheEntrySnapshotForTest(c, cacheID(indexKey)); !ok || got.class != cacheIndex {
 		t.Fatal("large sequential scan evicted the protected archive index")
 	}
 	firstScanID := cacheID(rangeKey(scan.rangeID, 0, remoteBlockSize))
-	if c.entries[firstScanID] != nil {
+	if _, ok := cacheEntrySnapshotForTest(c, firstScanID); ok {
 		t.Fatal("old single-pass scan extent survived over-budget scan")
 	}
 	lastScanID := cacheID(rangeKey(scan.rangeID, 4*remoteBlockSize, scanSize))
-	if e := c.entries[lastScanID]; e == nil || e.class == cacheHot {
+	if e, ok := cacheEntrySnapshotForTest(c, lastScanID); !ok || e.class == cacheHot {
 		t.Fatalf("one-pass extent class = %v, want probationary", e)
 	}
 	before := requests.Load()
@@ -117,10 +147,10 @@ func TestCachePolicyRemoteScanKeepsHotExtentAndArchiveIndex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if e := c.entries[hotID]; e == nil || e.class != cacheHot {
+	if e, ok := cacheEntrySnapshotForTest(c, hotID); !ok || e.class != cacheHot {
 		t.Fatalf("restarted hot class = %v, want hot", e)
 	}
-	if e := c.entries[cacheID(indexKey)]; e == nil || e.class != cacheIndex {
+	if e, ok := cacheEntrySnapshotForTest(c, cacheID(indexKey)); !ok || e.class != cacheIndex {
 		t.Fatalf("restarted index class = %v, want index", e)
 	}
 	index, err := c.OpenArchiveIndex(indexKey)
@@ -161,14 +191,19 @@ func TestCachePolicyOverBudgetIndexDegradesToOrdinaryClass(t *testing.T) {
 	if err := c.StoreArchiveIndex(context.Background(), "large-index", bytes.Repeat([]byte("i"), 20)); err != nil {
 		t.Fatalf("index within total budget should still cache: %v", err)
 	}
-	if got := c.entries[cacheID("small-index")].class; got != cacheIndex {
+	if entry, ok := cacheEntrySnapshotForTest(c, cacheID("small-index")); !ok || entry.class != cacheIndex {
+		got := entry.class
 		t.Fatalf("small index class = %v, want protected index", got)
 	}
-	if got := c.entries[cacheID("large-index")].class; got != cacheProbation {
+	if entry, ok := cacheEntrySnapshotForTest(c, cacheID("large-index")); !ok || entry.class != cacheProbation {
+		got := entry.class
 		t.Fatalf("over-share index class = %v, want ordinary probationary", got)
 	}
-	if c.used != 28 || c.used > c.max {
-		t.Fatalf("cache capacity = used %d max %d", c.used, c.max)
+	c.mu.Lock()
+	used, maxBytes := c.used, c.max
+	c.mu.Unlock()
+	if used != 28 || used > maxBytes {
+		t.Fatalf("cache capacity = used %d max %d", used, maxBytes)
 	}
 }
 
@@ -190,7 +225,8 @@ func TestCachePolicyBackgroundAcquireStaysSpeculative(t *testing.T) {
 		t.Fatalf("background handle read: %d %v", n, err)
 	}
 	_ = h.Close()
-	if got := c.entries[cacheID(key)].class; got != cacheSpeculative {
+	if entry, ok := cacheEntrySnapshotForTest(c, cacheID(key)); !ok || entry.class != cacheSpeculative {
+		got := entry.class
 		t.Fatalf("background acquisition class = %v, want speculative", got)
 	}
 }
@@ -205,8 +241,12 @@ func TestCachePolicyEphemeralCacheUsesClassAdmissionAndCleansUp(t *testing.T) {
 	if err := c.StoreArchiveIndex(context.Background(), "ephemeral-index", bytes.Repeat([]byte("i"), 8)); err != nil {
 		t.Fatal(err)
 	}
-	if c.entries[cacheID("ephemeral-index")].class != cacheIndex || c.used > c.max {
-		t.Fatalf("ephemeral admission class=%v used=%d max=%d", c.entries[cacheID("ephemeral-index")].class, c.used, c.max)
+	entry, ok := cacheEntrySnapshotForTest(c, cacheID("ephemeral-index"))
+	c.mu.Lock()
+	used, maxBytes := c.used, c.max
+	c.mu.Unlock()
+	if !ok || entry.class != cacheIndex || used > maxBytes {
+		t.Fatalf("ephemeral admission class=%v used=%d max=%d", entry.class, used, maxBytes)
 	}
 	if err := c.Close(); err != nil {
 		t.Fatal(err)
@@ -230,8 +270,8 @@ func TestCachePolicyLoadsLegacyBlobAsProbation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	entry := c.entries[cacheID(key)]
-	if entry == nil || entry.class != cacheProbation {
+	entry, ok := cacheEntrySnapshotForTest(c, cacheID(key))
+	if !ok || entry.class != cacheProbation {
 		t.Fatalf("legacy blob entry = %+v, want probation", entry)
 	}
 	h, err := c.Open(key)
@@ -243,7 +283,18 @@ func TestCachePolicyLoadsLegacyBlobAsProbation(t *testing.T) {
 		t.Fatalf("legacy blob read: n=%d err=%v data=%q", n, err, got)
 	}
 	_ = h.Close()
+	entry, _ = cacheEntrySnapshotForTest(c, cacheID(key))
 	if entry.class != cacheProbation {
 		t.Fatalf("first legacy read promoted class to %v", entry.class)
 	}
+}
+
+func cacheEntrySnapshotForTest(c *Cache, id string) (cacheEntry, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e := c.entries[id]
+	if e == nil {
+		return cacheEntry{}, false
+	}
+	return *e, true
 }

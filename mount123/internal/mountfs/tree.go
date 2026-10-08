@@ -193,6 +193,10 @@ func (n *Node) IOStats() iostats.Snapshot {
 	snapshot := n.tree.cache.IOStats().Snapshot()
 	downloads := n.tree.cache.DownloadStats()
 	snapshot.SetDownloadScheduler(downloads.MaxRequests, downloads.MaxInFlightBytes, downloads.ActiveRequests, downloads.ActiveBytes, downloads.AvailableBackgroundBytes, downloads.WaitingForeground, downloads.WaitingBackground)
+	snapshot.DownloadScheduler.StagingActiveBytes = downloads.StagingActiveBytes
+	snapshot.DownloadScheduler.StagingPeakBytes = downloads.StagingPeakBytes
+	snapshot.DownloadScheduler.StagingWaitingForeground = downloads.StagingWaitingForeground
+	snapshot.DownloadScheduler.StagingWaitingBackground = downloads.StagingWaitingBackground
 	return snapshot
 }
 

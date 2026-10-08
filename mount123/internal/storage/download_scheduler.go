@@ -94,6 +94,10 @@ type DownloadStats struct {
 	WaitingBackground        int
 	CompletedRequests        uint64
 	Promotions               uint64
+	StagingActiveBytes       int64
+	StagingPeakBytes         int64
+	StagingWaitingForeground int
+	StagingWaitingBackground int
 }
 
 func newDownloadScheduler(cfg DownloadConfig) *downloadScheduler {
@@ -104,6 +108,15 @@ func newDownloadScheduler(cfg DownloadConfig) *downloadScheduler {
 
 func (s *downloadScheduler) promote(p *downloadPriority) {
 	if p == nil || p.promoted.Swap(true) {
+		return
+	}
+	s.promoteQueued(p)
+}
+
+// promoteQueued reclassifies a shared task's waiters after another scheduler
+// has already set its shared priority flag.
+func (s *downloadScheduler) promoteQueued(p *downloadPriority) {
+	if p == nil {
 		return
 	}
 	s.mu.Lock()

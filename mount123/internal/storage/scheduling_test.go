@@ -155,6 +155,9 @@ func TestMixedFileCountsStayWithinByteBudgetAndForegroundReserve(t *testing.T) {
 			}
 			close(continueBackground)
 			workers.Wait()
+			waitForDownloads(t, cache, func(st DownloadStats) bool {
+				return st.ActiveRequests == 0 && st.ActiveBytes == 0 && st.StagingActiveBytes == 0
+			})
 			if stats = cache.DownloadStats(); stats.ActiveRequests != 0 || stats.ActiveBytes != 0 || stats.PeakActiveBytes > config.MaxInFlightBytes {
 				t.Fatalf("downloads did not release budget: %+v", stats)
 			}

@@ -118,6 +118,7 @@ func TestSequentialReadAheadPopulatesCacheForLaterRead(t *testing.T) {
 	if time.Now().After(deadline) {
 		t.Fatal("sequential consumption did not fill the ahead window through 2 MiB")
 	}
+	waitReadAheadJobs(t, h.readAhead, 0)
 	before := count.Load()
 	later := make([]byte, 4096)
 	if n, err := remote.ReadAtContext(context.Background(), later, 2<<20); err != nil || n != len(later) {
@@ -188,6 +189,41 @@ func TestReadAheadBoundsReadyBytesForSlowConsumer(t *testing.T) {
 		t.Fatal("fast source did not publish a completed range")
 	}
 	ra.Close()
+}
+
+func TestPacedCachedReadsDoNotLookLikeFastConsumption(t *testing.T) {
+	data := bytes.Repeat([]byte("paced-consumer"), (32<<20)/14+1)[:32<<20]
+	remote, requests, _ := readAheadRemote(t, data, nil)
+	// Keep the observed foreground reads hot so application pacing, rather
+	// than a server delay, controls how quickly the application consumes data.
+	if err := remote.PrefetchRangeAtContext(context.Background(), 0, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	_ = waitRange(t, requests)
+	h := &handle{remote: remote, size: uint64(len(data)), readAhead: newReadAhead(context.Background(), remote, 0, uint64(len(data)), 16<<20)}
+	defer h.Release(context.Background())
+	var reader fs.FileReader = h
+	const count, size = 8, 64 << 10
+	for i := 0; i < count; i++ {
+		if i > 0 {
+			time.Sleep(30 * time.Millisecond)
+		}
+		result, errno := reader.Read(context.Background(), make([]byte, size), int64(i*size))
+		if errno != 0 || result.Size() != size {
+			t.Fatalf("paced read %d: %v, %v", i, result, errno)
+		}
+	}
+	waitReadAheadJobs(t, h.readAhead, 0)
+	for {
+		select {
+		case rg := <-requests:
+			if rg.end+1 > count*size+(4<<20) {
+				t.Fatalf("paced consumer caused excessive read-ahead: %+v", rg)
+			}
+		default:
+			return
+		}
+	}
 }
 
 func TestReadAheadOverlapDoesNotLookLikeSeek(t *testing.T) {

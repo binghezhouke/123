@@ -27,6 +27,7 @@ type rangeFlight struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	priority   *downloadPriority
+	progress   *rangeProgress
 	refs       int
 	finished   bool
 }
@@ -96,13 +97,16 @@ func parseRangeFilename(name string) (*cacheRange, string, cacheClass, error) {
 
 // AcquireRange stores one immutable byte extent in one cache blob.
 func (c *Cache) AcquireRange(ctx context.Context, identity string, start, end int64, fill func(context.Context, io.Writer) error) (*Handle, error) {
+	return c.AcquireRangeWithProgress(ctx, identity, start, end, cacheProbation, nil, fill)
+}
+
+func (c *Cache) AcquireRangeWithProgress(ctx context.Context, identity string, start, end int64, class cacheClass, progress *rangeProgress, fill func(context.Context, io.Writer) error) (*Handle, error) {
 	if len(identity) != 64 || start < 0 || end <= start {
 		return nil, errors.New("invalid cache range")
 	}
 	key := rangeKey(identity, start, end)
-	class := foregroundClass(workqueue.IsBackground(ctx))
 	path := filepath.Join(c.dir, rangeFilename(identity, start, end, cacheID(key), class))
-	return c.acquire(ctx, key, end-start, path, class, fill)
+	return c.acquireWithProgress(ctx, key, end-start, path, class, progress, fill)
 }
 
 func (c *Cache) addRangeLocked(r *cacheRange) {
@@ -165,43 +169,62 @@ func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, en
 		c.mu.Unlock()
 		return nil, false, ErrClosed
 	}
+	flightEnd := end
 	for _, active := range c.rangeFlights[identity] {
-		if start < active.end && active.start < end {
+		if active.ctx.Err() != nil {
+			continue
+		}
+		if start >= active.start && start < active.end {
 			active.refs++
 			c.mu.Unlock()
 			if !workqueue.IsBackground(ctx) {
-				c.downloads.promote(active.priority)
+				c.promotePriority(active.priority)
 			}
 			return active, false, nil
 		}
+		if active.start > start && active.start < flightEnd {
+			flightEnd = active.start
+		}
+	}
+	if flightEnd <= start {
+		c.mu.Unlock()
+		return nil, false, errors.New("range flight made no progress")
 	}
 	flightCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	priority := &downloadPriority{}
 	if !workqueue.IsBackground(ctx) {
 		priority.promoted.Store(true)
 	}
-	f := &rangeFlight{start: start, end: end, done: make(chan struct{}), ctx: flightCtx, cancel: cancel, priority: priority, refs: 1}
+	f := &rangeFlight{start: start, end: flightEnd, done: make(chan struct{}), ctx: flightCtx, cancel: cancel, priority: priority, progress: newRangeProgress(), refs: 1}
 	c.rangeFlights[identity] = append(c.rangeFlights[identity], f)
 	c.mu.Unlock()
 	return f, true, nil
 }
 
 func (c *Cache) releaseRangeFlight(f *rangeFlight) {
+	closeProgress := false
 	c.mu.Lock()
 	if f.refs > 0 {
 		f.refs--
 	}
-	if f.refs == 0 && !f.finished {
-		f.cancel()
+	if f.refs == 0 {
+		if f.finished {
+			closeProgress = true
+		} else if !f.progress.retained() {
+			f.cancel()
+		}
 	}
 	c.mu.Unlock()
+	if closeProgress {
+		f.progress.close()
+	}
 }
 
 func (c *Cache) finishRangeFlight(identity string, f *rangeFlight, err error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	f.err = err
 	f.finished = true
+	f.progress.finish(err)
 	group := c.rangeFlights[identity]
 	for i, active := range group {
 		if active == f {
@@ -216,6 +239,11 @@ func (c *Cache) finishRangeFlight(identity string, f *rangeFlight, err error) {
 	}
 	close(f.done)
 	f.cancel()
+	closeProgress := f.refs == 0
+	c.mu.Unlock()
+	if closeProgress {
+		f.progress.close()
+	}
 }
 
 // pinRange atomically pins every extent needed for [start,end). A coverage

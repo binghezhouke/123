@@ -411,12 +411,39 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 		// Preserve the ordinary 1 MiB read-ahead whenever the entire block fits
 		// in the cache. Larger reads go through the copy-as-you-go path below.
 		if ensureEnd-ensureStart <= r.cache.max {
-			if err := r.ensureCachedRange(ctx, ensureStart, ensureEnd); err != nil {
+			if err := r.importLegacyPages(ctx, ensureStart, ensureEnd); err != nil {
 				if read > 0 {
 					return read, err
 				}
 				return 0, err
 			}
+			var prefetch *rangeFlight
+			if len(r.cache.missingRanges(r.rangeID, ensureStart, ensureEnd)) != 0 {
+				var owner bool
+				var err error
+				prefetch, owner, err = r.cache.beginRangeFlight(ctx, r.rangeID, ensureStart, ensureEnd)
+				if err != nil {
+					if read > 0 {
+						return read, err
+					}
+					return 0, err
+				}
+				if owner {
+					go r.runRangeFlight(prefetch)
+				}
+			}
+			got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos)
+			if prefetch != nil {
+				r.cache.releaseRangeFlight(prefetch)
+			}
+			read += got
+			if err != nil && err != io.EOF {
+				return read, err
+			}
+			if got < int(copyEnd-pos) {
+				break
+			}
+			continue
 		}
 		got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos)
 		read += got
@@ -502,14 +529,35 @@ func (r *Remote) runRangeFlight(flight *rangeFlight) {
 	// was registered.
 	for _, gap := range r.cache.missingRanges(r.rangeID, flight.start, flight.end) {
 		gap := gap
-		h, fillErr := r.cache.AcquireRange(flight.ctx, r.rangeID, gap.start, gap.end, func(fetchCtx context.Context, w io.Writer) error {
-			return r.fetchRangeTo(fetchCtx, gap.start, gap.end, w, flight.priority)
-		})
-		if fillErr != nil {
-			err = fillErr
+		limit := r.cache.downloads.cfg.MaxInFlightBytes
+		if !flight.priority.promoted.Load() {
+			limit -= r.cache.downloads.cfg.ForegroundReservedBytes
+		}
+		if limit < 1 {
+			limit = r.cache.downloads.cfg.MaxInFlightBytes
+		}
+		for start := gap.start; start < gap.end; {
+			end := min(gap.end, start+limit)
+			release, stageErr := r.cache.staging.Acquire(flight.ctx, end-start, r.rangeID, flight.priority)
+			if stageErr != nil {
+				err = stageErr
+				break
+			}
+			class := foregroundClass(workqueue.IsBackground(flight.ctx))
+			h, fillErr := r.cache.AcquireRangeWithProgress(flight.ctx, r.rangeID, start, end, class, flight.progress, func(fetchCtx context.Context, w io.Writer) error {
+				return r.fetchRangeTo(fetchCtx, start, end, w, flight.priority)
+			})
+			release()
+			if fillErr != nil {
+				err = fillErr
+				break
+			}
+			flight.progress.addPin(h)
+			start = end
+		}
+		if err != nil {
 			break
 		}
-		_ = h.Close()
 	}
 	r.cache.finishRangeFlight(r.rangeID, flight, err)
 }
@@ -614,8 +662,26 @@ func (r *Remote) importLegacyPage(ctx context.Context, page, pageStart, pageEnd 
 	return nil
 }
 
+func (r *Remote) importLegacyPages(ctx context.Context, start, end int64) error {
+	if start >= end {
+		return nil
+	}
+	first, last := start/remoteCachePageSize, (end-1)/remoteCachePageSize
+	for page := first; page <= last; page++ {
+		pageStart := page * remoteCachePageSize
+		pageEnd := min(pageStart+remoteCachePageSize, r.size)
+		if err := r.importLegacyPage(ctx, page, pageStart, pageEnd); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (int, error) {
 	end := off + int64(len(p))
+	if err := r.importLegacyPages(ctx, off, end); err != nil {
+		return 0, err
+	}
 	// Copy every cache hit before filling holes. As gaps are fetched, LRU may
 	// evict any unpinned extent (including another part of this request); the
 	// caller's buffer preserves those bytes and prevents a refetch loop.
@@ -624,46 +690,121 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 		return 0, err
 	}
 	err = readPinnedRange(parts, p, off)
+	read := contiguousRangeBytes(parts, off)
+	gaps := uncoveredRangeGaps(parts, off, end)
 	closeRangeParts(parts)
 	if err != nil {
-		return 0, err
+		return read, err
 	}
-	for _, gap := range r.cache.missingRanges(r.rangeID, off, end) {
+	for _, gap := range gaps {
 		if r.cache.max <= 0 {
-			return 0, syscall.ENOSPC
+			return read, syscall.ENOSPC
 		}
+		counted := gap.start <= off+int64(read)
 		for pos := gap.start; pos < gap.end; {
 			if err := ctx.Err(); err != nil {
-				return 0, err
+				return read, err
 			}
 			chunkEnd := min(gap.end, pos+r.cache.max)
-			var chunkParts []pinnedRangePart
-			pinned := false
-			for attempt := 0; attempt < 2; attempt++ {
-				if err := r.ensureCachedRange(ctx, pos, chunkEnd); err != nil {
-					return 0, err
+			flight, owner, beginErr := r.cache.beginRangeFlight(ctx, r.rangeID, pos, chunkEnd)
+			if beginErr != nil {
+				return read, beginErr
+			}
+			if owner {
+				go r.runRangeFlight(flight)
+			}
+			coveredEnd := min(chunkEnd, flight.end)
+			retryFlight := false
+			for pos < coveredEnd {
+				start := int(pos - off)
+				got, readErr := flight.progress.copyAvailable(ctx, p[start:start+int(coveredEnd-pos)], pos)
+				if got > 0 {
+					if !workqueue.IsBackground(ctx) {
+						flight.progress.retainTask()
+						flight.progress.consume(r.cache, pos, pos+int64(got))
+					}
+					pos += int64(got)
+					if counted {
+						read += got
+					}
+					continue
 				}
-				chunkParts, pinned, err = r.cache.pinRange(r.rangeID, pos, chunkEnd, !workqueue.IsBackground(ctx))
-				if err != nil {
-					return 0, err
-				}
-				if pinned {
+				if errors.Is(readErr, io.EOF) {
+					// Successful publication may have raced the cache-gap snapshot.
 					break
 				}
+				if readErr != nil {
+					if errors.Is(readErr, context.Canceled) && ctx.Err() == nil {
+						r.cache.releaseRangeFlight(flight)
+						retryFlight = true
+						break
+					}
+					r.cache.releaseRangeFlight(flight)
+					return read, readErr
+				}
 			}
-			if !pinned {
-				return 0, syscall.ENOSPC
+			if retryFlight {
+				continue
 			}
-			start := int(pos - off)
-			err = readPinnedRange(chunkParts, p[start:start+int(chunkEnd-pos)], pos)
-			closeRangeParts(chunkParts)
-			if err != nil {
-				return 0, err
+			r.cache.releaseRangeFlight(flight)
+			if pos < coveredEnd {
+				parts, pinned, pinErr := r.cache.pinRange(r.rangeID, pos, coveredEnd, !workqueue.IsBackground(ctx))
+				if pinErr != nil {
+					return read, pinErr
+				}
+				if !pinned {
+					return read, syscall.ENOSPC
+				}
+				n := int(coveredEnd - pos)
+				if err = readPinnedRange(parts, p[int(pos-off):int(pos-off)+n], pos); err != nil {
+					closeRangeParts(parts)
+					return read, err
+				}
+				closeRangeParts(parts)
+				if counted {
+					read += n
+				}
+				pos = coveredEnd
 			}
-			pos = chunkEnd
 		}
 	}
 	return len(p), nil
+}
+
+func contiguousRangeBytes(parts []pinnedRangePart, start int64) int {
+	cursor := start
+	for _, part := range parts {
+		if part.start > cursor {
+			break
+		}
+		if part.end > cursor {
+			cursor = part.end
+		}
+	}
+	return int(cursor - start)
+}
+
+func uncoveredRangeGaps(parts []pinnedRangePart, start, end int64) []byteRange {
+	var gaps []byteRange
+	cursor := start
+	for _, part := range parts {
+		if part.end <= cursor || part.start >= end {
+			continue
+		}
+		if part.start > cursor {
+			gaps = append(gaps, byteRange{start: cursor, end: min(part.start, end)})
+		}
+		if part.end > cursor {
+			cursor = part.end
+		}
+		if cursor >= end {
+			break
+		}
+	}
+	if cursor < end {
+		gaps = append(gaps, byteRange{start: cursor, end: end})
+	}
+	return gaps
 }
 
 func (r *Remote) fetchRangeTo(ctx context.Context, start, end int64, w io.Writer, priority *downloadPriority) error {

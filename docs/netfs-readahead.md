@@ -20,7 +20,9 @@ nearby out-of-order reads do not discard useful work.
 
 The controller grows the window after sustained forward consumption, and grows
 request chunks when reads wait or consume scheduled data. It estimates the
-forward byte rate with a small EWMA. Repeated reads with little scheduled-range
+forward byte rate with a small EWMA, using the elapsed time between successful
+read observations, including application pauses. A quick cache hit does not
+by itself imply fast consumption. Repeated reads with little scheduled-range
 overlap and a long idle gap reduce the active window and chunk size. Planning
 also caps a new chunk by the cache-wide remaining background download bytes.
 When no background capacity is available, planning waits for the next

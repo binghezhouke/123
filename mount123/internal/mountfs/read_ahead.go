@@ -134,12 +134,14 @@ func (r *readAhead) observe(off, n int64, elapsed time.Duration) {
 			oldFrontier := r.frontier
 			if off <= r.frontier+readAheadContinuityGap {
 				r.continuous++
-				elapsedForRate := elapsed
-				if elapsedForRate <= 0 && !r.lastProgress.IsZero() {
-					elapsedForRate = time.Since(r.lastProgress)
+				// Application pauses are part of consumption time. A fast cache
+				// hit alone does not mean the application is consuming quickly.
+				elapsedForRate := time.Since(r.lastProgress)
+				if r.lastProgress.IsZero() {
+					elapsedForRate = elapsed
 				}
 				if elapsedForRate > 0 {
-					rate := float64(end-oldFrontier) / elapsedForRate.Seconds()
+					rate := float64(min(n, end-oldFrontier)) / elapsedForRate.Seconds()
 					if r.rateBytesPerSecond == 0 {
 						r.rateBytesPerSecond = rate
 					} else {

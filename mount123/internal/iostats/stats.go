@@ -77,6 +77,10 @@ type SchedulerSummary struct {
 	AvailableBackgroundBytes int64  `json:"available_background_bytes"`
 	WaitingForeground        int    `json:"waiting_foreground"`
 	WaitingBackground        int    `json:"waiting_background"`
+	StagingActiveBytes       int64  `json:"staging_active_bytes"`
+	StagingPeakBytes         int64  `json:"staging_peak_bytes"`
+	StagingWaitingForeground int    `json:"staging_waiting_foreground"`
+	StagingWaitingBackground int    `json:"staging_waiting_background"`
 }
 
 type duration struct {
