@@ -29,16 +29,19 @@ configured maximum is at least two (with one background slot allowed when the
 maximum is one) and use only the byte budget after the foreground reserve.
 Requests queue round-robin by remote file, so one archive scan cannot put all
 other files behind its own queue. Foreground requests take precedence. After
-three foreground grants, a queued background request gets the next turn; if
-the byte budget is not yet available for that request, new foreground
-admissions wait while existing responses release their reservations. This
-lets large queued reads make progress under continuous small foreground load.
+three foreground grants, a queued background request gets the next turn. If
+that request cannot fit yet, small foreground requests may still use the
+protected foreground reserve; additional foreground admissions wait while
+existing responses release their reservations. This preserves responsive
+foreground reads while letting large queued background reads make progress.
 The request-count limit and byte limit are acquired together and released
 together when the response body closes or a request fails.
 
 Overlapping reads join one range flight. The flight has an independent context
 and reference count: canceling one reader leaves the HTTP transfer alive while
-another reader still needs it; the last departing reader cancels it. A
+another reader still needs it. A background-only flight is canceled when its
+last reader departs; after actual foreground consumption, the bounded flight
+may finish validating and publishing the cache extent. A
 foreground join promotes queued work and subsequent ranges on that flight. An
 HTTP request already sent cannot be reprioritized. `Cache.Close` cancels active
 flights and waits for their cleanup before releasing the cache directory.
