@@ -184,7 +184,7 @@ func (t *Tree) otherIndexMode(ctx context.Context, source *storage.Remote, a *ar
 	}
 	// Completed single-volume indexes need neither a worker nor a CDN probe.
 	if !strings.HasSuffix(strings.ToLower(a.name), ".7z.001") {
-		cacheKey := "archive-index:" + archiveKind(a.name) + ":" + archiveIdentity(source, a) + ":" + passwordTag(t.passwordKey, a, password)
+		cacheKey := "archive-index:" + archiveKind(a.name) + ":" + archiveIdentity(source, a) + ":" + t.passwordTag(a, password)
 		t.mu.Lock()
 		if item := t.meta[cacheKey]; item != nil && time.Now().Before(item.expires) {
 			t.seq++
@@ -267,7 +267,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 	if archiveKind(a.name) == ".rar" {
 		reader = &metadataRemote{reader: source.NewMetadataReader(ctx), fileID: a.id, size: size, nextLog: time.Now().Add(30 * time.Second)}
 	}
-	key := "archive-index:" + archiveKind(a.name) + ":" + identity + ":" + passwordTag(t.passwordKey, a, password)
+	key := "archive-index:" + archiveKind(a.name) + ":" + identity + ":" + t.passwordTag(a, password)
 	value, err := t.loadMeta(ctx, key, 365*24*time.Hour, func(ctx context.Context) (any, int64, error) {
 		started := time.Now()
 		log.Printf("archive index started: file_id=%d format=%s", a.id, archiveKind(a.name))
@@ -433,7 +433,7 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	key := identity + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + passwordTag(t.passwordKey, a, password)
+	key := t.diskCacheScope() + ":" + identity + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
 	cached, err := t.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := t.acquireBuild(ctx)
 		if err != nil {

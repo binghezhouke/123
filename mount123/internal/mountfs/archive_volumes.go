@@ -143,5 +143,5 @@ func archiveIdentity(source *storage.Remote, a *archiveDescriptor) string {
 	return fmt.Sprintf("cloud:%d:%s:%d", a.id, a.version, a.size)
 }
 func (t *Tree) archiveTaskKey(source *storage.Remote, a *archiveDescriptor, password []byte) string {
-	return archiveIdentity(source, a) + ":" + archiveKind(a.name) + ":" + passwordTag(t.passwordKey, a, password)
+	return archiveIdentity(source, a) + ":" + archiveKind(a.name) + ":" + t.passwordTag(a, password)
 }

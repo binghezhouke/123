@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -170,13 +172,20 @@ func TestParseAESExtraRejectsMalformedFields(t *testing.T) {
 type encryptedFakeAPI struct {
 	url               string
 	archive, password []byte
+	version           string
 }
+
+func (a *encryptedFakeAPI) CacheIdentity() string { return "encrypted-test-account-api" }
 
 func (a *encryptedFakeAPI) List(_ context.Context, id int64) ([]panapi.File, error) {
 	if id != 0 {
 		return nil, nil
 	}
-	return []panapi.File{{ID: 77, ParentID: 0, Name: "private.zip", Size: int64(len(a.archive)), Version: "v1"}, {ID: 78, ParentID: 0, Name: "private.zip.pwd", Size: int64(len(a.password)), Version: "p1"}}, nil
+	version := a.version
+	if version == "" {
+		version = "v1"
+	}
+	return []panapi.File{{ID: 77, ParentID: 0, Name: "private.zip", Size: int64(len(a.archive)), Version: version}, {ID: 78, ParentID: 0, Name: "private.zip.pwd", Size: int64(len(a.password)), Version: "p1"}}, nil
 }
 func (a *encryptedFakeAPI) DownloadURL(context.Context, int64) (string, error) { return a.url, nil }
 func (a *encryptedFakeAPI) ReadSmallFile(_ context.Context, id, max int64) ([]byte, error) {
@@ -219,6 +228,114 @@ func TestEncryptedMemberUsesSiblingPasswordFile(t *testing.T) {
 	got, status := result.Bytes(make([]byte, len(want)))
 	if status != fuse.OK || !bytes.Equal(got, want) {
 		t.Fatal("sibling password decryption payload mismatch")
+	}
+}
+
+func TestEncryptedMemberCacheSurvivesCacheReopenAndRejectsIdentityChanges(t *testing.T) {
+	archive, err := os.ReadFile("testdata/encrypted/aes256-ae2-deflate.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payloadStart, payloadEnd int64
+	var payloadBytes int64
+	dataReader, err := zip.NewReader(bytes.NewReader(archive), int64(len(archive)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range dataReader.File {
+		if f.Name == "hello.txt" {
+			payloadStart, err = f.DataOffset()
+			if err != nil {
+				t.Fatal(err)
+			}
+			payloadEnd = payloadStart + int64(f.CompressedSize64)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if header := r.Header.Get("Range"); strings.HasPrefix(header, "bytes=") {
+			parts := strings.Split(strings.TrimPrefix(header, "bytes="), "-")
+			if len(parts) == 2 {
+				start, e1 := strconv.ParseInt(parts[0], 10, 64)
+				end, e2 := strconv.ParseInt(parts[1], 10, 64)
+				if e1 == nil && e2 == nil {
+					lo, hi := max(start, payloadStart), min(end+1, payloadEnd)
+					if hi > lo {
+						payloadBytes += hi - lo
+					}
+				}
+			}
+		}
+		w.Header().Set("ETag", `"stable-encrypted-v1"`)
+		http.ServeContent(w, r, "private.zip", time.Unix(1, 0), bytes.NewReader(archive))
+	}))
+	defer server.Close()
+	api := &encryptedFakeAPI{url: server.URL, archive: archive, password: []byte("mount-test-password\n")}
+	cacheDir := filepath.Join(t.TempDir(), "shared-cache")
+	readOnce := func() {
+		t.Helper()
+		cache, e := storage.NewCache(cacheDir, 16<<20)
+		if e != nil {
+			t.Fatal(e)
+		}
+		root := New(context.Background(), api, cache, 0, true)
+		fs.NewNodeFS(root, &fs.Options{})
+		member := lookup(t, lookup(t, root, "private.zip"), "hello.txt")
+		h, _, errno := member.Open(context.Background(), syscall.O_RDONLY)
+		if errno != 0 {
+			t.Fatalf("open member: %v", errno)
+		}
+		want := append(bytes.Repeat([]byte("mount123 encrypted fixture\n"), 256), byteSliceRange()...)
+		result, errno := h.(fs.FileReader).Read(context.Background(), make([]byte, len(want)), 0)
+		if errno != 0 {
+			h.(fs.FileReleaser).Release(context.Background())
+			t.Fatalf("read member: %v", errno)
+		}
+		got, status := result.Bytes(make([]byte, len(want)))
+		h.(fs.FileReleaser).Release(context.Background())
+		if status != fuse.OK || !bytes.Equal(got, want) {
+			t.Fatal("decrypted payload mismatch")
+		}
+		if e := cache.Close(); e != nil {
+			t.Fatal(e)
+		}
+	}
+	readOnce()
+	firstPayloadBytes := payloadBytes
+	if firstPayloadBytes == 0 {
+		t.Fatal("first read did not fetch encrypted member data")
+	}
+	payloadBytes = 0
+	readOnce()
+	if payloadBytes != 0 {
+		t.Fatalf("cache reopen fetched %d member bytes; expected a disk cache hit", payloadBytes)
+	}
+
+	// A changed password must miss the prior plaintext, and the wrong password
+	// must fail before returning a file handle.
+	api.password = []byte("wrong-password\n")
+	cache, err := storage.NewCache(cacheDir, 16<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := New(context.Background(), api, cache, 0, true)
+	fs.NewNodeFS(root, &fs.Options{})
+	member := lookup(t, lookup(t, root, "private.zip"), "hello.txt")
+	h, _, errno := member.Open(context.Background(), syscall.O_RDONLY)
+	if h != nil {
+		_ = h.(fs.FileReleaser).Release(context.Background())
+	}
+	if errno != syscall.EACCES {
+		t.Fatalf("changed password open errno=%v, want EACCES", errno)
+	}
+	_ = cache.Close()
+
+	// The content version is part of the authenticated cache identity.
+	api.password = []byte("mount-test-password\n")
+	api.version = "v2"
+	payloadBytes = 0
+	readOnce()
+	if payloadBytes == 0 {
+		t.Fatal("changed archive version reused old decrypted bytes")
 	}
 }
 

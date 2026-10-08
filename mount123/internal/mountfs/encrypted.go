@@ -205,12 +205,26 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 	return password, nil
 }
 
-func passwordTag(secret [32]byte, archive *archiveDescriptor, password []byte) string {
-	h := hmac.New(sha256.New, secret[:])
-	if archive != nil {
-		fmt.Fprintf(h, "%d\x00%s\x00%d\x00", archive.id, archive.version, archive.size)
+func (t *Tree) diskCacheScope() string {
+	if t.cache == nil {
+		return t.cacheScope
 	}
-	h.Write(password)
+	return t.cache.StableDigest("account-api-v1", t.cacheScope)
+}
+
+func (t *Tree) passwordTag(archive *archiveDescriptor, password []byte) string {
+	identity := t.cacheScope
+	if archive != nil {
+		identity += fmt.Sprintf("\x00%d\x00%s\x00%d", archive.id, archive.version, archive.size)
+	}
+	if t.cache != nil {
+		return t.cache.StableDigest("archive-password-v1", identity+"\x00"+string(password))
+	}
+	// Trees without disk storage only need a process-local discriminator.
+	h := hmac.New(sha256.New, t.passwordKey[:])
+	_, _ = h.Write([]byte(identity))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(password)
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 

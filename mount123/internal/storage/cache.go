@@ -2,6 +2,8 @@ package storage
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -41,6 +43,7 @@ type Cache struct {
 	entries             map[string]*cacheEntry
 	flights             map[string]*flight
 	lock                *os.File
+	identityKey         [32]byte
 	closed              bool
 }
 
@@ -69,11 +72,75 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 		return nil, err
 	}
 	c := &Cache{dir: dir, max: maxBytes, entries: make(map[string]*cacheEntry), flights: make(map[string]*flight), lock: lock}
+	if err = c.loadIdentityKey(); err != nil {
+		c.Close()
+		return nil, err
+	}
 	if err = c.load(); err != nil {
 		c.Close()
 		return nil, err
 	}
 	return c, nil
+}
+
+// StableDigest returns a keyed digest for cache identities. The key is unique
+// to this private cache root and persists across mount processes; neither the
+// input nor the key is written to disk.
+func (c *Cache) StableDigest(namespace, value string) string {
+	h := hmac.New(sha256.New, c.identityKey[:])
+	_, _ = io.WriteString(h, namespace)
+	_, _ = h.Write([]byte{0})
+	_, _ = io.WriteString(h, value)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+func (c *Cache) loadIdentityKey() error {
+	path := filepath.Join(c.dir, ".identity-hmac-key")
+	read := func() error {
+		f, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if !st.Mode().IsRegular() || st.Size() != int64(len(c.identityKey)) {
+			return errors.New("invalid cache identity key")
+		}
+		if _, err = io.ReadFull(f, c.identityKey[:]); err != nil {
+			return err
+		}
+		return f.Chmod(0600)
+	}
+	if err := read(); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if _, err := rand.Read(c.identityKey[:]); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if os.IsExist(err) {
+		return read()
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = f.Write(c.identityKey[:]); err == nil {
+		err = f.Sync()
+	}
+	closeErr := f.Close()
+	if err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func (c *Cache) filename(key string) string {

@@ -5,6 +5,7 @@ package panapi
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -90,6 +91,21 @@ func New(cfg Config) (*Client, error) {
 		c.loadTokenCache()
 	}
 	return c, nil
+}
+
+// CacheIdentity returns an opaque account/API namespace for private on-disk
+// caches. It never returns credentials or the access token itself.
+func (c *Client) CacheIdentity() string {
+	var account string
+	if c.config.ClientID != "" {
+		secret := sha256.Sum256([]byte(c.config.ClientSecret))
+		account = c.config.ClientID + ":" + hex.EncodeToString(secret[:])
+	} else {
+		token := sha256.Sum256([]byte(c.config.AccessToken))
+		account = hex.EncodeToString(token[:])
+	}
+	h := sha256.Sum256([]byte(c.baseURL + "\x00" + account))
+	return hex.EncodeToString(h[:])
 }
 
 type remoteFile struct {

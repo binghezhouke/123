@@ -120,6 +120,7 @@ type Tree struct {
 	infoRunning      bool
 	passwordKey      [32]byte
 	passwordKeyValid bool
+	cacheScope       string
 }
 type entry struct {
 	name        string
@@ -196,6 +197,13 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 		ctx = context.Background()
 	}
 	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}}
+	if identity, ok := api.(interface{ CacheIdentity() string }); ok {
+		t.cacheScope = identity.CacheIdentity()
+	} else {
+		// Test and adapter APIs can opt in to CacheIdentity. This fallback keeps
+		// unrelated adapter types from sharing plaintext cache entries.
+		t.cacheScope = fmt.Sprintf("%T", api)
+	}
 	_, secretErr := rand.Read(t.passwordKey[:])
 	t.passwordKeyValid = secretErr == nil
 	if opts.PrefetchFiles > 0 {
@@ -963,8 +971,8 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			return nil, 0, toErrno(err)
 		}
 		defer clear(password)
-		tag := passwordTag(n.tree.passwordKey, n.item.archive, password)
-		key := src.Key() + ":encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
+		tag := n.tree.passwordTag(n.item.archive, password)
+		key := n.tree.diskCacheScope() + ":" + src.Key() + ":encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
 		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
 			release, err := n.tree.acquireBuild(ctx)
 			if err != nil {
@@ -994,7 +1002,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		return &handle{remote: src, base: offset, size: m.size}, fuse.FOPEN_DIRECT_IO, 0
 	}
-	cached, err := n.tree.cache.Acquire(ctx, src.Key()+":member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
+	cached, err := n.tree.cache.Acquire(ctx, n.tree.diskCacheScope()+":"+src.Key()+":member:"+m.name+fmt.Sprintf(":%08x:%d", m.crc, m.size), int64(m.size), func(ctx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(ctx)
 		if err != nil {
 			return err
