@@ -255,7 +255,15 @@ func (s *downloadScheduler) canGrant(w *downloadWaiter) bool {
 	return true
 }
 
-func (s *downloadScheduler) nextGrantableLocked(class int) *downloadWaiter {
+func (s *downloadScheduler) canGrantForegroundWithinReserve(w *downloadWaiter) bool {
+	if s.isBackground(w) || !s.canGrant(w) {
+		return false
+	}
+	activeForegroundBytes := s.activeBytes - s.backgroundBytes
+	return activeForegroundBytes+w.bytes <= s.cfg.ForegroundReservedBytes
+}
+
+func (s *downloadScheduler) nextGrantableLocked(class int, foregroundReserveOnly ...bool) *downloadWaiter {
 	files := s.order[class]
 	for n := 0; n < len(files); {
 		if len(files) == 0 {
@@ -287,7 +295,11 @@ func (s *downloadScheduler) nextGrantableLocked(class int) *downloadWaiter {
 		}
 		s.queues[class][file] = q
 		w := q[0]
-		if s.canGrant(w) {
+		grantable := s.canGrant(w)
+		if grantable && class == 0 && len(foregroundReserveOnly) > 0 && foregroundReserveOnly[0] {
+			grantable = s.canGrantForegroundWithinReserve(w)
+		}
+		if grantable {
 			q = q[1:]
 			if len(q) == 0 {
 				delete(s.queues[class], file)
@@ -329,9 +341,17 @@ func (s *downloadScheduler) dispatchLocked() {
 			w = s.nextGrantableLocked(1)
 			if w == nil {
 				if s.stats.WaitingBackground > 0 {
-					return
+					// A background request may need the unreserved byte share
+					// to drain before it fits. Let small foreground work use
+					// only its protected reserve; once that reserve is full,
+					// stop dispatching foreground requests until background can run.
+					w = s.nextGrantableLocked(0, true)
+					if w == nil {
+						return
+					}
+				} else {
+					s.backgroundTurn = false
 				}
-				s.backgroundTurn = false
 			}
 		}
 		if w == nil {

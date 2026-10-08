@@ -334,6 +334,78 @@ func TestDownloadSchedulerCancellationAndBackgroundProgress(t *testing.T) {
 	releases[3]()
 }
 
+func TestDownloadSchedulerBackgroundTurnUsesReserveAndStillRunsLargeBackground(t *testing.T) {
+	s := newDownloadScheduler(DownloadConfig{MaxRequests: 4, MaxInFlightBytes: 128, ForegroundReservedBytes: 16, RequestChunkBytes: 128})
+	activeBG, err := s.Acquire(workqueue.Background(context.Background()), 112, "active-background", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		release, acquireErr := s.Acquire(context.Background(), 1, fmt.Sprintf("burst-%d", i), foregroundPriority())
+		if acquireErr != nil {
+			t.Fatal(acquireErr)
+		}
+		release()
+	}
+	queuedBG := make(chan func(), 1)
+	go func() {
+		release, _ := s.Acquire(workqueue.Background(context.Background()), 112, "queued-background", nil)
+		queuedBG <- release
+	}()
+	waitScheduler(t, s, func(st DownloadStats) bool { return st.WaitingBackground == 1 })
+
+	firstFG := make(chan func(), 1)
+	go func() {
+		release, _ := s.Acquire(context.Background(), 8, "foreground-reserve", foregroundPriority())
+		firstFG <- release
+	}()
+	var releaseFG func()
+	select {
+	case releaseFG = <-firstFG:
+		if releaseFG == nil {
+			t.Fatal("foreground reserve request failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("background fairness turn blocked foreground use of its reserved bytes")
+	}
+	secondFG := make(chan func(), 1)
+	go func() {
+		release, _ := s.Acquire(context.Background(), 9, "foreground-over-reserve", foregroundPriority())
+		secondFG <- release
+	}()
+	waitScheduler(t, s, func(st DownloadStats) bool { return st.WaitingForeground == 1 && st.WaitingBackground == 1 })
+	select {
+	case <-secondFG:
+		t.Fatal("foreground request consumed bytes needed beyond its reserve")
+	default:
+	}
+
+	activeBG()
+	var releaseQueuedBG func()
+	select {
+	case releaseQueuedBG = <-queuedBG:
+		if releaseQueuedBG == nil {
+			t.Fatal("large queued background request failed")
+		}
+	case <-time.After(time.Second):
+		t.Fatalf("large background request starved after capacity returned: %+v", s.snapshot())
+	}
+	releaseQueuedBG()
+	select {
+	case release := <-secondFG:
+		if release == nil {
+			t.Fatal("foreground request failed after background completed")
+		}
+		release()
+	case <-time.After(time.Second):
+		t.Fatal("foreground queue did not resume after background completed")
+	}
+	releaseFG()
+	if st := s.snapshot(); st.ActiveRequests != 0 || st.ActiveBytes != 0 || st.WaitingForeground != 0 || st.WaitingBackground != 0 {
+		t.Fatalf("scheduler resources leaked: %+v", st)
+	}
+}
+
 func TestRemoteSplitsOnlyRangesLargerThanBudget(t *testing.T) {
 	data := []byte("123456789")
 	var mu sync.Mutex
