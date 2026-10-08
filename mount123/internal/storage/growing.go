@@ -81,9 +81,11 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 				c.mu.Unlock()
 				return nil, syscall.ENOSPC
 			}
-			_ = os.Remove(e.path)
-			delete(c.entries, id)
-			c.used -= e.size
+			if err := os.Remove(e.path); err != nil && !os.IsNotExist(err) {
+				c.mu.Unlock()
+				return nil, err
+			}
+			c.removeEntryLocked(id, e)
 		}
 		if f := c.flights[id]; f != nil {
 			done := f.done
@@ -101,6 +103,17 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 				f.mu.Unlock()
 				c.mu.Unlock()
 				continue
+			}
+			if f.size != size {
+				done := f.done
+				f.mu.Unlock()
+				c.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				case <-done:
+					continue
+				}
 			}
 			file, err := os.Open(f.temp)
 			if err != nil {
@@ -148,6 +161,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 }
 
 func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(context.Context, io.Writer) error) {
+	c := f.cache
 	err := fill(ctx, &growingWriter{flight: f, file: writer})
 	if err == nil {
 		f.mu.Lock()
@@ -159,13 +173,12 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	if err == nil {
 		err = ctx.Err()
 	}
-	if err == nil {
+	if err == nil && c.durable {
 		err = writer.Sync()
 	}
 	if closeErr := writer.Close(); err == nil {
 		err = closeErr
 	}
-	c := f.cache
 	c.mu.Lock()
 	if err == nil && c.closed {
 		err = ErrClosed
@@ -180,7 +193,14 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	}
 	if err == nil {
 		c.reserved -= f.size
-		c.entries[f.id] = &cacheEntry{path: f.target, size: f.size, used: time.Now(), pins: f.refs}
+		now := time.Now()
+		entry := &cacheEntry{path: f.target, size: f.size, used: now, lastTouch: now, pins: f.refs}
+		entry.lru = c.lru.PushFront(f.id)
+		if start, end, identity, ok := parseRangeKey(f.key); ok {
+			entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
+			c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: f.id})
+		}
+		c.entries[f.id] = entry
 		c.used += f.size
 		delete(c.growing, f.id)
 		f.mu.Lock()
@@ -226,6 +246,59 @@ func (f *growingFlight) release() {
 
 func (h *GrowingHandle) Size() int64 { return h.size }
 
+// Materialized reports whether this handle refers to a completely validated
+// cache object. A growing prefix remains false until fill, validation and
+// publication all succeed.
+func (h *GrowingHandle) Materialized() bool {
+	if h.ready != nil {
+		return true
+	}
+	h.flight.mu.Lock()
+	defer h.flight.mu.Unlock()
+	return h.flight.state == growingComplete
+}
+
+// Wait waits for the shared fill to finish and return its final validation
+// result. Canceling ctx stops only this wait; it does not cancel the fill.
+func (h *GrowingHandle) Wait(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.mu.Lock()
+	closed, ready := h.closed, h.ready
+	h.mu.Unlock()
+	if closed {
+		return os.ErrClosed
+	}
+	if ready != nil {
+		return nil
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		h.flight.mu.Lock()
+		state, fillErr, done := h.flight.state, h.flight.err, h.flight.done
+		h.flight.mu.Unlock()
+		switch state {
+		case growingComplete:
+			return nil
+		case growingFailed:
+			if fillErr == nil {
+				return io.ErrUnexpectedEOF
+			}
+			return fillErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-h.closedC:
+			return os.ErrClosed
+		case <-done:
+		}
+	}
+}
+
 func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -248,7 +321,8 @@ func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, e
 	if off >= h.size || len(p) == 0 {
 		return 0, io.EOF
 	}
-	if int64(len(p)) > h.size-off {
+	truncated := int64(len(p)) > h.size-off
+	if truncated {
 		p = p[:h.size-off]
 	}
 	end := off + int64(len(p))
@@ -273,6 +347,9 @@ func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, e
 			}
 			n, err := h.file.ReadAt(p, off)
 			h.mu.Unlock()
+			if truncated && err == nil {
+				err = io.EOF
+			}
 			return n, err
 		}
 		if state != growingRunning {
