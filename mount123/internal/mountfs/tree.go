@@ -233,7 +233,6 @@ type infoRequest struct {
 }
 
 var errInfoNotFound = errors.New("file metadata not found or trashed")
-var errDuplicateCloudName = errors.New("cloud directory contains duplicate names")
 
 const infoBatchMax = 100
 const infoQueueMax = 400

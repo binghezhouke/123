@@ -142,9 +142,6 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 	}
 	directory, err := t.cloudDirectory(ctx, archive.parentID)
 	if err != nil {
-		if errors.Is(err, errDuplicateCloudName) {
-			return nil, syscall.EACCES
-		}
 		return nil, err
 	}
 	// Tie password discovery to the immutable parent listing it inspected.

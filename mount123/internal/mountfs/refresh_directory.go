@@ -278,15 +278,10 @@ func (n *Node) notifyCloudDirectoryChange(mountRelativePath string, previous *me
 	oldFiles := make(map[string]panapi.File)
 	if previous != nil {
 		if old, ok := previous.value.(*cloudDirectory); ok {
-			for _, file := range old.files {
-				oldFiles[file.Name] = file
-			}
+			oldFiles = old.byName
 		}
 	}
-	newFiles := make(map[string]panapi.File, len(fresh.files))
-	for _, file := range fresh.files {
-		newFiles[file.Name] = file
-	}
+	newFiles := fresh.byName
 	changed := make([]string, 0)
 	for name, old := range oldFiles {
 		current, ok := newFiles[name]
