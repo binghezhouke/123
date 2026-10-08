@@ -43,4 +43,13 @@ func TestPublicReadAPIUpdatesMountIOStats(t *testing.T) {
 	if snapshot.DownloadedBytes.Status != "measured" || snapshot.DownloadedBytes.Bytes == nil || *snapshot.DownloadedBytes.Bytes == 0 {
 		t.Fatalf("HTTP range bytes were not recorded: %#v", snapshot.DownloadedBytes)
 	}
+	if snapshot.ForegroundReadBytes.Status != "measured" || snapshot.ForegroundReadBytes.Bytes == nil || *snapshot.ForegroundReadBytes.Bytes != 11 || snapshot.ForegroundReadTime.TotalNanos == nil {
+		t.Fatalf("application-visible read throughput inputs were not recorded: %#v %#v", snapshot.ForegroundReadBytes, snapshot.ForegroundReadLatency)
+	}
+	if snapshot.ReadAheadWait.Status != "measured" {
+		t.Fatalf("public FileReader read-ahead feedback was not recorded: %#v", snapshot.ReadAheadWait)
+	}
+	if snapshot.DownloadScheduler.Status != "measured" || snapshot.DownloadScheduler.MaximumRequests == 0 {
+		t.Fatalf("cache scheduler capacity was not attached to mount stats: %#v", snapshot.DownloadScheduler)
+	}
 }

@@ -141,6 +141,15 @@ func namespaceWithoutValidator(key string) string {
 
 func (r *Remote) Key() string { return r.key }
 
+// DownloadStats reports the cache-wide range scheduler capacity available to
+// this reader. It deliberately exposes aggregate counters only.
+func (r *Remote) DownloadStats() DownloadStats {
+	if r == nil || r.cache == nil {
+		return DownloadStats{}
+	}
+	return r.cache.DownloadStats()
+}
+
 func (r *Remote) refresh(ctx context.Context) error {
 	cctx, cancel := context.WithTimeout(ctx, remoteRequestTimeout)
 	defer cancel()

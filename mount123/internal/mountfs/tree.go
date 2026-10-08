@@ -190,7 +190,10 @@ func (n *Node) IOStats() iostats.Snapshot {
 	if n == nil || n.tree == nil || n.tree.cache == nil || n.tree.cache.IOStats() == nil {
 		return iostats.New().Snapshot()
 	}
-	return n.tree.cache.IOStats().Snapshot()
+	snapshot := n.tree.cache.IOStats().Snapshot()
+	downloads := n.tree.cache.DownloadStats()
+	snapshot.SetDownloadScheduler(downloads.MaxRequests, downloads.MaxInFlightBytes, downloads.ActiveRequests, downloads.ActiveBytes, downloads.AvailableBackgroundBytes, downloads.WaitingForeground, downloads.WaitingBackground)
+	return snapshot
 }
 
 type metaItem struct {
@@ -1178,6 +1181,9 @@ func (n *Node) newRemoteHandle(remote *storage.Remote, base int64, size uint64) 
 	h := &handle{remote: remote, base: base, size: size}
 	if !n.tree.opts.DisableReadAhead && n.tree.opts.ReadAheadMaxBytes > 0 && base >= 0 && size <= uint64(math.MaxInt64-base) {
 		h.readAhead = newReadAhead(n.tree.ctx, remote, base, size, n.tree.opts.ReadAheadMaxBytes)
+		if n.tree.cache != nil {
+			h.readAhead.statsTracker = n.tree.cache.IOStats()
+		}
 	}
 	return h
 }
@@ -1253,8 +1259,8 @@ type handle struct {
 }
 
 func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
+	started := time.Now()
 	if h.stats != nil {
-		started := time.Now()
 		defer func() { h.stats.ObserveForegroundRead(time.Since(started)) }()
 	}
 	if err := ctx.Err(); err != nil {
@@ -1281,8 +1287,11 @@ func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 	if err != nil && err != io.EOF {
 		return nil, toErrno(err)
 	}
+	if h.stats != nil && n > 0 {
+		h.stats.RecordForegroundRead(uint64(n), time.Since(started))
+	}
 	if h.remote != nil && h.readAhead != nil && n > 0 {
-		h.readAhead.observe(off, int64(n))
+		h.readAhead.observe(off, int64(n), time.Since(started))
 	}
 	return fuse.ReadResultData(dest[:n]), 0
 }

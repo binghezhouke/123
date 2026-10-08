@@ -91,22 +91,32 @@ func TestSequentialReadAheadPopulatesCacheForLaterRead(t *testing.T) {
 	if rg := waitRange(t, requests); rg.start != 0 || rg.end != (1<<20)-1 {
 		t.Fatalf("foreground range = %+v", rg)
 	}
-	// A second sequential read promotes the window from 1 MiB to 4 MiB.
-	second := make([]byte, 64<<10)
-	if result, errno := h.Read(context.Background(), second, 64<<10); errno != 0 || result.Size() != len(second) {
-		t.Fatalf("second read = %v, %v", result, errno)
-	}
-	seenLarge := false
-	deadline := time.After(3 * time.Second)
-	for !seenLarge {
-		select {
-		case rg := <-requests:
-			if rg.end-rg.start+1 >= 3<<20 {
-				seenLarge = true
-			}
-		case <-deadline:
-			t.Fatal("4 MiB sequential read-ahead range did not start")
+	// Consume sequentially. The controller grows its ahead window gradually,
+	// while keeping requests at a separate, bounded chunk size.
+	for off := int64(64 << 10); off < 1<<20; off += 64 << 10 {
+		result, errno := h.Read(context.Background(), make([]byte, 64<<10), off)
+		if errno != 0 || result.Size() != 64<<10 {
+			t.Fatalf("sequential read at %d = %v, %v", off, result, errno)
 		}
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		h.readAhead.mu.Lock()
+		frontier, complete := h.readAhead.frontier, h.readAhead.ranges
+		cachedThrough := int64(0)
+		for _, rg := range complete {
+			if rg.complete && rg.start <= 2<<20 && rg.end > cachedThrough {
+				cachedThrough = rg.end
+			}
+		}
+		h.readAhead.mu.Unlock()
+		if frontier >= 1<<20 && cachedThrough >= 2<<20 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if time.Now().After(deadline) {
+		t.Fatal("sequential consumption did not fill the ahead window through 2 MiB")
 	}
 	before := count.Load()
 	later := make([]byte, 4096)
@@ -127,8 +137,8 @@ func TestReadAheadRunsDisjointRangesConcurrently(t *testing.T) {
 	release := make(chan struct{}, 2)
 	remote, requests, _ := readAheadRemote(t, data, func(req *http.Request, _, _ int64) { started <- struct{}{}; <-release })
 	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 4<<20)
-	ra.observe(0, 4096)
-	ra.observe(4096, 4096)
+	ra.observe(0, 4096, 0)
+	ra.observe(4096, 4096, 0)
 	first, second := waitRange(t, requests), waitRange(t, requests)
 	if first.start < second.end && second.start < first.end {
 		t.Fatalf("prefetch ranges overlap: %+v %+v", first, second)
@@ -146,28 +156,180 @@ func TestReadAheadRunsDisjointRangesConcurrently(t *testing.T) {
 	ra.Close()
 }
 
+func TestReadAheadBoundsReadyBytesForSlowConsumer(t *testing.T) {
+	data := bytes.Repeat([]byte("bounded-ready"), int((8<<20)/13+1))[:8<<20]
+	remote, requests, _ := readAheadRemote(t, data, nil)
+	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 8<<20)
+	ra.observe(0, 4096, 0)
+	_ = waitRange(t, requests)
+	waitReadAheadJobs(t, ra, 0)
+	for i := 0; i < 100; i++ {
+		// Repeated FUSE observations without advancing consumption must not
+		// keep extending the ready window.
+		ra.observe(0, 4096, 0)
+	}
+	ra.mu.Lock()
+	frontier, maxEnd := ra.frontier, ra.frontier
+	var ready, inFlight int64
+	for _, rg := range ra.ranges {
+		maxEnd = max(maxEnd, rg.end)
+		if rg.complete {
+			ready += rg.end - max(frontier, rg.start)
+		} else {
+			inFlight += rg.end - max(frontier, rg.start)
+		}
+	}
+	window := ra.window
+	ra.mu.Unlock()
+	if maxEnd-frontier > window || ready+inFlight > window {
+		t.Fatalf("unconsumed+in-flight lead ready=%d in-flight=%d end=%d frontier=%d window=%d", ready, inFlight, maxEnd, frontier, window)
+	}
+	if ready == 0 {
+		t.Fatal("fast source did not publish a completed range")
+	}
+	ra.Close()
+}
+
+func TestReadAheadOverlapDoesNotLookLikeSeek(t *testing.T) {
+	data := bytes.Repeat([]byte("overlap"), int((4<<20)/7+1))[:4<<20]
+	remote, requests, _ := readAheadRemote(t, data, nil)
+	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 4<<20)
+	ra.observe(0, 64<<10, 0)
+	_ = waitRange(t, requests)
+	old := ra.ctx
+	ra.observe(32<<10, 64<<10, 0) // overlaps and advances the high-water mark
+	if old.Err() != nil {
+		t.Fatal("small overlapping read cancelled the current prediction generation")
+	}
+	ra.Close()
+}
+
+func TestReadAheadBackwardSeekResetsOnlyAfterLocalLookback(t *testing.T) {
+	data := bytes.Repeat([]byte("backward-seek"), int((8<<20)/13+1))[:8<<20]
+	remote, requests, _ := readAheadRemote(t, data, nil)
+	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 8<<20)
+	ra.observe(0, 4096, 0)
+	_ = waitRange(t, requests)
+	old := ra.ctx
+	ra.observe(2<<20, 4096, 0)
+	if old.Err() == nil {
+		t.Fatal("distant forward seek did not cancel old prediction")
+	}
+	old = ra.ctx
+	ra.observe((2<<20)-(2<<20), 4096, 0)
+	if old.Err() == nil {
+		t.Fatal("multi-megabyte backward seek did not cancel prior generation")
+	}
+	ra.mu.Lock()
+	frontier, window := ra.frontier, ra.window
+	ra.mu.Unlock()
+	if frontier != 4096 || window != initialReadAheadBytes {
+		t.Fatalf("backward seek state frontier=%d window=%d", frontier, window)
+	}
+	ra.Close()
+}
+
+func TestReadAheadConsumedAccountingDoesNotDoubleCountRereads(t *testing.T) {
+	data := bytes.Repeat([]byte("unique-consumption"), int((4<<20)/18+1))[:4<<20]
+	remote, requests, _ := readAheadRemote(t, data, nil)
+	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 4<<20)
+	ra.observe(0, 4096, 0)
+	_ = waitRange(t, requests)
+	waitReadAheadJobs(t, ra, 0)
+	ra.observe(4096, 8192, 0)
+	first := ra.snapshot().ConsumedBytes
+	ra.observe(4096, 8192, 0)
+	second := ra.snapshot().ConsumedBytes
+	if first == 0 || second != first {
+		t.Fatalf("unique consumed bytes first=%d repeated=%d", first, second)
+	}
+	if second > ra.snapshot().ScheduledBytes {
+		t.Fatalf("consumed bytes %d exceed scheduled %d", second, ra.snapshot().ScheduledBytes)
+	}
+	ra.Close()
+}
+
+func TestReadAheadRetriesFailedHoleOnNextObservation(t *testing.T) {
+	data := bytes.Repeat([]byte("retry-hole"), int((4<<20)/10+1))[:4<<20]
+	var dataRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		var start, end int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		if start != 0 || end != 0 {
+			if dataRequests.Add(1) == 1 {
+				http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+				return
+			}
+		}
+		w.Header().Set("ETag", `"retry-hole-v1"`)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.Header().Set("Content-Length", strconv.FormatInt(end-start+1, 10))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start : end+1])
+	}))
+	t.Cleanup(server.Close)
+	cache, err := storage.NewCache(t.TempDir(), 8<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cache.Close() })
+	remote, err := storage.NewRemote(context.Background(), cache, "read-ahead-retry", int64(len(data)), func(context.Context) (string, error) { return server.URL, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 2<<20)
+	ra.observe(0, 4096, 0)
+	deadline := time.Now().Add(2 * time.Second)
+	for dataRequests.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	waitReadAheadJobs(t, ra, 0)
+	ra.observe(0, 4096, 0)
+	deadline = time.Now().Add(2 * time.Second)
+	for dataRequests.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if dataRequests.Load() < 2 {
+		t.Fatal("failed prefetch range was not retried on the next observation")
+	}
+	waitReadAheadJobs(t, ra, 0)
+	ra.mu.Lock()
+	complete := false
+	for _, rg := range ra.ranges {
+		complete = complete || rg.complete
+	}
+	ra.mu.Unlock()
+	if !complete {
+		t.Fatal("retry did not complete the previously failed range")
+	}
+	ra.Close()
+}
+
 func TestReadAheadJumpShrinksWindowAndCancelsOldGeneration(t *testing.T) {
 	data := bytes.Repeat([]byte("random-jump"), int((32<<20)/11+1))[:32<<20]
 	remote, requests, _ := readAheadRemote(t, data, nil)
 	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 16<<20)
-	ra.observe(0, 4096)
+	ra.observe(0, 4096, 0)
 	_ = waitRange(t, requests)
 	waitReadAheadJobs(t, ra, 0)
-	ra.observe(4096, 4096)
+	ra.observe(4096, 4096, 0)
 	_ = waitRange(t, requests)
 	waitReadAheadJobs(t, ra, 0)
-	ra.observe(8192, 4096)
+	ra.observe(8192, 4096, 0)
 	_ = waitRange(t, requests)
 	waitReadAheadJobs(t, ra, 0)
 	ra.mu.Lock()
 	grown := ra.window
 	oldCtx := ra.ctx
 	ra.mu.Unlock()
-	if grown != 16<<20 {
-		t.Fatalf("grown window = %d, want 16 MiB", grown)
+	if grown < 4<<20 || grown > 16<<20 {
+		t.Fatalf("grown window = %d, want gradual growth bounded by 16 MiB", grown)
 	}
 	jump := 26 << 20
-	ra.observe(int64(jump), 4096)
+	ra.observe(int64(jump), 4096, 0)
 	if oldCtx.Err() == nil {
 		t.Fatal("random jump did not cancel the previous generation")
 	}
@@ -177,9 +339,33 @@ func TestReadAheadJumpShrinksWindowAndCancelsOldGeneration(t *testing.T) {
 	if window != initialReadAheadBytes {
 		t.Fatalf("window after jump = %d, want 1 MiB", window)
 	}
-	jumpRange := waitRange(t, requests)
-	if got := jumpRange.end - jumpRange.start + 1; got > initialReadAheadBytes {
-		t.Fatalf("jump prefetch size = %d, want at most 1 MiB", got)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		ra.mu.Lock()
+		current := false
+		for _, rg := range ra.ranges {
+			if rg.generation == ra.generation {
+				current = true
+				if rg.end-rg.start > initialReadAheadBytes {
+					ra.mu.Unlock()
+					t.Fatalf("jump prefetch chunk = %d, want at most 1 MiB", rg.end-rg.start)
+				}
+			}
+		}
+		ra.mu.Unlock()
+		if current {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ra.mu.Lock()
+	current := false
+	for _, rg := range ra.ranges {
+		current = current || rg.generation == ra.generation
+	}
+	ra.mu.Unlock()
+	if !current {
+		t.Fatal("new generation did not schedule after cancelling old requests")
 	}
 	ra.Close()
 }
@@ -194,7 +380,7 @@ func TestReadAheadCloseCancelsBlockedBackgroundRequest(t *testing.T) {
 		close(requestCanceled)
 	})
 	ra := newReadAhead(context.Background(), remote, 0, uint64(len(data)), 4<<20)
-	ra.observe(0, 4096)
+	ra.observe(0, 4096, 0)
 	<-requestStarted
 	done := make(chan struct{})
 	go func() { ra.Close(); close(done) }()
@@ -219,7 +405,7 @@ func TestReadAheadStaysInsideStoredMember(t *testing.T) {
 	base := int64(2<<20) + 123
 	memberSize := uint64(1 << 20)
 	ra := newReadAhead(context.Background(), remote, base, memberSize, 16<<20)
-	ra.observe(0, 4096)
+	ra.observe(0, 4096, 0)
 	rg := waitRange(t, requests)
 	memberEnd := base + int64(memberSize) - 1
 	if rg.start < base || rg.end > memberEnd {

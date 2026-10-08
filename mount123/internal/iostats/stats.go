@@ -13,23 +13,31 @@ const histogramBuckets = 64
 // Tracker aggregates metrics without retaining individual samples. Duration
 // histograms use fixed logarithmic buckets; byte counters are monotonic.
 type Tracker struct {
-	foregroundRead duration
-	transferQueue  duration
-	httpBodyTTFB   duration
-	httpTransfer   duration
-	cachePublish   duration
-	downloaded     counter
-	cacheHit       counter
+	foregroundRead      duration
+	foregroundReadTime  duration
+	transferQueue       duration
+	httpBodyTTFB        duration
+	httpTransfer        duration
+	cachePublish        duration
+	readAheadWait       duration
+	downloaded          counter
+	foregroundReadBytes counter
+	cacheHit            counter
+	readAheadScheduled  counter
+	readAheadCompleted  counter
+	readAheadConsumed   counter
+	readAheadWasted     counter
 }
 
 // DurationSummary is unknown until at least one observation has been made.
 // Percentiles are upper bounds of fixed logarithmic buckets, in nanoseconds.
 type DurationSummary struct {
-	Status   string  `json:"status"`
-	Samples  *uint64 `json:"samples"`
-	P50Nanos *uint64 `json:"p50_nanos"`
-	P95Nanos *uint64 `json:"p95_nanos"`
-	MaxNanos *uint64 `json:"max_nanos"`
+	Status     string  `json:"status"`
+	Samples    *uint64 `json:"samples"`
+	TotalNanos *uint64 `json:"total_nanos"`
+	P50Nanos   *uint64 `json:"p50_nanos"`
+	P95Nanos   *uint64 `json:"p95_nanos"`
+	MaxNanos   *uint64 `json:"max_nanos"`
 }
 
 // CounterSummary distinguishes an observed zero from a metric with no hook.
@@ -41,19 +49,40 @@ type CounterSummary struct {
 
 // Snapshot contains process-lifetime aggregate measurements only.
 type Snapshot struct {
-	ForegroundReadLatency DurationSummary `json:"foreground_read_latency"`
-	TransferQueueLatency  DurationSummary `json:"transfer_queue_latency"`
-	HTTPBodyTTFB          DurationSummary `json:"http_body_ttfb"`
-	HTTPTransferLatency   DurationSummary `json:"http_transfer_latency"`
-	CachePublication      DurationSummary `json:"cache_publication_latency"`
-	DownloadedBytes       CounterSummary  `json:"downloaded_bytes"`
-	CacheHitBytes         CounterSummary  `json:"cache_hit_bytes"`
-	DirectoryLookup       CounterSummary  `json:"directory_lookup"`
+	ForegroundReadLatency DurationSummary  `json:"foreground_read_latency"`
+	ForegroundReadTime    DurationSummary  `json:"foreground_read_success_time"`
+	TransferQueueLatency  DurationSummary  `json:"transfer_queue_latency"`
+	HTTPBodyTTFB          DurationSummary  `json:"http_body_ttfb"`
+	HTTPTransferLatency   DurationSummary  `json:"http_transfer_latency"`
+	CachePublication      DurationSummary  `json:"cache_publication_latency"`
+	ReadAheadWait         DurationSummary  `json:"read_ahead_foreground_wait"`
+	DownloadedBytes       CounterSummary   `json:"downloaded_bytes"`
+	ForegroundReadBytes   CounterSummary   `json:"foreground_read_bytes"`
+	CacheHitBytes         CounterSummary   `json:"cache_hit_bytes"`
+	ReadAheadScheduled    CounterSummary   `json:"read_ahead_scheduled_bytes"`
+	ReadAheadCompleted    CounterSummary   `json:"read_ahead_completed_bytes"`
+	ReadAheadConsumed     CounterSummary   `json:"read_ahead_consumed_bytes"`
+	ReadAheadWasted       CounterSummary   `json:"read_ahead_wasted_bytes"`
+	DownloadScheduler     SchedulerSummary `json:"download_scheduler"`
+	DirectoryLookup       CounterSummary   `json:"directory_lookup"`
+}
+
+// SchedulerSummary is a point-in-time aggregate from the shared cache.
+type SchedulerSummary struct {
+	Status                   string `json:"status"`
+	MaximumRequests          int    `json:"maximum_requests"`
+	MaximumInFlightBytes     int64  `json:"maximum_in_flight_bytes"`
+	ActiveRequests           int    `json:"active_requests"`
+	ActiveBytes              int64  `json:"active_bytes"`
+	AvailableBackgroundBytes int64  `json:"available_background_bytes"`
+	WaitingForeground        int    `json:"waiting_foreground"`
+	WaitingBackground        int    `json:"waiting_background"`
 }
 
 type duration struct {
 	count   atomic.Uint64
 	max     atomic.Uint64
+	total   atomic.Uint64
 	buckets [histogramBuckets]atomic.Uint64
 }
 
@@ -73,6 +102,29 @@ func (t *Tracker) ObserveHTTPTransfer(d time.Duration)   { t.httpTransfer.observ
 func (t *Tracker) ObserveCachePublication(d time.Duration) {
 	t.cachePublish.observe(d)
 }
+func (t *Tracker) ObserveReadAheadWait(d time.Duration) { t.readAheadWait.observe(d) }
+func (t *Tracker) AddReadAheadScheduled(n uint64) {
+	t.readAheadScheduled.events.Add(1)
+	t.readAheadScheduled.bytes.Add(n)
+}
+func (t *Tracker) AddReadAheadCompleted(n uint64) {
+	t.readAheadCompleted.events.Add(1)
+	t.readAheadCompleted.bytes.Add(n)
+}
+func (t *Tracker) AddReadAheadConsumed(n uint64) {
+	t.readAheadConsumed.events.Add(1)
+	t.readAheadConsumed.bytes.Add(n)
+}
+func (t *Tracker) AddReadAheadWasted(n uint64) {
+	t.readAheadWasted.events.Add(1)
+	t.readAheadWasted.bytes.Add(n)
+}
+
+// SetDownloadScheduler attaches cache-wide capacity to a mount snapshot while
+// keeping this package independent of storage.
+func (s *Snapshot) SetDownloadScheduler(maximumRequests int, maximumInFlightBytes int64, activeRequests int, activeBytes, availableBackgroundBytes int64, waitingForeground, waitingBackground int) {
+	s.DownloadScheduler = SchedulerSummary{Status: "measured", MaximumRequests: maximumRequests, MaximumInFlightBytes: maximumInFlightBytes, ActiveRequests: activeRequests, ActiveBytes: activeBytes, AvailableBackgroundBytes: availableBackgroundBytes, WaitingForeground: waitingForeground, WaitingBackground: waitingBackground}
+}
 
 // AddDownloadedBytes records bytes actually received into a range-cache fill.
 // Calling it with zero marks the metric as measured for an empty/failed body.
@@ -89,17 +141,33 @@ func (t *Tracker) AddCacheHitBytes(n uint64) {
 	t.cacheHit.bytes.Add(n)
 }
 
+// RecordForegroundRead records bytes and elapsed time returned by a successful
+// filesystem read, allowing application-visible throughput to be derived.
+func (t *Tracker) RecordForegroundRead(n uint64, elapsed time.Duration) {
+	t.foregroundReadBytes.events.Add(1)
+	t.foregroundReadBytes.bytes.Add(n)
+	t.foregroundReadTime.observe(elapsed)
+}
+
 // Snapshot returns a coherent-enough point-in-time view of atomic aggregates.
 // Individual counters can advance during the snapshot.
 func (t *Tracker) Snapshot() Snapshot {
 	return Snapshot{
 		ForegroundReadLatency: t.foregroundRead.snapshot(),
+		ForegroundReadTime:    t.foregroundReadTime.snapshot(),
 		TransferQueueLatency:  t.transferQueue.snapshot(),
 		HTTPBodyTTFB:          t.httpBodyTTFB.snapshot(),
 		HTTPTransferLatency:   t.httpTransfer.snapshot(),
 		CachePublication:      t.cachePublish.snapshot(),
+		ReadAheadWait:         t.readAheadWait.snapshot(),
 		DownloadedBytes:       t.downloaded.snapshot(),
+		ForegroundReadBytes:   t.foregroundReadBytes.snapshot(),
 		CacheHitBytes:         t.cacheHit.snapshot(),
+		ReadAheadScheduled:    t.readAheadScheduled.snapshot(),
+		ReadAheadCompleted:    t.readAheadCompleted.snapshot(),
+		ReadAheadConsumed:     t.readAheadConsumed.snapshot(),
+		ReadAheadWasted:       t.readAheadWasted.snapshot(),
+		DownloadScheduler:     SchedulerSummary{Status: "unknown"},
 		DirectoryLookup:       CounterSummary{Status: "unknown"},
 	}
 }
@@ -107,6 +175,7 @@ func (t *Tracker) Snapshot() Snapshot {
 func (d *duration) observe(value time.Duration) {
 	nanos := uint64(max(value, 0))
 	d.count.Add(1)
+	d.total.Add(nanos)
 	idx := bucketIndex(nanos)
 	d.buckets[idx].Add(1)
 	for old := d.max.Load(); nanos > old; old = d.max.Load() {
@@ -122,11 +191,12 @@ func (d *duration) snapshot() DurationSummary {
 		return DurationSummary{Status: "unknown"}
 	}
 	return DurationSummary{
-		Status:   "measured",
-		Samples:  ptr(count),
-		P50Nanos: ptr(d.quantile(count, 0.50)),
-		P95Nanos: ptr(d.quantile(count, 0.95)),
-		MaxNanos: ptr(d.max.Load()),
+		Status:     "measured",
+		Samples:    ptr(count),
+		TotalNanos: ptr(d.total.Load()),
+		P50Nanos:   ptr(d.quantile(count, 0.50)),
+		P95Nanos:   ptr(d.quantile(count, 0.95)),
+		MaxNanos:   ptr(d.max.Load()),
 	}
 }
 
