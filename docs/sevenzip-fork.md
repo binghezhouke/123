@@ -2,7 +2,7 @@
 
 挂载器使用 [binghezhouke/sevenzip](https://github.com/binghezhouke/sevenzip)，上游是 [bodgit/sevenzip](https://github.com/bodgit/sevenzip)，许可证为 BSD-3-Clause。
 
-当前依赖固定为 fork 的 `v1.6.1`，对应上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8`，尚无解码行为变更。本地 `mount123` 分支从该提交开始维护；不直接跟随上游 `main` 升级。当前 GitHub 凭证不能在新 fork 中创建该远端分支，推送维护改动前需补充权限。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
+当前依赖固定为 fork 的 `v1.6.1`，对应上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8`，尚无解码行为变更。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 已推送，从该提交开始维护；不直接跟随上游 `main` 升级。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
 
 ## 扩展边界
 
