@@ -113,6 +113,8 @@ func defaults(o Options) Options {
 }
 
 type Tree struct {
+	passwordSaveOnce  sync.Once
+	passwordSaveGate  chan struct{}
 	probeMu           sync.Mutex
 	probeRecordMu     sync.Mutex
 	probeJobs         map[int64]*archiveProbeJob

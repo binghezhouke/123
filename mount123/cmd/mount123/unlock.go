@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
@@ -97,7 +98,7 @@ func readTerminalLine(fd int) ([]byte, error) {
 		default:
 			if len(password) >= maxUnlockPasswordBytes {
 				wipe(password)
-				return nil, errors.New("ZIP password exceeds 4096 bytes")
+				return nil, errors.New("Archive password exceeds 4096 bytes")
 			}
 			password = append(password, one[0])
 		}
@@ -133,21 +134,27 @@ func runUnlockWith(ctx context.Context, args []string, stdin io.Reader, stderr, 
 	flags := flag.NewFlagSet("mount123 unlock", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		_, _ = io.WriteString(stderr, "Usage: mount123 unlock -file-id ID [-config PATH] [-cache-dir PATH] [-password-stdin]\n")
+		_, _ = io.WriteString(stderr, "Usage: mount123 unlock [flags] MOUNTED_ARCHIVE\n       mount123 unlock -all [flags] MOUNTED_DIRECTORY\n       mount123 unlock -file-id ID [-config PATH] [-cache-dir PATH] [-password-stdin]\n")
 		flags.PrintDefaults()
 	}
 	fileID := flags.Int64("file-id", 0, "cloud file ID of the encrypted ZIP")
 	configPath := flags.String("config", "config.json", "existing application config JSON")
 	cacheDir := flags.String("cache-dir", filepath.Join(userCache, "mount123"), "private cache root (token cache is reused)")
-	passwordStdin := flags.Bool("password-stdin", false, "read the ZIP password from stdin")
+	passwordStdin := flags.Bool("password-stdin", false, "read the archive password from stdin")
+	socketPath := flags.String("control-socket", "", "running mount control socket (default: cache-dir/control.sock)")
+	all := flags.Bool("all", false, "set the same password for archives in this cloud directory only")
+	skipValidation := flags.Bool("skip-validation", false, "save password sidecars without opening archives")
+	overwrite := flags.Bool("overwrite", false, "replace existing sidecars (mounted-path mode)")
+	timeout := flags.Duration("timeout", 10*time.Minute, "mounted request timeout, up to 30m")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return err
 	}
-	if flags.NArg() != 0 || *fileID <= 0 {
-		return errors.New("usage: mount123 unlock -file-id ID [-config PATH] [-cache-dir PATH] [-password-stdin]")
+	mounted := *fileID == 0 && flags.NArg() == 1
+	if (!mounted && (*fileID <= 0 || flags.NArg() != 0)) || (!mounted && (*all || *skipValidation || *overwrite)) || (mounted && (*timeout <= 0 || *timeout > 30*time.Minute)) {
+		return errors.New("expected a mounted path, or -file-id ID; flags must precede the path")
 	}
 
 	password, err := readUnlockPassword(ctx, *passwordStdin, stdin, terminal, stderr, readTerminal)
@@ -159,6 +166,16 @@ func runUnlockWith(ctx context.Context, args []string, stdin io.Reader, stderr, 
 		return err
 	}
 	defer wipe(password)
+	if mounted {
+		mountPath, err := filepath.Abs(flags.Arg(0))
+		if err != nil {
+			return err
+		}
+		if *socketPath == "" {
+			*socketPath = controlSocketPath(*cacheDir)
+		}
+		return runMountedUnlock(ctx, *socketPath, mountPath, password, mountfs.UnlockOptions{All: *all, SkipValidation: *skipValidation, Overwrite: *overwrite}, *timeout, stdout)
+	}
 
 	var appConfig struct {
 		ClientID     string `json:"CLIENT_ID"`
@@ -244,7 +261,7 @@ func readUnlockPassword(ctx context.Context, fromStdin bool, stdin io.Reader, te
 		}
 		if len(password) > maxUnlockPasswordBytes+2 {
 			wipe(password)
-			return nil, errors.New("ZIP password exceeds 4096 bytes")
+			return nil, errors.New("Archive password exceeds 4096 bytes")
 		}
 		if len(password) > 0 && password[len(password)-1] == '\n' {
 			password = password[:len(password)-1]
@@ -256,17 +273,17 @@ func readUnlockPassword(ctx context.Context, fromStdin bool, stdin io.Reader, te
 		if !terminal || readTerminal == nil {
 			return nil, errors.New("use -password-stdin when stdin is not a terminal")
 		}
-		_, _ = io.WriteString(stderr, "ZIP password: ")
+		_, _ = io.WriteString(stderr, "Archive password: ")
 		password, err = readTerminal()
 		_, _ = io.WriteString(stderr, "\n")
 		if err != nil {
 			wipe(password)
-			return nil, errors.New("could not read ZIP password")
+			return nil, errors.New("could not read archive password")
 		}
 	}
 	if len(password) == 0 || len(password) > maxUnlockPasswordBytes || !utf8.Valid(password) {
 		wipe(password)
-		return nil, errors.New("ZIP password must be valid UTF-8 and 1 to 4096 bytes")
+		return nil, errors.New("Archive password must be valid UTF-8 and 1 to 4096 bytes")
 	}
 	return password, nil
 }

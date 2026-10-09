@@ -67,22 +67,45 @@ func (c *Client) ReadSmallFile(ctx context.Context, id, maxBytes int64) ([]byte,
 	return data, nil
 }
 
-// SaveZIPPassword stores password bytes beside archive as <archive name>.pwd.
-// An existing sidecar is reused when it matches and replaced when it differs.
-func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []byte) (File, error) {
-	if archive.ID <= 0 || archive.IsDir || archive.ParentID < 0 || archive.Name == "" || path.Base(archive.Name) != archive.Name || strings.ContainsAny(archive.Name, `\\/:*?"<>|`) || !strings.EqualFold(path.Ext(archive.Name), ".zip") {
-		return File{}, errors.New("panapi: invalid archive metadata")
-	}
-	if len(password) == 0 || len(password) > maxZIPPasswordBytes || !utf8.Valid(password) {
-		return File{}, errors.New("panapi: ZIP password must be valid UTF-8 between 1 byte and 4096 bytes")
+// PasswordSidecarName returns the canonical sibling password filename. The
+// caller identifies the archive format; renamed archives need no extension.
+func PasswordSidecarName(archive File) (string, error) {
+	if archive.ID <= 0 || archive.IsDir || archive.Trashed || archive.ParentID < 0 || archive.Name == "" || path.Base(archive.Name) != archive.Name || strings.ContainsAny(archive.Name, `\/:*?"<>|`) {
+		return "", errors.New("panapi: invalid archive metadata")
 	}
 	name := archive.Name + ".pwd"
+	if strings.HasSuffix(strings.ToLower(archive.Name), ".7z.001") {
+		name = archive.Name[:len(archive.Name)-4] + ".pwd"
+	}
 	if len(name) > 255 {
-		return File{}, errors.New("panapi: ZIP password sidecar filename exceeds 255 bytes")
+		return "", errors.New("panapi: archive password sidecar filename exceeds 255 bytes")
+	}
+	return name, nil
+}
+
+// SaveZIPPassword preserves the original ZIP-only, replace-existing API.
+func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []byte) (File, error) {
+	if !strings.EqualFold(path.Ext(archive.Name), ".zip") {
+		return File{}, errors.New("panapi: invalid ZIP metadata")
+	}
+	file, _, err := c.SaveArchivePassword(ctx, archive, password, true)
+	return file, err
+}
+
+// SaveArchivePassword stores <original name>.pwd, or <name>.7z.pwd for the
+// first 7z volume. A fresh sibling listing enforces skip-existing by default.
+// The bool result reports that an existing sidecar was left unchanged.
+func (c *Client) SaveArchivePassword(ctx context.Context, archive File, password []byte, overwrite bool) (File, bool, error) {
+	name, err := PasswordSidecarName(archive)
+	if err != nil {
+		return File{}, false, err
+	}
+	if len(password) == 0 || len(password) > maxZIPPasswordBytes || !utf8.Valid(password) {
+		return File{}, false, errors.New("panapi: archive password must be valid UTF-8 between 1 byte and 4096 bytes")
 	}
 	files, err := c.List(ctx, archive.ParentID)
 	if err != nil {
-		return File{}, err
+		return File{}, false, err
 	}
 	var existingSidecar *File
 	for i := range files {
@@ -91,23 +114,26 @@ func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []b
 			continue
 		}
 		if existingSidecar != nil {
-			return File{}, errors.New("panapi: multiple sibling .pwd files exist")
+			return File{}, false, errors.New("panapi: multiple sibling .pwd files exist")
 		}
 		if existing.IsDir {
-			return File{}, errors.New("panapi: sibling .pwd path is a directory")
+			return File{}, false, errors.New("panapi: sibling .pwd path is a directory")
 		}
 		existingSidecar = &existing
+	}
+	if existingSidecar != nil && !overwrite {
+		return *existingSidecar, true, nil
 	}
 	if existingSidecar != nil && existingSidecar.Size <= maxZIPPasswordBytes {
 		old, err := c.ReadSmallFile(ctx, existingSidecar.ID, maxZIPPasswordBytes)
 		if err != nil {
 			if ctx.Err() != nil {
-				return File{}, ctx.Err()
+				return File{}, false, ctx.Err()
 			}
-			return File{}, errors.New("panapi: existing sibling .pwd file cannot be safely compared")
+			return File{}, false, errors.New("panapi: existing sibling .pwd file cannot be safely compared")
 		}
 		if bytes.Equal(old, password) {
-			return *existingSidecar, nil
+			return *existingSidecar, false, nil
 		}
 	}
 
@@ -133,22 +159,22 @@ func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []b
 	}{archive.ParentID, name, hex.EncodeToString(md5sum[:]), len(password), duplicate, false}
 	body, err := json.Marshal(createPayload)
 	if err != nil {
-		return File{}, errors.New("panapi: could not encode upload request")
+		return File{}, false, errors.New("panapi: could not encode upload request")
 	}
 	if err := c.requestJSON(ctx, http.MethodPost, "/upload/v2/file/create", nil, body, &created); err != nil {
 		if ctx.Err() != nil {
-			return File{}, ctx.Err()
+			return File{}, false, ctx.Err()
 		}
-		return File{}, errors.New("panapi: could not create ZIP password sidecar")
+		return File{}, false, errors.New("panapi: could not create archive password sidecar")
 	}
 	if created.Reuse {
 		if created.FileID <= 0 {
-			return File{}, errors.New("panapi: upload reuse response missing file ID")
+			return File{}, false, errors.New("panapi: upload reuse response missing file ID")
 		}
-		return File{ID: created.FileID, ParentID: archive.ParentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, nil
+		return File{ID: created.FileID, ParentID: archive.ParentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, false, nil
 	}
 	if created.Preupload == "" || created.SliceSize <= 0 || len(created.Servers) == 0 {
-		return File{}, errors.New("panapi: upload response missing required fields")
+		return File{}, false, errors.New("panapi: upload response missing required fields")
 	}
 	for offset, sliceNo := int64(0), int64(1); offset < int64(len(password)); sliceNo++ {
 		end := offset + created.SliceSize
@@ -158,7 +184,7 @@ func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []b
 		part := password[offset:end]
 		server := created.Servers[(sliceNo-1)%int64(len(created.Servers))]
 		if err := c.uploadSmallFileSlice(ctx, server, created.Preupload, sliceNo, part); err != nil {
-			return File{}, err
+			return File{}, false, err
 		}
 		offset = end
 	}
@@ -171,14 +197,14 @@ func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []b
 	}{created.Preupload})
 	if err := c.requestJSON(ctx, http.MethodPost, "/upload/v2/file/upload_complete", nil, completePayload, &completed); err != nil {
 		if ctx.Err() != nil {
-			return File{}, ctx.Err()
+			return File{}, false, ctx.Err()
 		}
-		return File{}, errors.New("panapi: could not complete ZIP password sidecar upload")
+		return File{}, false, errors.New("panapi: could not complete archive password sidecar upload")
 	}
 	if !completed.Completed || completed.FileID <= 0 {
-		return File{}, errors.New("panapi: upload completion was not confirmed")
+		return File{}, false, errors.New("panapi: upload completion was not confirmed")
 	}
-	return File{ID: completed.FileID, ParentID: archive.ParentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, nil
+	return File{ID: completed.FileID, ParentID: archive.ParentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, false, nil
 }
 
 func (c *Client) uploadSmallFileSlice(ctx context.Context, server, preupload string, sliceNo int64, content []byte) error {

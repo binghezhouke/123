@@ -37,17 +37,22 @@ func (e *commandExitError) Error() string { return e.err.Error() }
 func (e *commandExitError) Unwrap() error { return e.err }
 
 type controlRequest struct {
-	Command string `json:"command,omitempty"`
-	Path    string `json:"path,omitempty"`
-	Retry   bool   `json:"retry,omitempty"`
+	Command        string                `json:"command,omitempty"`
+	Path           string                `json:"path,omitempty"`
+	Retry          bool                  `json:"retry,omitempty"`
+	Password       []byte                `json:"password,omitempty"`
+	Unlock         mountfs.UnlockOptions `json:"unlock,omitempty"`
+	TimeoutSeconds int                   `json:"timeout_seconds,omitempty"`
 }
 
 type controlResponse struct {
-	Status  *mountfs.ArchiveIndexStatus `json:"status,omitempty"`
-	Doctor  *mountfs.PathDiagnosis      `json:"doctor,omitempty"`
-	Refresh *mountfs.RefreshResult      `json:"refresh,omitempty"`
-	IOStats *iostats.Snapshot           `json:"io_stats,omitempty"`
-	Error   string                      `json:"error,omitempty"`
+	Status         *mountfs.ArchiveIndexStatus `json:"status,omitempty"`
+	Doctor         *mountfs.PathDiagnosis      `json:"doctor,omitempty"`
+	Refresh        *mountfs.RefreshResult      `json:"refresh,omitempty"`
+	IOStats        *iostats.Snapshot           `json:"io_stats,omitempty"`
+	Error          string                      `json:"error,omitempty"`
+	UnlockProgress *mountfs.UnlockProgress     `json:"unlock_progress,omitempty"`
+	UnlockSummary  *mountfs.UnlockSummary      `json:"unlock_summary,omitempty"`
 }
 
 type controlServer struct {
@@ -140,8 +145,13 @@ func (s *controlServer) handle(ctx context.Context, conn *net.UnixConn) {
 	}
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 	var request controlRequest
+	defer func() { wipe(request.Password) }()
 	if err := json.NewDecoder(io.LimitReader(conn, 16<<10)).Decode(&request); err != nil {
 		_ = json.NewEncoder(conn).Encode(controlResponse{Error: "invalid control request"})
+		return
+	}
+	if request.Command == "unlock" {
+		s.handleUnlock(ctx, conn, request)
 		return
 	}
 	if request.Command == "io-stats" {

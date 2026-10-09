@@ -150,14 +150,32 @@ Range 请求遇到连接中断、429、502/503/504 会有限重试；每次探�
 
 挂载时每个具体成员仍会使用当前侧车密码解密；若压缩包中成员使用不同密码，该成员会在打开或流式读取时报告错误。加密中央目录尚不支持。
 
-`unlock` 子命令目前用于 ZIP，可验证密码并创建或替换侧车；7z/RAR 请先在网页验证并生成 `.pwd`。密码不会作为命令行参数传递：默认在终端隐藏输入，也可从标准输入读取。该命令会先完整验证一个最小的加密成员，只有验证成功后才上传密码。为了避免密码写入 shell 历史，标准输入示例使用权限受限的文件作为密码来源：
+`unlock` 可直接接受挂载内的归档路径，支持 ZIP、7z、RAR、7z 分卷入口，以及 `.mount123-probe` 已识别的改名归档。不依赖网页：命令通过私有 Unix socket 复用运行中挂载的凭证、缓存和探测结果，密码默认在终端隐藏输入，保存后自动刷新同级目录，无需重新挂载。改名文件 `NO.001` 对应的别名 `NO.001.7z/` 会保存为网盘原文件同级的 `NO.001.pwd`。
+
+```bash
+# 单个归档，隐藏输入密码；默认验证，已有密码文件则跳过
+./mount123 unlock '/home/binghe/mnt/123/图片/rioko凉凉子/NO.001.7z'
+
+# 当前云端目录内所有已识别归档共用密码，不递归，默认跳过已有 .pwd
+./mount123 unlock -all -skip-validation '/home/binghe/mnt/123/图片/rioko凉凉子'
+
+# 明确替换现有密码，或从权限受限的本地文件读取
+./mount123 unlock -overwrite '/path/to/mount/private.rar'
+./mount123 unlock -password-stdin '/path/to/mount/private.7z.001' < /path/to/password.txt
+```
+
+参数必须放在路径之前。`-all` 按 File ID 去重，每批最多 1000 个归档；未知文件不会自动当成归档，改名文件需先显式探测。默认验证 ZIP/RAR 的最小加密成员；加密头的 7z/RAR 验证目录头，明文头的 7z 在总量预算内逐组验证内容与成员 CRC。每文件验证限时 2 分钟，正文读取和展开预算各 256 MiB，7z/RAR 头部读取另有 64 MiB 预算。超限显示 `validation_limit`；已知密码正确时可明确加 `-skip-validation` 直接保存。归档若使用不同的目录头密码和成员密码，验证头部不保证每个成员可读；具体读取仍会检查解密结果。
+
+批量命令逐项报告 `saved`、`skipped_existing`、`validation_failed`、`save_failed`，最后报告汇总和刷新结果；任一失败或刷新失败返回非零退出码。Ctrl+C/断开连接会取消正在进行的请求及后续上传，已完成的侧车保留并尝试刷新。请求默认限时 10 分钟，可用 `-timeout` 调整到最多 30 分钟。密码为 1–4096 字节的单行 UTF-8；不进入命令行参数、日志或控制响应。`.pwd` 仍按约定以明文保存在网盘。FUSE 文件系统保持只读。
+
+使用自定义缓存的挂载可传 `-cache-dir` 指向该目录；多挂载时用 `-control-socket` 选择目标服务。原先未挂载时的 ZIP 用法继续支持：
 
 ```bash
 ./mount123 unlock -file-id 12345 -config ../config.json
 ./mount123 unlock -file-id 12345 -password-stdin -config ../config.json < /path/to/password.txt
 ```
 
-`-cache-dir` 可指定现有私有缓存根目录；命令复用其中的 `token.json`，并在根目录下建立临时私有缓存目录，磁盘缓存上限为 256 MiB，退出时删除。无有效侧车或密码错误时挂载不会弹出输入提示。
+旧 `-file-id` 模式只支持 ZIP，会验证后创建或替换侧车，复用 `-cache-dir` 中的 `token.json`，在根目录下建立 256 MiB 临时私有缓存，退出时删除；该模式不自动刷新另一个运行中的挂载。普通文件访问不会自动弹出密码提示。
 
 要求下载源返回正确的 HTTP 206 和 Content-Range；不支持 Range 时明确失败，不会悄悄下载整个大文件。读取期间实体验证器变化会报错，避免拼接不同版本。源站完全不提供验证器时无法保证读取期间源文件不变。Store 随机读取不做全成员 CRC 扫描；Deflate 成员只有完整解压时才能完成 CRC 校验。
 

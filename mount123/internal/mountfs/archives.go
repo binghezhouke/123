@@ -53,6 +53,7 @@ func (a *archiveDescriptor) kind() string {
 // Only immutable member metadata enters the shared index. Readers, passwords,
 // and decompressor state are scoped to one fill operation.
 type archiveMember struct {
+	encrypted   bool
 	name        string
 	size        uint64
 	crc         uint32
@@ -148,7 +149,7 @@ func scanArchive(ctx context.Context, kind string, reader io.ReaderAt, size int6
 		if f.UnKnownSize || f.UnPackedSize < 0 || (!f.IsDir && !f.Mode().IsRegular()) {
 			return syscall.EOPNOTSUPP
 		}
-		err := visit(archiveMember{name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator})
+		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator})
 		i++
 		return err
 	}, options...)

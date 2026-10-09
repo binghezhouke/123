@@ -507,6 +507,10 @@ func copyAndCheckMember(ctx context.Context, r io.Reader, m *member, dst io.Writ
 // ValidateZIPPassword verifies the password against the smallest encrypted
 // member and returns only after its complete size, CRC/HMAC, and stream checks.
 func ValidateZIPPassword(ctx context.Context, source *storage.Remote, size int64, password []byte) error {
+	return validateZIPPassword(ctx, source, size, password, 0)
+}
+
+func validateZIPPassword(ctx context.Context, source *storage.Remote, size int64, password []byte, limit uint64) error {
 	if len(password) == 0 || len(password) > maxPasswordBytes || !utf8.Valid(password) {
 		return syscall.EACCES
 	}
@@ -525,6 +529,9 @@ func ValidateZIPPassword(ctx context.Context, source *storage.Remote, size int64
 	}
 	if selected == nil {
 		return errors.New("archive has no supported encrypted member")
+	}
+	if limit > 0 && (selected.size > limit || selected.compressed > limit) {
+		return syscall.EFBIG
 	}
 	var discard io.Writer = io.Discard
 	return encryptedMember(ctx, source, selected, password, discard)
