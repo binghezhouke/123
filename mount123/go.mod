@@ -31,5 +31,8 @@ require (
 // Local additions: header-only walking and direct independent-member opening.
 replace github.com/nwaples/rardecode/v2 => ./third_party/rardecode
 
+// Maintained fork for solid-stream APIs; initially identical to upstream v1.6.1.
+replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.1
+
 // Local fix: iterative expansion of long UDF allocation-descriptor chains.
 replace golift.io/udf => ./third_party/udf
