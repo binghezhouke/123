@@ -745,10 +745,14 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 				start := int(pos - off)
 				got, readErr := flight.progress.copyAvailable(ctx, p[start:start+int(coveredEnd-pos)], pos)
 				if got > 0 {
+					// Progressive consumers need the containing response to finish even
+					// when they are background decoders reading a small piece. Otherwise
+					// releasing this read cancels the block and the next piece starts it
+					// again. Explicit RangeWindows already own their flight references.
+					if rangeWindowOwner(ctx) == nil {
+						flight.progress.retainTask()
+					}
 					if !workqueue.IsBackground(ctx) {
-						if rangeWindowOwner(ctx) == nil {
-							flight.progress.retainTask()
-						}
 						flight.progress.consume(r.cache, pos, pos+int64(got))
 					}
 					pos += int64(got)
