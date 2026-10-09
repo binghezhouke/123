@@ -17,7 +17,7 @@ func (n *Node) progressiveRAR(ctx context.Context) (*zipIndex, *storage.Remote, 
 		f := n.item.cloud
 		a = &archiveDescriptor{id: f.ID, parentID: f.ParentID, name: f.Name, version: f.Version, size: f.Size}
 	}
-	if a == nil || archiveKind(a.name) != ".rar" || !n.item.directory {
+	if a == nil || a.kind() != ".rar" || !n.item.directory {
 		return nil, nil, nil, false, nil
 	}
 	source := n.item.source
@@ -124,7 +124,7 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 	if archive == nil {
 		return nil, false, syscall.ENOTDIR
 	}
-	if archiveKind(archive.name) == "" {
+	if archive.kind() == "" {
 		return nil, false, syscall.ENOTDIR
 	}
 	packedSource := n.item.source
@@ -135,7 +135,7 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 		}
 	}
 	var index *zipIndex
-	if archiveKind(archive.name) == ".zip" {
+	if archive.kind() == ".zip" {
 		index, err = n.tree.getZIP(ctx, packedSource, archive.size, archive)
 	} else {
 		password, passwordErr := n.tree.otherPassword(ctx, archive)
@@ -249,7 +249,7 @@ func (n *Node) archiveDirectoryIndex(ctx context.Context) (*zipIndex, *storage.R
 		f := n.item.cloud
 		archive = &archiveDescriptor{id: f.ID, parentID: f.ParentID, name: f.Name, version: f.Version, size: f.Size}
 	}
-	if archive == nil || archiveKind(archive.name) == "" {
+	if archive == nil || archive.kind() == "" {
 		return nil, nil, nil, syscall.ENOTDIR
 	}
 	source := n.item.source
@@ -261,7 +261,7 @@ func (n *Node) archiveDirectoryIndex(ctx context.Context) (*zipIndex, *storage.R
 		}
 	}
 	var idx *zipIndex
-	if archiveKind(archive.name) == ".zip" {
+	if archive.kind() == ".zip" {
 		idx, err = n.tree.getZIP(ctx, source, archive.size, archive)
 	} else {
 		password, passwordErr := n.tree.otherPassword(ctx, archive)

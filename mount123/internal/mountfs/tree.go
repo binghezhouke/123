@@ -113,6 +113,11 @@ func defaults(o Options) Options {
 }
 
 type Tree struct {
+	probeMu           sync.Mutex
+	probeRecordMu     sync.Mutex
+	probeJobs         map[int64]*archiveProbeJob
+	probeActive       int
+	probeGate         chan struct{}
 	prefetch          *imagePrefetch
 	ctx               context.Context
 	api               API
@@ -179,6 +184,7 @@ type member struct {
 	aes              *aesMemberInfo
 }
 type archiveDescriptor struct {
+	format        string
 	id, parentID  int64
 	name, version string
 	size          int64
@@ -667,7 +673,7 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 			archive = &archiveDescriptor{id: n.item.cloud.ID, parentID: n.item.cloud.ParentID, name: n.item.cloud.Name, version: n.item.cloud.Version, size: n.item.cloud.Size}
 		}
 		var idx *zipIndex
-		if archive != nil && archiveKind(archive.name) != ".zip" {
+		if archive != nil && archive.kind() != ".zip" {
 			password, e := n.tree.otherPassword(ctx, archive)
 			if e != nil {
 				return nil, e
@@ -1027,6 +1033,9 @@ func (n *Node) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.At
 	return syscall.EROFS
 }
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	if (name == probeControlName || name == probeStatusControlName) && n.isCloudDirectory() {
+		return n.probeControl(ctx, name, out), 0
+	}
 	if name == refreshControlName && n.isCloudDirectory() {
 		return n.refreshControl(ctx, out), 0
 	}
@@ -1051,6 +1060,16 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 		}
 		copy := *e
 		copy.cloud = fresh
+		if e.archive != nil {
+			// A detected format applies to this content version, while password
+			// discovery always follows the original, current cloud filename.
+			if fresh.Version != e.archive.version || fresh.Size != e.archive.size {
+				return nil, syscall.ENOENT
+			}
+			archive := *e.archive
+			archive.name, archive.parentID = fresh.Name, fresh.ParentID
+			copy.archive = &archive
+		}
 		e = &copy
 	}
 	return n.inodeForEntry(ctx, e, out, true), 0

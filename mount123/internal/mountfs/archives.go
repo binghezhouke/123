@@ -38,6 +38,18 @@ func archiveKind(name string) string {
 	return ""
 }
 
+// kind separates a detected format from the original cloud name used for
+// password discovery and split-volume naming.
+func (a *archiveDescriptor) kind() string {
+	if a == nil {
+		return ""
+	}
+	if a.format != "" {
+		return a.format
+	}
+	return archiveKind(a.name)
+}
+
 // Only immutable member metadata enters the shared index. Readers, passwords,
 // and decompressor state are scoped to one fill operation.
 type archiveMember struct {
@@ -196,7 +208,7 @@ func (t *Tree) otherIndexMode(ctx context.Context, source *storage.Remote, a *ar
 	}
 	// Completed single-volume indexes need neither a worker nor a CDN probe.
 	if !strings.HasSuffix(strings.ToLower(a.name), ".7z.001") {
-		cacheKey := "archive-index:" + archiveKind(a.name) + ":" + archiveIdentity(source, a) + ":" + t.passwordTag(a, password)
+		cacheKey := "archive-index:" + a.kind() + ":" + archiveIdentity(source, a) + ":" + t.passwordTag(a, password)
 		t.mu.Lock()
 		if item := t.meta[cacheKey]; item != nil && time.Now().Before(item.expires) {
 			t.seq++
@@ -286,7 +298,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		t.indexStatuses.set(statusKey, failedArchiveStatus(a.size, err))
 		return nil, err
 	}
-	if archiveKind(a.name) == ".rar" {
+	if a.kind() == ".rar" {
 		reader = &metadataRemote{reader: source.NewMetadataReader(ctx), fileID: a.id, size: size, nextLog: time.Now().Add(30 * time.Second)}
 	}
 	reader = &indexProgressReaderAt{r: reader, status: t.indexStatuses, key: statusKey, size: size}
@@ -294,8 +306,8 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		s.State = "scanning"
 		s.ArchiveSize = size
 	})
-	key := "archive-index:" + archiveKind(a.name) + ":" + identity + ":" + t.passwordTag(a, password)
-	kind := archiveKind(a.name)
+	key := "archive-index:" + a.kind() + ":" + identity + ":" + t.passwordTag(a, password)
+	kind := a.kind()
 	persistKey := t.archiveIndexCacheKey(kind, identity, a, password)
 	identityDigest := ""
 	if t.cache != nil {
@@ -306,7 +318,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 			return idx, idx.bytes, nil
 		}
 		started := time.Now()
-		log.Printf("archive index started: file_id=%d format=%s", a.id, archiveKind(a.name))
+		log.Printf("archive index started: file_id=%d format=%s", a.id, a.kind())
 		idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, changed: make(chan struct{})}
 		t.mu.Lock()
 		if call := t.archiveTasks[t.archiveTaskKey(source, a, password)]; call != nil {
@@ -321,7 +333,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		// an arbitrarily large solid RAR merely to discover names.
 		readBudget := max(int64(64<<20), int64(t.opts.MaxZIPEntries)*512)
 		bounded := &budgetReaderAt{r: reader, left: readBudget}
-		err := scanArchive(ctx, archiveKind(a.name), bounded, size, password, func(f archiveMember) error {
+		err := scanArchive(ctx, a.kind(), bounded, size, password, func(f archiveMember) error {
 			idx.mu.Lock()
 			defer idx.mu.Unlock()
 			entries++
@@ -362,7 +374,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 					if dir.dirs[part] != nil {
 						return syscall.EIO
 					}
-					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, sevenStream: f.sevenStream, format: archiveKind(a.name)}
+					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, sevenStream: f.sevenStream, format: a.kind()}
 					dir.order = append(dir.order, part)
 					dir.files[part] = m
 					idx.members[f.name] = m
@@ -481,7 +493,7 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	key := t.diskCacheScope() + ":" + identity + ":" + archiveKind(a.name) + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
+	key := t.diskCacheScope() + ":" + identity + ":" + a.kind() + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
 	protected, err := t.encryptPassword(key, password)
 	if err != nil {
 		return nil, 0, toErrno(err)

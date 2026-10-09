@@ -44,12 +44,11 @@ func (n *Node) lookupCloud(ctx context.Context, name string) (map[string]*entry,
 	if err != nil {
 		return nil, err
 	}
-	f, ok := directory.byName[name]
-	if !ok {
+	item := directory.entries[name]
+	if item == nil {
 		return nil, nil
 	}
-	copy := f
-	return map[string]*entry{name: {name: name, cloud: &copy, directory: n.tree.cloudIsDirectory(f)}}, nil
+	return map[string]*entry{name: item}, nil
 }
 
 func (t *Tree) cloudDirectory(ctx context.Context, parentID int64) (*cloudDirectory, error) {
@@ -70,7 +69,7 @@ func (t *Tree) cloudDirectory(ctx context.Context, parentID int64) (*cloudDirect
 	t.startExpiredDirectoryRefresh(key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		return t.fetchPersistCloudDirectory(ctx, parentID)
 	})
-	return value.(*cloudDirectory), nil
+	return t.withProbedArchives(ctx, parentID, value.(*cloudDirectory))
 }
 
 func (t *Tree) fetchPersistCloudDirectory(ctx context.Context, parentID int64) (*cloudDirectory, int64, error) {
@@ -121,7 +120,7 @@ func (t *Tree) buildCloudDirectoryFromFiles(ctx context.Context, files []panapi.
 			return nil, 0, err
 		}
 		name := f.Name
-		if _, exists := directory.byName[name]; exists || name == refreshControlName {
+		if _, exists := directory.byName[name]; exists || isDirectoryControlName(name) {
 			name = cloudDuplicateName(f, reserved)
 			size += int64(len(name))
 		}

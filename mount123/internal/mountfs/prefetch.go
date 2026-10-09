@@ -507,13 +507,13 @@ func (p *imagePrefetch) archiveEntryIdentity(e *entry) string {
 	}
 	if a != nil {
 		if a.version != "" {
-			return fmt.Sprintf("cloud:%d:%s:%d:%s", a.id, a.version, a.size, archiveKind(a.name))
+			return fmt.Sprintf("cloud:%d:%s:%d:%s", a.id, a.version, a.size, a.kind())
 		}
 		if e.source != nil {
-			return e.source.Key() + ":" + archiveKind(a.name)
+			return e.source.Key() + ":" + a.kind()
 		}
 		if e.cloud != nil {
-			return p.tree.cloudCacheKey(e.cloud) + ":" + archiveKind(a.name)
+			return p.tree.cloudCacheKey(e.cloud) + ":" + a.kind()
 		}
 	}
 	if e.source != nil {

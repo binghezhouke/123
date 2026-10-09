@@ -206,7 +206,7 @@ func (n *Node) isArchiveDirectory() bool {
 	if n == nil || n.item == nil || !n.item.directory || n.isDisc() || n.item.cloud == nil || n.item.cloud.IsDir {
 		return false
 	}
-	return n.tree.zipDirs && archiveKind(n.item.cloud.Name) != ""
+	return n.tree.zipDirs && (n.item.archive != nil || archiveKind(n.item.cloud.Name) != "")
 }
 
 func diagnosisPathParts(value string) ([]string, error) {

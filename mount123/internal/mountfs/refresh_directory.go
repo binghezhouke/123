@@ -180,7 +180,20 @@ func (t *Tree) refreshCloudDirectory(ctx context.Context, parentID int64, root *
 	// only after releasing the directory flight: password discovery can itself
 	// be waiting for that flight. Any replacement source that starts now sees
 	// the fresh snapshot and is therefore left alone.
-	root.notifyCloudDirectoryChange(mountRelativePath, previous, fresh)
+	// Detection aliases are overlays on the raw directory snapshot. Include
+	// them when invalidating kernel dentries after content/version changes.
+	notifyPrevious, notifyFresh := previous, fresh
+	if previous != nil {
+		if old, ok := previous.value.(*cloudDirectory); ok {
+			if overlay, err := t.withProbedArchives(ctx, parentID, old); err == nil {
+				notifyPrevious = &metaItem{value: overlay}
+			}
+		}
+	}
+	if overlay, err := t.withProbedArchives(ctx, parentID, fresh); err == nil {
+		notifyFresh = overlay
+	}
+	root.notifyCloudDirectoryChange(mountRelativePath, notifyPrevious, notifyFresh)
 	dependents := dependentMetadataKeys(t, parentID, previous, fresh)
 	for key, oldFlight := range dependents {
 		if strings.HasPrefix(key, "password:") || strings.HasPrefix(key, "volumes:") {

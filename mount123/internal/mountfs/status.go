@@ -181,14 +181,14 @@ func (n *Node) statusArchiveIndex(ctx context.Context, archivePath string, retry
 		f := item.cloud
 		archive = &archiveDescriptor{id: f.ID, parentID: f.ParentID, name: f.Name, version: f.Version, size: f.Size}
 	}
-	if !item.directory || archive == nil || archiveKind(archive.name) == "" {
+	if !item.directory || archive == nil || archive.kind() == "" {
 		return ArchiveIndexStatus{}, syscall.EINVAL
 	}
 	if item.source != nil && item.zipPath != "" {
 		return ArchiveIndexStatus{}, syscall.EINVAL
 	}
 	target := &Node{tree: n.tree, item: item, parent: parent}
-	if archiveKind(archive.name) == ".zip" {
+	if archive.kind() == ".zip" {
 		return target.startZIPIndexStatus(ctx, archive, retry)
 	}
 	return target.startOtherIndexStatus(ctx, archive, retry)
@@ -278,7 +278,7 @@ func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescri
 	if err != nil {
 		return failedArchiveStatus(archive.size, err), nil
 	}
-	cacheKey := "archive-index:" + archiveKind(archive.name) + ":" + identity + ":" + n.tree.passwordTag(archive, password)
+	cacheKey := "archive-index:" + archive.kind() + ":" + identity + ":" + n.tree.passwordTag(archive, password)
 	n.tree.mu.Lock()
 	item := n.tree.meta[cacheKey]
 	var cached *zipIndex
