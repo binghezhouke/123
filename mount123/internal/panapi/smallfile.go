@@ -238,9 +238,6 @@ func (c *Client) uploadSmallFileSlice(ctx context.Context, server, preupload str
 	if err := writer.Close(); err != nil {
 		return errors.New("panapi: could not encode upload slice")
 	}
-	if err := c.waitRateLimit(ctx); err != nil {
-		return err
-	}
 	token, err := c.accessToken(ctx)
 	if err != nil {
 		return err

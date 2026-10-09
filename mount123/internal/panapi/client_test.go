@@ -73,8 +73,8 @@ func TestListFetchesAllPagesAndFiltersTrashed(t *testing.T) {
 	if tokenCalls != 1 || pageCalls != 2 {
 		t.Fatalf("calls: token=%d pages=%d", tokenCalls, pageCalls)
 	}
-	if gap := requestTimes[1].Sub(requestTimes[0]); gap < 300*time.Millisecond {
-		t.Fatalf("token and first API request were only %s apart", gap)
+	if gap := requestTimes[2].Sub(requestTimes[1]); gap < 300*time.Millisecond {
+		t.Fatalf("v2 list requests were only %s apart", gap)
 	}
 	info, err := os.Stat(cache)
 	if err != nil {

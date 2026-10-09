@@ -54,10 +54,10 @@ type Client struct {
 	baseURL string
 	http    *http.Client
 
-	mu       sync.Mutex
-	token    string
-	expires  time.Time
-	nextCall time.Time
+	mu        sync.Mutex
+	token     string
+	expires   time.Time
+	scheduler *apiScheduler
 }
 
 type tokenCache struct {
@@ -85,7 +85,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, errors.New("panapi: invalid base URL")
 	}
-	c := &Client{config: cfg, baseURL: strings.TrimRight(cfg.BaseURL, "/"), http: &http.Client{Timeout: 20 * time.Second}}
+	c := &Client{config: cfg, baseURL: strings.TrimRight(cfg.BaseURL, "/"), http: &http.Client{Timeout: 20 * time.Second}, scheduler: newAPIScheduler()}
 	if cfg.AccessToken != "" {
 		c.token = cfg.AccessToken
 		c.expires = time.Now().Add(24 * time.Hour)
@@ -386,7 +386,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 		if err != nil {
 			return err
 		}
-		if err := c.waitRateLimit(requestCtx); err != nil {
+		if err := c.waitRateLimit(requestCtx, categoryForEndpoint(endpoint)); err != nil {
 			return err
 		}
 		u := c.baseURL + endpoint
@@ -446,6 +446,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			if readOnly {
 				readRetries++
 			}
+			c.cooldown(categoryForEndpoint(endpoint), retryAfterDuration(resp.Header.Get("Retry-After")))
 			if err := waitThrottle(requestCtx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
 				if requestCtx.Err() != nil {
 					return requestCtx.Err()
@@ -479,6 +480,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				if readOnly {
 					readRetries++
 				}
+				c.cooldown(categoryForEndpoint(endpoint), retryAfterDuration(resp.Header.Get("Retry-After")))
 				if err := waitThrottle(requestCtx, throttleRetries, resp.Header.Get("Retry-After")); err != nil {
 					if requestCtx.Err() != nil {
 						return requestCtx.Err()
@@ -635,7 +637,7 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 }
 
 func (c *Client) fetchToken(ctx context.Context) (string, error) {
-	if err := c.waitRateLimit(ctx); err != nil {
+	if err := c.waitRateLimit(ctx, categoryAccessToken); err != nil {
 		return "", err
 	}
 	c.mu.Lock()
@@ -712,26 +714,23 @@ func (c *Client) invalidateTokenIf(failed string) {
 	c.mu.Unlock()
 }
 
-func (c *Client) waitRateLimit(ctx context.Context) error {
-	c.mu.Lock()
-	now := time.Now()
-	wait := c.nextCall.Sub(now)
-	if wait < 0 {
-		wait = 0
+func (c *Client) waitRateLimit(ctx context.Context, cat apiCategory) error {
+	return c.scheduler.acquire(ctx, cat, true)
+}
+
+func (c *Client) cooldown(cat apiCategory, d time.Duration) { c.scheduler.cooldown(cat, d) }
+
+func retryAfterDuration(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+		return time.Duration(n) * time.Second
 	}
-	c.nextCall = now.Add(wait).Add(time.Second / 3)
-	c.mu.Unlock()
-	if wait == 0 {
-		return nil
+	if when, err := http.ParseTime(raw); err == nil {
+		if wait := time.Until(when); wait > 0 {
+			return wait
+		}
 	}
-	t := time.NewTimer(wait)
-	defer t.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-t.C:
-		return nil
-	}
+	return 0
 }
 
 func (c *Client) cachePath() string {
