@@ -251,13 +251,20 @@ func (p *imagePrefetch) plan(n *Node, entries map[string]*entry) []*entry {
 	if count > p.tree.opts.PrefetchFiles && p.tree.opts.PrefetchFiles > 0 {
 		count = p.tree.opts.PrefetchFiles
 	}
-	if n.item.member != nil && n.item.member.format != "" && count > 1 {
+	solid7z := n.item.member != nil && p.tree.cache != nil && p.tree.solid7zCacheable(n.item.member)
+	if n.item.member != nil && n.item.member.format != "" && !solid7z && count > 1 {
 		count = 1
 	}
 	budget := p.tree.opts.PrefetchBytes
 	result := make([]*entry, 0, count)
 	for i, examined := index+direction, 0; i >= 0 && i < len(names) && examined < count; i, examined = i+direction, examined+1 {
 		e := entries[names[i]]
+		// A solid group's foreground fill already retains all of its bytes.
+		// Warm nearby member views from that group, without starting unrelated
+		// groups whose decompressed size can dwarf the image window budget.
+		if solid7z && (e.member == nil || e.member.sevenStream == nil || e.member.sevenStream.Stream != n.item.member.sevenStream.Stream) {
+			continue
+		}
 		var size uint64
 		if e.disc != nil {
 			size = e.disc.size
@@ -273,6 +280,11 @@ func (p *imagePrefetch) plan(n *Node, entries map[string]*entry) []*entry {
 		}
 		budget -= int64(size)
 		result = append(result, e)
+	}
+	if solid7z {
+		sort.SliceStable(result, func(i, j int) bool {
+			return result[i].member.sevenStream.Offset < result[j].member.sevenStream.Offset
+		})
 	}
 	return result
 }

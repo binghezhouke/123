@@ -162,6 +162,7 @@ type entry struct {
 	directory   bool
 }
 type member struct {
+	sevenStream      *sevenStreamLocation
 	rarLocator       *rardecode.MemberLocator
 	format           string
 	ordinal          int

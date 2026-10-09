@@ -39,14 +39,15 @@ func archiveKind(name string) string {
 }
 
 // Only immutable member metadata enters the shared index. Readers, passwords,
-// and decompressor state are scoped to one operation.
+// and decompressor state are scoped to one fill operation.
 type archiveMember struct {
-	name       string
-	size       uint64
-	crc        uint32
-	directory  bool
-	ordinal    int
-	rarLocator *rardecode.MemberLocator
+	name        string
+	size        uint64
+	crc         uint32
+	directory   bool
+	ordinal     int
+	rarLocator  *rardecode.MemberLocator
+	sevenStream *sevenStreamLocation
 }
 
 type budgetReaderAt struct {
@@ -102,6 +103,7 @@ func scanArchive(ctx context.Context, kind string, reader io.ReaderAt, size int6
 		if err != nil {
 			return err
 		}
+		streams := zr.Streams()
 		for i, f := range zr.File {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -109,7 +111,17 @@ func scanArchive(ctx context.Context, kind string, reader io.ReaderAt, size int6
 			if !f.FileInfo().IsDir() && !f.FileInfo().Mode().IsRegular() {
 				return syscall.EOPNOTSUPP
 			}
-			if err := visit(archiveMember{f.Name, f.UncompressedSize, f.CRC32, f.FileInfo().IsDir(), i, nil}); err != nil {
+			var location *sevenStreamLocation
+			if offset, ok := f.StreamOffset(); ok {
+				if f.Stream < 0 || f.Stream >= len(streams) || streams[f.Stream].UncompressedSize > math.MaxInt64 {
+					return syscall.EFBIG
+				}
+				location = &sevenStreamLocation{Stream: f.Stream, Offset: offset, Size: int64(streams[f.Stream].UncompressedSize)}
+				if !location.valid(f.UncompressedSize) {
+					return syscall.EIO
+				}
+			}
+			if err := visit(archiveMember{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}); err != nil {
 				return err
 			}
 		}
@@ -124,7 +136,7 @@ func scanArchive(ctx context.Context, kind string, reader io.ReaderAt, size int6
 		if f.UnKnownSize || f.UnPackedSize < 0 || (!f.IsDir && !f.Mode().IsRegular()) {
 			return syscall.EOPNOTSUPP
 		}
-		err := visit(archiveMember{f.Name, uint64(f.UnPackedSize), 0, f.IsDir, i, &locator})
+		err := visit(archiveMember{name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator})
 		i++
 		return err
 	}, options...)
@@ -350,7 +362,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 					if dir.dirs[part] != nil {
 						return syscall.EIO
 					}
-					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, format: archiveKind(a.name)}
+					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, sevenStream: f.sevenStream, format: archiveKind(a.name)}
 					dir.order = append(dir.order, part)
 					dir.files[part] = m
 					idx.members[f.name] = m
@@ -465,45 +477,30 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 		return nil, 0, toErrno(err)
 	}
 	defer clear(password)
-	reader, size, identity, err := t.archiveSource(ctx, n.item.source, a)
+	_, _, identity, err := t.archiveSource(ctx, n.item.source, a)
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
 	key := t.diskCacheScope() + ":" + identity + ":" + archiveKind(a.name) + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
-	streamPassword := append([]byte(nil), password...)
+	protected, err := t.encryptPassword(key, password)
+	if err != nil {
+		return nil, 0, toErrno(err)
+	}
 	if growing, err := n.acquireGrowingMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+		streamPassword, err := t.decryptPassword(key, protected)
+		if err != nil {
+			return err
+		}
 		defer clear(streamPassword)
-		// Bind the archive reader to the shared fill's lifetime, not this Open
-		// request. Volume discovery happens before taking a build slot.
-		fillReader, fillSize, _, err := t.archiveSource(fillCtx, n.item.source, a)
-		if err != nil {
-			return err
-		}
-		release, err := t.acquireBuild(fillCtx)
-		if err != nil {
-			return err
-		}
-		defer release()
-		started := time.Now()
-		err = extractArchiveMember(fillCtx, fillReader, fillSize, m, streamPassword, w)
-		t.observeStage(iostats.StageDecompression, started)
+		err = t.extractOtherMember(fillCtx, n.item.source, a, m, streamPassword, w)
 		return archiveReadError(fillCtx, err, streamPassword)
 	}); err != nil {
-		clear(streamPassword)
 		return nil, 0, toErrno(err)
 	} else if growing != nil {
 		return &handle{growing: growing, closer: growing, size: m.size}, n.tree.growingCacheOpenFlags(growing), 0
 	}
-	clear(streamPassword)
 	cached, err := t.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
-		release, err := t.acquireBuild(ctx)
-		if err != nil {
-			return err
-		}
-		defer release()
-		started := time.Now()
-		err = extractArchiveMember(ctx, reader, size, m, password, w)
-		t.observeStage(iostats.StageDecompression, started)
+		err := t.extractOtherMember(ctx, n.item.source, a, m, password, w)
 		return archiveReadError(ctx, err, password)
 	})
 	if err != nil {

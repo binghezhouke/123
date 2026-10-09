@@ -50,6 +50,7 @@ type archiveIndexEntryDTO struct {
 	HeaderOffset int64                    `json:"header_offset,omitempty"`
 	AES          *archiveAESDTO           `json:"aes,omitempty"`
 	RARLocator   *rardecode.LocatorRecord `json:"rar_locator,omitempty"`
+	SevenStream  *sevenStreamLocation     `json:"seven_stream,omitempty"`
 }
 
 type archiveAESDTO struct {
@@ -130,7 +131,7 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 			if prefix != "" {
 				path = prefix + "/" + key
 			}
-			item := archiveIndexEntryDTO{Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset}
+			item := archiveIndexEntryDTO{Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream}
 			if m.aes != nil {
 				item.AES = &archiveAESDTO{Version: m.aes.version, Strength: m.aes.strength, Method: m.aes.method}
 			}
@@ -211,6 +212,14 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 				memberFormat = ""
 			}
 			m := &member{name: record.Name, format: memberFormat, ordinal: record.Ordinal, headerOffset: record.HeaderOffset, modifiedTime: record.ModifiedTime, method: record.Method, flags: record.Flags, crc: record.CRC, compressed: record.Compressed, size: record.Size, encrypted: record.Flags&1 != 0}
+			if kind == ".7z" {
+				// Rebuild only old 7z indexes that lack stream locations. ZIP/RAR
+				// keep their existing persistent index schema and cache keys.
+				if record.Size > 0 && (record.SevenStream == nil || !record.SevenStream.valid(record.Size) || record.SevenStream.Stream >= t.opts.MaxZIPEntries) {
+					return nil, errors.New("persisted 7z stream location is missing or invalid")
+				}
+				m.sevenStream = record.SevenStream
+			}
 			if kind == ".zip" {
 				if record.HeaderOffset < 0 || record.HeaderOffset >= archiveSize || (record.Method != 0 && record.Method != 8 && record.Method != 99) {
 					return nil, errors.New("invalid persisted ZIP member location")
