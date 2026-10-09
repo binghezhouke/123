@@ -322,6 +322,9 @@ func (c *Cache) loadIdentityKey() error {
 // per-process subdirectory that is removed on close.
 func (c *Cache) Directory() string { return c.dir }
 
+// Capacity returns the immutable byte limit without walking cached entries.
+func (c *Cache) Capacity() int64 { return c.max }
+
 func (c *Cache) filename(key string, class cacheClass) string {
 	h := sha256.Sum256([]byte(key))
 	return filepath.Join(c.dir, hex.EncodeToString(h[:])+"."+class.suffix()+".blob")

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync/atomic"
@@ -11,6 +12,75 @@ import (
 	"testing"
 	"time"
 )
+
+func TestRetainedGrowingFillSurvivesLastCloseAndStopsWithLifetime(t *testing.T) {
+	for _, cancelFill := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelFill), func(t *testing.T) {
+			c, err := NewCache(t.TempDir(), 32)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer c.Close()
+			lifetime, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			started, proceed, ended := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			h, err := c.AcquireGrowingRetained(context.Background(), lifetime, "retained", 6, func(ctx context.Context, w io.Writer) error {
+				defer close(ended)
+				if _, err := io.WriteString(w, "abc"); err != nil {
+					return err
+				}
+				close(started)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-proceed:
+				}
+				_, err := io.WriteString(w, "def")
+				return err
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-started
+			if err := h.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if cancelFill {
+				cancel()
+			} else {
+				close(proceed)
+			}
+			select {
+			case <-ended:
+			case <-time.After(time.Second):
+				t.Fatal("retained fill did not finish")
+			}
+			deadline := time.Now().Add(time.Second)
+			for c.Stats().ReservedBytes != 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			if c.Stats().ReservedBytes != 0 {
+				t.Fatal("retained reservation leaked")
+			}
+			cached, err := c.Open("retained")
+			if cancelFill {
+				if err == nil {
+					cached.Close()
+					t.Fatal("cancelled fill published")
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer cached.Close()
+				data := make([]byte, 6)
+				if _, err := cached.ReadAt(data, 0); err != nil || string(data) != "abcdef" {
+					t.Fatalf("retained data=%q err=%v", data, err)
+				}
+			}
+		})
+	}
+}
 
 func TestAcquireGrowingSharesReadablePrefixAndPublishesOnSuccess(t *testing.T) {
 	c, err := NewCache(t.TempDir(), 32)

@@ -27,6 +27,7 @@ type growingFlight struct {
 	lastUseStart, lastUseEnd int64
 	written                  int64
 	refs                     int
+	retain                   bool
 	state                    uint8
 	err                      error
 	changed                  chan struct{}
@@ -56,6 +57,18 @@ type GrowingHandle struct {
 // AcquireGrowing joins or starts an asynchronous cache fill. lifetime owns the
 // fill task; ctx only bounds this caller's acquisition wait.
 func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size int64, fill func(context.Context, io.Writer) error) (*GrowingHandle, error) {
+	return c.acquireGrowing(ctx, lifetime, key, size, fill, false)
+}
+
+// AcquireGrowingRetained is for bounded shared objects whose remaining bytes
+// are worth keeping after a short read. Unlike AcquireGrowing, the fill survives
+// its last handle closing. The caller must bound size and fill duration; lifetime
+// and Cache.Close still cancel it. Unvalidated results are never published.
+func (c *Cache) AcquireGrowingRetained(ctx, lifetime context.Context, key string, size int64, fill func(context.Context, io.Writer) error) (*GrowingHandle, error) {
+	return c.acquireGrowing(ctx, lifetime, key, size, fill, true)
+}
+
+func (c *Cache) acquireGrowing(ctx, lifetime context.Context, key string, size int64, fill func(context.Context, io.Writer) error, retain bool) (*GrowingHandle, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -134,6 +147,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 				return nil, err
 			}
 			f.refs++
+			f.retain = f.retain || retain
 			reader := &GrowingHandle{flight: f, file: file, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}
 			f.mu.Unlock()
 			c.mu.Unlock()
@@ -164,7 +178,7 @@ func (c *Cache) AcquireGrowing(ctx, lifetime context.Context, key string, size i
 		}
 		fillCtx, cancel := context.WithCancel(lifetime)
 		class := foregroundClass(workqueue.IsBackground(ctx))
-		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: c.filename(key, class), size: size, class: class, refs: 1, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
+		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: c.filename(key, class), size: size, class: class, refs: 1, retain: retain, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
 		c.growing[id] = f
 		c.reserved += size
 		reader := &GrowingHandle{flight: f, file: readerFile, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}
@@ -199,7 +213,7 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 		err = ErrClosed
 	}
 	f.mu.Lock()
-	if err == nil && f.refs == 0 {
+	if err == nil && f.refs == 0 && !f.retain {
 		err = context.Canceled
 	}
 	f.mu.Unlock()
@@ -261,7 +275,7 @@ func (f *growingFlight) release() {
 		if entry := c.entries[f.id]; entry != nil && entry.pins > 0 {
 			entry.pins--
 		}
-	} else if f.state == growingRunning && f.refs == 0 {
+	} else if f.state == growingRunning && f.refs == 0 && !f.retain {
 		f.cancel()
 	}
 	f.mu.Unlock()
