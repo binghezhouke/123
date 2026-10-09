@@ -15,17 +15,16 @@ import (
 )
 
 type volumeReaderAt struct {
-	mu      sync.Mutex
-	owner   *Tree
-	parts   []panapi.File
-	ctx     context.Context
-	sources []*storage.Remote
-	sizes   []int64
+	mu           sync.Mutex
+	owner        *Tree
+	parts        []panapi.File
+	ctx          context.Context
+	sources      []*storage.Remote
+	sizes        []int64
+	initializing map[int]chan struct{}
 }
 
 func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -42,16 +41,11 @@ func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		if amount > size-off {
 			amount = size - off
 		}
-		if r.sources[i] == nil {
-			f := r.parts[i]
-			src, err := storage.NewRemoteContext(r.owner.ctx, r.ctx, r.owner.cache, r.owner.cloudCacheKey(&f), f.Size,
-				func(ctx context.Context) (string, error) { return r.owner.api.DownloadURL(ctx, f.ID) })
-			if err != nil {
-				return total, err
-			}
-			r.sources[i] = src
+		source, err := r.sourceAt(r.ctx, i)
+		if err != nil {
+			return total, err
 		}
-		n, err := r.sources[i].ReadAtContext(r.ctx, p[:amount], off)
+		n, err := source.ReadAtContext(r.ctx, p[:amount], off)
 		total += n
 		p = p[n:]
 		if err != nil && !(err == io.EOF && int64(n) == amount) {
@@ -66,6 +60,44 @@ func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		off = 0
 	}
 	return total, io.EOF
+}
+
+// Only source initialization is coalesced. Network reads never hold the volume
+// mutex, so independent packed inputs and following windows can run in parallel.
+func (r *volumeReaderAt) sourceAt(ctx context.Context, index int) (*storage.Remote, error) {
+	for {
+		r.mu.Lock()
+		if source := r.sources[index]; source != nil {
+			r.mu.Unlock()
+			return source, nil
+		}
+		if pending := r.initializing[index]; pending != nil {
+			r.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-pending:
+			}
+			continue
+		}
+		if r.initializing == nil {
+			r.initializing = make(map[int]chan struct{})
+		}
+		pending := make(chan struct{})
+		r.initializing[index] = pending
+		r.mu.Unlock()
+		f := r.parts[index]
+		source, err := storage.NewRemoteContext(r.owner.ctx, ctx, r.owner.cache, r.owner.cloudCacheKey(&f), f.Size,
+			func(ctx context.Context) (string, error) { return r.owner.api.DownloadURL(ctx, f.ID) })
+		r.mu.Lock()
+		if err == nil {
+			r.sources[index] = source
+		}
+		delete(r.initializing, index)
+		close(pending)
+		r.mu.Unlock()
+		return source, err
+	}
 }
 
 func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *archiveDescriptor) (io.ReaderAt, int64, string, error) {

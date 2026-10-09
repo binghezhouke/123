@@ -128,12 +128,25 @@ func (t *Tree) acquireSolid7z(ctx context.Context, source *storage.Remote, a *ar
 		if !ok || f.Stream != location.Stream || offset != location.Offset || f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc {
 			return syscall.ESTALE
 		}
-		rc, err := zr.OpenStream(location.Stream)
+		ranges, err := zr.PackedRanges(location.Stream)
+		if err != nil {
+			return archiveReadError(fillCtx, err, password)
+		}
+		packed := newPacked7zReader(fillCtx, reader, ranges, t.cache.Capacity())
+		body := reader
+		if packed != nil {
+			defer packed.Close()
+			body = packed
+		}
+		rc, err := zr.OpenStreamWithReader(location.Stream, body)
 		if err != nil {
 			return archiveReadError(fillCtx, err, password)
 		}
 		err = copyValidated7zStream(fillCtx, zr, location.Stream, location.Size, rc, w)
 		err = errors.Join(err, rc.Close())
+		if err == nil && packed != nil {
+			err = packed.Finish()
+		}
 		return archiveReadError(fillCtx, err, password)
 	})
 }

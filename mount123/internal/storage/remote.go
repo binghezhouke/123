@@ -733,6 +733,9 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 			if beginErr != nil {
 				return read, beginErr
 			}
+			if window := rangeWindowOwner(ctx); window != nil {
+				window.trackFlight(flight)
+			}
 			if owner {
 				go r.runRangeFlight(flight)
 			}
@@ -743,7 +746,9 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 				got, readErr := flight.progress.copyAvailable(ctx, p[start:start+int(coveredEnd-pos)], pos)
 				if got > 0 {
 					if !workqueue.IsBackground(ctx) {
-						flight.progress.retainTask()
+						if rangeWindowOwner(ctx) == nil {
+							flight.progress.retainTask()
+						}
 						flight.progress.consume(r.cache, pos, pos+int64(got))
 					}
 					pos += int64(got)
