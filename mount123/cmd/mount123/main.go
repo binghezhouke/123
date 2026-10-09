@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -50,6 +51,10 @@ func main() {
 	}
 }
 func run() error {
+	if len(os.Args) == 1 || (len(os.Args) > 1 && os.Args[1] == "help") {
+		printUsage(os.Stdout)
+		return nil
+	}
 	if len(os.Args) > 1 && os.Args[1] == "unlock" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -64,6 +69,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	flag.Usage = func() { printUsage(os.Stderr) }
 	configPath := flag.String("config", "config.json", "existing application config JSON (CLIENT_ID / CLIENT_SECRET)")
 	mountpoint := flag.String("mountpoint", "", "empty local directory to mount")
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
@@ -223,4 +229,26 @@ func run() error {
 			return nil
 		}
 	}
+}
+
+func printUsage(w io.Writer) {
+	_, _ = fmt.Fprintln(w, "Usage: mount123 [mount flags]")
+	_, _ = fmt.Fprintln(w, "       mount123 <command> [flags]")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Commands:")
+	_, _ = fmt.Fprintln(w, "  status       query an archive index")
+	_, _ = fmt.Fprintln(w, "  wait-index   wait for an archive index to finish")
+	_, _ = fmt.Fprintln(w, "  refresh      refresh one cloud directory")
+	_, _ = fmt.Fprintln(w, "  doctor       diagnose a mounted path")
+	_, _ = fmt.Fprintln(w, "  io-stats     print I/O counters")
+	_, _ = fmt.Fprintln(w, "  unlock       set a ZIP/7z/RAR password from a mounted path")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Read-only directory controls (hidden from ls/find):")
+	_, _ = fmt.Fprintln(w, "  .mount123-refresh       read to refresh the current cloud directory")
+	_, _ = fmt.Fprintln(w, "  .mount123-probe         read to detect renamed archives in one level")
+	_, _ = fmt.Fprintln(w, "  .mount123-probe-status  read to query the last probe without starting one")
+	_, _ = fmt.Fprintln(w)
+	_, _ = fmt.Fprintln(w, "Use 'mount123 <command> -h' for command flags. See mount123/README.md for limits and examples.")
+	_, _ = fmt.Fprintln(w)
+	flag.PrintDefaults()
 }

@@ -3,10 +3,21 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
 )
+
+func TestHelpDocumentsHiddenDirectoryControls(t *testing.T) {
+	var output bytes.Buffer
+	printUsage(&output)
+	for _, name := range []string{".mount123-refresh", ".mount123-probe", ".mount123-probe-status"} {
+		if !bytes.Contains(output.Bytes(), []byte(name)) {
+			t.Fatalf("help output does not mention %s: %s", name, output.String())
+		}
+	}
+}
 
 func TestOpenCacheDurabilityModes(t *testing.T) {
 	root := t.TempDir()
