@@ -140,57 +140,31 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 	if !ok {
 		return nil, syscall.EACCES
 	}
-	directory, err := t.cloudDirectory(ctx, archive.parentID)
+	found, key, err := t.findArchivePassword(ctx, archive)
 	if err != nil {
 		return nil, err
 	}
-	// Tie password discovery to the immutable parent listing it inspected.
-	// A refresh can then install a new flight without waiting for or accepting
-	// a result built from the previous directory snapshot.
-	key := fmt.Sprintf("password:%d:%s:%d:%d:%s:g%d", archive.id, archive.version, archive.size, archive.parentID, archive.name, directory.generation)
 	value, err := t.loadRefreshingMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
-		wanted := archive.name + ".pwd"
-		if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {
-			wanted = archive.name[:len(archive.name)-4] + ".pwd"
-		}
-		var found *struct {
-			id   int64
-			size int64
-		}
-		for _, f := range directory.files {
-			if f.Name == wanted && !f.IsDir {
-				if found != nil {
-					return nil, 0, syscall.EACCES
-				}
-				found = &struct {
-					id   int64
-					size int64
-				}{f.ID, f.Size}
-			}
-		}
 		if found == nil {
-			protected, err := t.encryptPassword(key, nil)
-			return protected, int64(4096 + len(key)), err
+			protected, e := t.encryptPassword(key, nil)
+			return protected, int64(4096 + len(key)), e
 		}
 		if found.size <= 0 || found.size > maxPasswordBytes {
 			return nil, 0, syscall.EACCES
 		}
-		raw, err := api.ReadSmallFile(ctx, found.id, maxPasswordBytes)
-		if err != nil {
-			return nil, 0, err
+		raw, e := api.ReadSmallFile(ctx, found.id, maxPasswordBytes)
+		if e != nil {
+			return nil, 0, e
 		}
 		defer clear(raw)
-		if len(raw) > maxPasswordBytes {
-			return nil, 0, syscall.EACCES
-		}
-		password, err := normalizedPassword(raw)
-		if err != nil || len(password) == 0 {
+		password, e := normalizedPassword(raw)
+		if e != nil || len(password) == 0 {
 			return nil, 0, syscall.EACCES
 		}
 		defer clear(password)
-		protected, err := t.encryptPassword(key, password)
-		if err != nil {
-			return nil, 0, err
+		protected, e := t.encryptPassword(key, password)
+		if e != nil {
+			return nil, 0, e
 		}
 		return protected, int64(4096 + len(key) + len(protected.ciphertext)), nil
 	})
@@ -206,6 +180,70 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 		return nil, syscall.EACCES
 	}
 	return password, nil
+}
+
+type archivePasswordFile struct {
+	id, size int64
+	version  string
+}
+
+// findArchivePassword checks the archive sidecar in its own directory, then
+// walks parent directories for the nearest .mount123.pwd file. Directory
+// snapshots are shared through cloudDirectory, so repeated lookups are cheap.
+func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescriptor) (*archivePasswordFile, string, error) {
+	dirID := archive.parentID
+	var ownName = archive.name + ".pwd"
+	if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {
+		ownName = archive.name[:len(archive.name)-4] + ".pwd"
+	}
+	for level := 0; level < 128; level++ {
+		directory, err := t.cloudDirectory(ctx, dirID)
+		if err != nil {
+			return nil, "", err
+		}
+		var shared *archivePasswordFile
+		var own *archivePasswordFile
+		for _, f := range directory.files {
+			if f.IsDir {
+				continue
+			}
+			if f.Name == ownName && level == 0 {
+				if own != nil {
+					return nil, "", syscall.EACCES
+				}
+				own = &archivePasswordFile{f.ID, f.Size, f.Version}
+			}
+			if f.Name == ".mount123.pwd" {
+				if shared != nil {
+					return nil, "", syscall.EACCES
+				}
+				shared = &archivePasswordFile{f.ID, f.Size, f.Version}
+			}
+		}
+		if own != nil {
+			return own, fmt.Sprintf("password:%d:%s:%d:%d:%s:sidecar:%d:%s", archive.id, archive.version, archive.size, dirID, archive.name, own.id, own.version), nil
+		}
+		if shared != nil {
+			return shared, fmt.Sprintf("password:%d:%s:%d:shared:%d:%s:g%d", archive.id, archive.version, archive.size, shared.id, shared.version, directory.generation), nil
+		}
+		if dirID == 0 {
+			break
+		}
+		meta, ok := t.api.(MetadataAPI)
+		if !ok {
+			break
+		}
+		parent, err := meta.Detail(ctx, dirID)
+		if err != nil {
+			break
+		}
+		if parent.ParentID == dirID {
+			break
+		}
+		dirID = parent.ParentID
+	}
+	key := fmt.Sprintf("password:%d:%s:%d:missing", archive.id, archive.version, archive.size)
+	return nil, key, nil
 }
 
 func (t *Tree) diskCacheScope() string {

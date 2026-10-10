@@ -125,3 +125,39 @@ func TestZIPLookupBuildsOnlyRequestedEntry(t *testing.T) {
 		t.Fatalf("lookupEntries() returned %d entries, want only target.txt", len(entries))
 	}
 }
+
+func TestArchivePasswordFindsNearestAncestorSharedPassword(t *testing.T) {
+	api := &recursivePasswordAPI{lists: map[int64][]panapi.File{
+		7: {{ID: 70, ParentID: 7, Name: "archive.7z", Size: 10, Version: "a"}},
+		3: {{ID: 31, ParentID: 3, Name: ".mount123.pwd", Size: 6, Version: "shared-v1"}},
+		0: {{ID: 1, ParentID: 0, Name: ".mount123.pwd", Size: 6, Version: "root-v1"}},
+	}, details: map[int64]panapi.File{7: {ID: 7, ParentID: 3, IsDir: true}, 3: {ID: 3, ParentID: 0, IsDir: true}}}
+	root := NewWithOptions(context.Background(), api, nil, 0, true, Options{})
+	found, key, ferr := root.tree.findArchivePassword(context.Background(), &archiveDescriptor{id: 70, parentID: 7, name: "archive.7z", version: "a", size: 10})
+	if ferr != nil || found == nil {
+		t.Fatalf("found=%#v key=%q err=%v", found, key, ferr)
+	}
+	pw, err := root.tree.archivePassword(context.Background(), &archiveDescriptor{id: 70, parentID: 7, name: "archive.7z", version: "a", size: 10})
+	if err != nil || string(pw) != "secret" {
+		t.Fatalf("password=%q err=%v", pw, err)
+	}
+}
+
+type recursivePasswordAPI struct {
+	lists   map[int64][]panapi.File
+	details map[int64]panapi.File
+}
+
+func (a *recursivePasswordAPI) List(_ context.Context, id int64) ([]panapi.File, error) {
+	return append([]panapi.File(nil), a.lists[id]...), nil
+}
+func (a *recursivePasswordAPI) DownloadURL(context.Context, int64) (string, error) { return "", nil }
+func (a *recursivePasswordAPI) ReadSmallFile(context.Context, int64, int64) ([]byte, error) {
+	return []byte("secret\n"), nil
+}
+func (a *recursivePasswordAPI) Infos(context.Context, []int64) ([]panapi.File, error) {
+	return nil, nil
+}
+func (a *recursivePasswordAPI) Detail(_ context.Context, id int64) (panapi.File, error) {
+	return a.details[id], nil
+}
