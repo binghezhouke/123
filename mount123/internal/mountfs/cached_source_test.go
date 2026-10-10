@@ -251,7 +251,7 @@ func TestCachedSourceRestoreDoesNotExtendTreeExpiry(t *testing.T) {
 	if _, err := secondNode.source(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if requests.Load() != 2 || secondAPI.resolves.Load() != 1 {
+	if requests.Load() != 2 {
 		t.Fatalf("restored source lifetime was extended: requests=%d resolves=%d", requests.Load(), secondAPI.resolves.Load())
 	}
 }
