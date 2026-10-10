@@ -1347,7 +1347,7 @@ func (n *Node) acquireGrowingMember(ctx context.Context, key string, size uint64
 	if workqueue.IsBackground(ctx) {
 		lifetime = workqueue.Background(lifetime)
 	}
-	h, err := n.tree.cache.AcquireGrowing(ctx, lifetime, key, int64(size), fill)
+	h, err := n.tree.cache.AcquireGrowingRetained(ctx, lifetime, key, int64(size), fill)
 	return h, err
 }
 
