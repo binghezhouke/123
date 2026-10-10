@@ -2,6 +2,8 @@ package mountfs
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 	"github.com/hanwen/go-fuse/v2/fs"
+	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
 type scanTestClock struct{ now time.Time }
@@ -210,5 +213,107 @@ func TestSheddingDemotesProbeAndBackgroundBuildCapacity(t *testing.T) {
 		release()
 	case <-time.After(time.Second):
 		t.Fatal("background builds did not resume after the share was released")
+	}
+}
+
+// concurrentScanClock is shared by the loader goroutines and the guard, so the
+// sampled rate follows the real request stream rather than a scripted one.
+type concurrentScanClock struct{ nanos atomic.Int64 }
+
+func (c *concurrentScanClock) now() time.Time { return time.Unix(0, c.nanos.Load()) }
+
+func (c *concurrentScanClock) advance(d time.Duration) { c.nanos.Add(int64(d)) }
+
+func TestConcurrentScanShedsAndRecoversUnderLoad(t *testing.T) {
+	root, _ := fixture(t)
+	fs.NewNodeFS(root, &fs.Options{}) // Lookup needs an inode bridge.
+	root.tree.prefetch = newImagePrefetch(root.tree)
+	clock := &concurrentScanClock{}
+	root.tree.scan.now = clock.now
+
+	entries, err := root.list(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	folder := &Node{tree: root.tree, item: entries["folder"], parent: root}
+	children, err := folder.list(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := &Node{tree: root.tree, item: children["plain.txt"], parent: folder}
+
+	stop := make(chan struct{})
+	var once sync.Once
+	stopAll := func() { once.Do(func() { close(stop) }) }
+	defer stopAll()
+
+	var loaders sync.WaitGroup
+	for worker := 0; worker < 6; worker++ {
+		loaders.Add(1)
+		go func() {
+			defer loaders.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, errno := root.Lookup(context.Background(), "folder", &fuse.EntryOut{}); errno != 0 {
+					return
+				}
+				if _, errno := root.Readdir(context.Background()); errno != 0 {
+					return
+				}
+			}
+		}()
+	}
+	var ticker sync.WaitGroup
+	ticker.Add(1)
+	go func() {
+		defer ticker.Done()
+		t := time.NewTicker(20 * time.Millisecond)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				clock.advance(scanSampleInterval)
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !root.tree.scanShedding() {
+		if time.Now().After(deadline) {
+			t.Fatalf("concurrent scan did not start shedding: %+v", root.IOStats().Scan)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// A user action during the scan still succeeds and is not rejected.
+	handle, _, errno := file.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("open during a concurrent scan = %v, want success", errno)
+	}
+	_ = handle.(fs.FileReleaser).Release(context.Background())
+	if got := root.ImagePrefetchStats().Planned; got != 0 {
+		t.Fatalf("image prefetch ran during a scan: %d", got)
+	}
+
+	// Recovery is observed on the request path, so stop the scan and drive a
+	// trickle of ordinary browsing traffic.
+	stopAll()
+	loaders.Wait()
+	ticker.Wait()
+	for i := 0; i < scanExitWindows+3; i++ {
+		for j := 0; j < 10; j++ {
+			root.tree.beginOperation(context.Background(), iostats.OperationLookup)()
+		}
+		clock.advance(scanSampleInterval)
+		root.tree.observeScan()
+	}
+	if root.tree.scanShedding() {
+		t.Fatalf("shedding did not recover after the scan stopped: %+v", root.IOStats().Scan)
 	}
 }
