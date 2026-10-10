@@ -237,7 +237,7 @@ func TestRemoteCacheStatsSeparateForegroundBackgroundAndMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitUntil(t, time.Second, func() bool {
-		return c.Stats().Entries == 1 && c.DownloadStats().ActiveRequests == 0
+		return len(c.missingRanges(r.rangeID, 2, 12)) == 0 && c.DownloadStats().ActiveRequests == 0
 	})
 	if _, err := r.ReadAtContext(context.Background(), buf, 2); err != nil {
 		t.Fatal(err)
