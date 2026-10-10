@@ -470,3 +470,68 @@ func TestCachedRemoteRejectsInvalidLastModified(t *testing.T) {
 		t.Fatalf("invalid Last-Modified was cached: requests before=%d after=%d", before, requests.Load())
 	}
 }
+
+func TestRemoteWithoutValidatorNeverReusesPersistentRanges(t *testing.T) {
+	var current atomic.Value
+	current.Store([]byte("first content"))
+	var probes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		probes.Add(1)
+		data := current.Load().([]byte)
+		var start, end int64
+		if _, err := fmt.Sscanf(req.Header.Get("Range"), "bytes=%d-%d", &start, &end); err != nil {
+			http.Error(w, "bad range", http.StatusBadRequest)
+			return
+		}
+		if end >= int64(len(data)) {
+			end = int64(len(data)) - 1
+		}
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.Header().Set("Content-Length", fmt.Sprint(end-start+1))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(data[start : end+1])
+	}))
+	defer server.Close()
+	resolve := func(context.Context) (string, error) { return server.URL, nil }
+	dir := t.TempDir()
+	firstCache, err := NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := NewRemoteContext(context.Background(), context.Background(), firstCache, "unvalidated", int64(len("first content")), resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, len("first content"))
+	if _, err := first.ReadRangeAtContext(context.Background(), buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "first content" {
+		t.Fatalf("first read = %q", buf)
+	}
+	firstKey := first.Key()
+	if err := firstCache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	current.Store([]byte("newer content"))
+	secondCache, err := NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondCache.Close()
+	second, err := NewRemoteContext(context.Background(), context.Background(), secondCache, "unvalidated", int64(len("newer content")), resolve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Key() == firstKey {
+		t.Fatal("unvalidated remote reused a persistent cache namespace")
+	}
+	buf = make([]byte, len("newer content"))
+	if _, err := second.ReadRangeAtContext(context.Background(), buf, 0); err != nil {
+		t.Fatal(err)
+	}
+	if string(buf) != "newer content" {
+		t.Fatalf("second read reused stale bytes: %q", buf)
+	}
+}

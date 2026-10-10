@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 )
@@ -16,6 +17,31 @@ type cachedLink struct {
 	until time.Time
 }
 
+type persistedLink struct {
+	URL   string    `json:"url"`
+	Until time.Time `json:"until"`
+}
+
+func linkCacheKey(key string) string { return "download-link-v1:" + key }
+
+func (c *Cache) loadLink(key string) (cachedLink, bool) {
+	h, err := c.OpenArchiveIndex(linkCacheKey(key))
+	if err != nil {
+		return cachedLink{}, false
+	}
+	defer h.Close()
+	b := make([]byte, h.Size())
+	_, err = h.ReadAt(b, 0)
+	if err != nil {
+		return cachedLink{}, false
+	}
+	var p persistedLink
+	if json.Unmarshal(b, &p) != nil || p.URL == "" || time.Now().After(p.Until) {
+		return cachedLink{}, false
+	}
+	return cachedLink{url: p.URL, until: p.Until}, true
+}
+
 // rejected invalidates only the URL that actually failed. Concurrent refreshes
 // share one resolver call; a recreated Remote inherits the original deadline.
 func (c *Cache) downloadLink(ctx context.Context, key, rejected string, resolve ResolveURL) (cachedLink, error) {
@@ -23,6 +49,8 @@ func (c *Cache) downloadLink(ctx context.Context, key, rejected string, resolve 
 		if err := ctx.Err(); err != nil {
 			return cachedLink{}, err
 		}
+		var disk cachedLink
+		var diskOK bool
 		c.mu.Lock()
 		if c.closed {
 			c.mu.Unlock()
@@ -31,6 +59,14 @@ func (c *Cache) downloadLink(ctx context.Context, key, rejected string, resolve 
 		if c.links == nil {
 			c.links = map[string]cachedLink{}
 			c.linkFlights = map[string]chan struct{}{}
+		}
+		if _, ok := c.links[key]; !ok {
+			c.mu.Unlock()
+			disk, diskOK = c.loadLink(key)
+			c.mu.Lock()
+			if diskOK {
+				c.links[key] = disk
+			}
 		}
 		if link, ok := c.links[key]; ok && link.url != rejected && time.Now().Before(link.until) {
 			c.mu.Unlock()
@@ -62,6 +98,7 @@ func (c *Cache) downloadLink(ctx context.Context, key, rejected string, resolve 
 		}
 		link := cachedLink{url: url, until: started.Add(downloadLinkTTL)}
 		c.mu.Lock()
+		persist := false
 		if err == nil && !c.closed {
 			if len(c.links) >= maxCachedLinks {
 				var oldest string
@@ -74,10 +111,15 @@ func (c *Cache) downloadLink(ctx context.Context, key, rejected string, resolve 
 				delete(c.links, oldest)
 			}
 			c.links[key] = link
+			persist = true
 		}
 		delete(c.linkFlights, key)
 		close(pending)
 		c.mu.Unlock()
+		if persist {
+			data, _ := json.Marshal(persistedLink{URL: link.url, Until: link.until})
+			_ = c.ReplaceArchiveIndex(context.Background(), linkCacheKey(key), data)
+		}
 		return link, err
 	}
 }

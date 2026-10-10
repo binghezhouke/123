@@ -145,3 +145,34 @@ func TestRedirectEndpointReusedAndExpiredEndpointRefreshesResolver(t *testing.T)
 		t.Fatal("expired CDN endpoint did not refresh API link")
 	}
 }
+
+func TestDownloadLinkPersistsAcrossCacheRestart(t *testing.T) {
+	dir := t.TempDir()
+	c, err := NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	resolve := func(context.Context) (string, error) {
+		calls.Add(1)
+		return "https://example.invalid/file?sig=one", nil
+	}
+	got, err := c.downloadLink(context.Background(), "file:42", "", resolve)
+	if err != nil || got.url == "" {
+		t.Fatalf("first resolve: %#v %v", got, err)
+	}
+	c.Close()
+	time.Sleep(50 * time.Millisecond)
+	c2, err := NewCache(dir, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c2.Close()
+	got, err = c2.downloadLink(context.Background(), "file:42", "", func(context.Context) (string, error) { calls.Add(1); return "wrong", nil })
+	if err != nil || got.url != "https://example.invalid/file?sig=one" {
+		t.Fatalf("restored link: %#v %v", got, err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("resolver calls=%d", calls.Load())
+	}
+}
