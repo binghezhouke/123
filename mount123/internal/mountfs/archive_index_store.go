@@ -94,6 +94,11 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 		_ = t.cache.Remove(cacheKey)
 		return nil, false
 	}
+	// Older completed indexes predate the completion marker; only the
+	// checkpoint namespace is allowed to represent an incomplete prefix.
+	if !strings.HasSuffix(cacheKey, ":checkpoint") {
+		dto.Complete = true
+	}
 	idx, err := t.indexFromDTO(ctx, kind, dto, size)
 	if err != nil {
 		_ = t.cache.Remove(cacheKey)
