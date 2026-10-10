@@ -410,7 +410,14 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		idx.mu.Unlock()
 		if err != nil {
 			if a.kind() == ".rar" {
-				t.persistArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest, idx, 0)
+				// indexProgressReaderAt continuously records the highest byte
+				// fetched. Preserve that evidence with the verified prefix; a
+				// cancelled scan must never write a fabricated zero offset.
+				offset := int64(0)
+				if status, _ := t.indexStatuses.snapshot(statusKey); status.ScanOffset > 0 {
+					offset = status.ScanOffset
+				}
+				t.persistArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest, idx, offset)
 			}
 			failure := failedArchiveStatus(size, archiveReadError(ctx, err, password))
 			failure.Members = entries
