@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -127,7 +126,7 @@ func TestZIPLookupBuildsOnlyRequestedEntry(t *testing.T) {
 	}
 }
 
-func TestArchivePasswordDoesNotInheritAncestorSharedPassword(t *testing.T) {
+func TestArchivePasswordFindsNearestAncestorSharedPassword(t *testing.T) {
 	api := &recursivePasswordAPI{lists: map[int64][]panapi.File{
 		7: {{ID: 70, ParentID: 7, Name: "archive.7z", Size: 10, Version: "a"}},
 		3: {{ID: 31, ParentID: 3, Name: ".mount123.pwd", Size: 6, Version: "shared-v1"}},
@@ -135,11 +134,12 @@ func TestArchivePasswordDoesNotInheritAncestorSharedPassword(t *testing.T) {
 	}, details: map[int64]panapi.File{7: {ID: 7, ParentID: 3, IsDir: true}, 3: {ID: 3, ParentID: 0, IsDir: true}}}
 	root := NewWithOptions(context.Background(), api, nil, 0, true, Options{})
 	found, key, ferr := root.tree.findArchivePassword(context.Background(), &archiveDescriptor{id: 70, parentID: 7, name: "archive.7z", version: "a", size: 10})
-	if ferr != nil || found != nil || !strings.Contains(key, ":missing") {
+	if ferr != nil || found == nil {
 		t.Fatalf("found=%#v key=%q err=%v", found, key, ferr)
 	}
-	if found, _, err := root.tree.findArchivePassword(context.Background(), &archiveDescriptor{id: 70, parentID: 3, name: "archive.7z", version: "a", size: 10}); err != nil || found == nil {
-		t.Fatalf("same-directory shared password not found: found=%#v err=%v", found, err)
+	pw, err := root.tree.archivePassword(context.Background(), &archiveDescriptor{id: 70, parentID: 7, name: "archive.7z", version: "a", size: 10})
+	if err != nil || string(pw) != "secret" {
+		t.Fatalf("password=%q err=%v", pw, err)
 	}
 }
 

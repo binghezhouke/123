@@ -187,44 +187,57 @@ type archivePasswordFile struct {
 	version  string
 }
 
-// findArchivePassword checks the archive sidecar and the directory-wide
-// password file in the archive's own directory. Shared passwords deliberately
-// do not cross directory boundaries: a .mount123.pwd never affects a parent
-// or child directory.
+// findArchivePassword checks the archive sidecar in its own directory, then
+// walks parent directories for the nearest .mount123.pwd file. Directory
+// snapshots are shared through cloudDirectory, so repeated lookups are cheap.
 func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescriptor) (*archivePasswordFile, string, error) {
 	dirID := archive.parentID
 	var ownName = archive.name + ".pwd"
 	if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {
 		ownName = archive.name[:len(archive.name)-4] + ".pwd"
 	}
-	directory, err := t.cloudDirectory(ctx, dirID)
-	if err != nil {
-		return nil, "", err
-	}
-	var shared *archivePasswordFile
-	var own *archivePasswordFile
-	for _, f := range directory.files {
-		if f.IsDir {
-			continue
+	for level := 0; level < 128; level++ {
+		directory, err := t.cloudDirectory(ctx, dirID)
+		if err != nil {
+			return nil, "", err
 		}
-		if f.Name == ownName {
-			if own != nil {
-				return nil, "", syscall.EACCES
+		var shared *archivePasswordFile
+		var own *archivePasswordFile
+		for _, f := range directory.files {
+			if f.IsDir {
+				continue
 			}
-			own = &archivePasswordFile{f.ID, f.Size, f.Version}
-		}
-		if f.Name == ".mount123.pwd" {
-			if shared != nil {
-				return nil, "", syscall.EACCES
+			if f.Name == ownName && level == 0 {
+				if own != nil {
+					return nil, "", syscall.EACCES
+				}
+				own = &archivePasswordFile{f.ID, f.Size, f.Version}
 			}
-			shared = &archivePasswordFile{f.ID, f.Size, f.Version}
+			if f.Name == ".mount123.pwd" {
+				if shared != nil {
+					return nil, "", syscall.EACCES
+				}
+				shared = &archivePasswordFile{f.ID, f.Size, f.Version}
+			}
 		}
-	}
-	if own != nil {
-		return own, fmt.Sprintf("password:%d:%s:%d:%d:%s:sidecar:%d:%s", archive.id, archive.version, archive.size, dirID, archive.name, own.id, own.version), nil
-	}
-	if shared != nil {
-		return shared, fmt.Sprintf("password:%d:%s:%d:shared:%d:%s:g%d", archive.id, archive.version, archive.size, shared.id, shared.version, directory.generation), nil
+		if own != nil {
+			return own, fmt.Sprintf("password:%d:%s:%d:%d:%s:sidecar:%d:%s", archive.id, archive.version, archive.size, dirID, archive.name, own.id, own.version), nil
+		}
+		if shared != nil {
+			return shared, fmt.Sprintf("password:%d:%s:%d:shared:%d:%s:g%d", archive.id, archive.version, archive.size, shared.id, shared.version, directory.generation), nil
+		}
+		if dirID == 0 {
+			break
+		}
+		meta, ok := t.api.(MetadataAPI)
+		if !ok {
+			break
+		}
+		parent, err := meta.Detail(ctx, dirID)
+		if err != nil || parent.ParentID == dirID {
+			break
+		}
+		dirID = parent.ParentID
 	}
 	key := fmt.Sprintf("password:%d:%s:%d:missing", archive.id, archive.version, archive.size)
 	return nil, key, nil
