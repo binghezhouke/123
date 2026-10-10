@@ -244,13 +244,14 @@ func (n *Node) startArchiveProbe(ctx context.Context) (ArchiveProbeStatus, error
 		t.probeMu.Unlock()
 		return status, nil
 	}
-	if t.probeActive >= 2 {
+	limit := t.probeConcurrency()
+	if t.probeActive >= limit {
 		t.probeMu.Unlock()
 		return ArchiveProbeStatus{}, syscall.EAGAIN
 	}
 	if t.probeJobs == nil {
 		t.probeJobs = make(map[int64]*archiveProbeJob)
-		t.probeGate = make(chan struct{}, 2)
+		t.probeGate = make(chan struct{}, probeMaxConcurrency)
 	}
 	if len(t.probeJobs) >= 8 {
 		for id, old := range t.probeJobs {
@@ -304,7 +305,7 @@ func (n *Node) runArchiveProbe(job *archiveProbeJob) {
 	results := make([]archiveProbeResult, len(candidates))
 	var workers sync.WaitGroup
 	items := make(chan int)
-	for worker := 0; worker < 2; worker++ {
+	for worker := 0; worker < t.probeConcurrency(); worker++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()

@@ -180,6 +180,11 @@ func (p *imagePrefetch) foreground(n *Node) func() {
 }
 
 func (p *imagePrefetch) observe(n *Node) {
+	// A bulk metadata scan keeps the read path busy with work the user asked
+	// for; speculative image windows wait until traffic returns to normal.
+	if p.tree.scanShedding() {
+		return
+	}
 	p.mu.Lock()
 	if p.active > 0 {
 		p.mu.Unlock()

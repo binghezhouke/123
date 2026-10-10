@@ -16,11 +16,22 @@ type cacheTelemetry struct {
 	fillErrors            uint64
 	existingFillWaits     uint64
 	classes               [cacheClassCount]cacheClassTelemetry
+	indexKinds            [indexKindCount]cacheIndexKindTelemetry
 	rangeReads            [2]cacheRangeTelemetry
 	refaults              iostats.CacheRefaultSummary
 }
 
 type cacheClassTelemetry struct {
+	capacityEvictions     uint64
+	capacityEvictionBytes int64
+}
+
+// cacheIndexKindTelemetry counts how often a protected object of one family
+// left the index share. Demotions are the documented response to an exhausted
+// budget; capacity evictions are the last resort when nothing else remains.
+type cacheIndexKindTelemetry struct {
+	demotions             uint64
+	demotionBytes         int64
 	capacityEvictions     uint64
 	capacityEvictionBytes int64
 }
@@ -71,6 +82,7 @@ func (c *Cache) Stats() iostats.CacheSummary {
 		ExistingFillWaits:     c.telemetry.existingFillWaits,
 		Refaults:              c.telemetry.refaults,
 		Classes:               make([]iostats.CacheClassSummary, cacheClassCount),
+		IndexKinds:            make([]iostats.CacheIndexKindSummary, indexKindCount),
 	}
 	for class := cacheClass(0); class <= cacheIndex; class++ {
 		counter := c.telemetry.classes[class]
@@ -92,6 +104,22 @@ func (c *Cache) Stats() iostats.CacheSummary {
 			classSummary.PinnedBytes += entry.size
 			summary.PinnedBytes += entry.size
 		}
+		if entry.class == cacheIndex && entry.kind < indexKindCount {
+			kindSummary := &summary.IndexKinds[entry.kind]
+			kindSummary.Entries++
+			kindSummary.Bytes += entry.size
+			if entry.pins > 0 {
+				kindSummary.PinnedBytes += entry.size
+			}
+		}
+	}
+	for kind := indexKind(0); kind < indexKindCount; kind++ {
+		counter := c.telemetry.indexKinds[kind]
+		summary.IndexKinds[kind].Kind = kind.name()
+		summary.IndexKinds[kind].Demotions = counter.demotions
+		summary.IndexKinds[kind].DemotionBytes = counter.demotionBytes
+		summary.IndexKinds[kind].CapacityEvictions = counter.capacityEvictions
+		summary.IndexKinds[kind].CapacityEvictionBytes = counter.capacityEvictionBytes
 	}
 	summary.Foreground = c.telemetry.rangeReads[0].summary()
 	summary.Background = c.telemetry.rangeReads[1].summary()
@@ -169,7 +197,39 @@ func (c *Cache) recordCapacityEvictionLocked(id string, e *cacheEntry) {
 		counter.capacityEvictions++
 		counter.capacityEvictionBytes += e.size
 	}
+	if e.class == cacheIndex && e.kind < indexKindCount {
+		counter := &c.telemetry.indexKinds[e.kind]
+		counter.capacityEvictions++
+		counter.capacityEvictionBytes += e.size
+	}
 	c.rememberCacheGhostLocked(id, e.size)
+}
+
+// recordIndexDemotionLocked counts a protected object that left the index share
+// because the share was already taken. The object stays cached as ordinary
+// data, so this is a retention downgrade rather than a loss.
+func (c *Cache) recordIndexDemotionLocked(e *cacheEntry) {
+	if !c.statsReady || e.kind >= indexKindCount {
+		return
+	}
+	c.countIndexDemotionLocked(e)
+}
+
+// recordRestoredIndexDemotionLocked counts a demotion performed while opening a
+// persisted cache. It deliberately ignores statsReady so an operator can see
+// that a smaller index budget pushed previously protected objects back to
+// ordinary data.
+func (c *Cache) recordRestoredIndexDemotionLocked(e *cacheEntry) {
+	if e.kind >= indexKindCount {
+		return
+	}
+	c.countIndexDemotionLocked(e)
+}
+
+func (c *Cache) countIndexDemotionLocked(e *cacheEntry) {
+	counter := &c.telemetry.indexKinds[e.kind]
+	counter.demotions++
+	counter.demotionBytes += e.size
 }
 
 func (c *Cache) rememberCacheGhostLocked(id string, size int64) {

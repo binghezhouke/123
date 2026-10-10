@@ -164,7 +164,7 @@ func (c *Cache) ReplaceArchiveIndex(ctx context.Context, key string, data []byte
 			if err == nil {
 				now := time.Now()
 				if old == nil {
-					old = &cacheEntry{path: commitPath, class: newClass, size: size, used: now, lastTouch: now}
+					old = &cacheEntry{path: commitPath, class: newClass, kind: indexKindForKey(key), size: size, used: now, lastTouch: now}
 					old.lru = c.lru[newClass].PushFront(id)
 					c.entries[id] = old
 					c.used += size

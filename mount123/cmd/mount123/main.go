@@ -40,6 +40,25 @@ func openCacheWithDownloadConfig(dir string, maxBytes int64, durability string, 
 	}
 }
 
+// openCacheWithIndexBudget opens a cache with an explicit protected archive
+// index budget. A non-positive budget keeps the cache's own default.
+func openCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, durability string, download storage.DownloadConfig) (*storage.Cache, error) {
+	if indexBudget <= 0 {
+		return openCacheWithDownloadConfig(dir, maxBytes, durability, download)
+	}
+	if indexBudget > maxBytes {
+		return nil, fmt.Errorf("archive index budget must not exceed the cache size")
+	}
+	switch durability {
+	case "durable":
+		return storage.NewCacheWithIndexBudget(dir, maxBytes, indexBudget, download)
+	case "ephemeral":
+		return storage.NewEphemeralCacheWithIndexBudget(dir, maxBytes, indexBudget, download)
+	default:
+		return nil, fmt.Errorf("invalid cache durability: choose durable or ephemeral")
+	}
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Print(err)
@@ -75,6 +94,7 @@ func run() error {
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 50, "maximum disk cache size in GiB")
+	indexBudgetMiB := flag.Int64("index-budget-mib", 0, "protected archive index cache budget in MiB (0 derives it from the cache size)")
 	statsInterval := flag.Duration("stats-interval", 30*time.Second, "append aggregate I/O statistics to io-stats.jsonl (0 disables)")
 	cacheDurability := flag.String("cache-durability", "durable", "cache durability: durable or ephemeral")
 	downloadRequests := flag.Int("download-requests", 32, "maximum simultaneous HTTP range responses")
@@ -86,6 +106,8 @@ func run() error {
 	archiveEntries := flag.Int("archive-max-entries", 100000, "maximum members per archive index")
 	directoryTTL := flag.Duration("directory-ttl", 24*time.Hour, "directory snapshot freshness interval")
 	sourceTTL := flag.Duration("source-ttl", 144*time.Hour, "remote reader reuse interval across opens")
+	entryTTL := flag.Duration("entry-ttl", time.Hour, "kernel positive and negative directory entry cache TTL (0 disables)")
+	attrTTL := flag.Duration("attr-ttl", time.Hour, "kernel file attribute cache TTL (0 disables)")
 	fileInfo := flag.Bool("file-info", false, "refresh metadata for looked-up cloud files (adds a batched API request)")
 	archivePageCache := flag.Bool("archive-page-cache", true, "allow the kernel to cache fully materialized archive members")
 	streamMembers := flag.Bool("stream-members", true, "stream large compressed archive members while they are being verified")
@@ -113,7 +135,7 @@ func run() error {
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
 	}
-	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *statsInterval < 0 {
+	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *indexBudgetMiB < 0 || *indexBudgetMiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *entryTTL < 0 || *attrTTL < 0 || *statsInterval < 0 {
 		return fmt.Errorf("invalid cache size, freshness interval or root ID")
 	}
 	mountAbs, err := filepath.Abs(*mountpoint)
@@ -179,7 +201,7 @@ func run() error {
 		}
 	}
 	downloadConfig := storage.DownloadConfig{MaxRequests: *downloadRequests, MaxInFlightBytes: *downloadBytesMiB << 20, ForegroundReservedBytes: *downloadReserveMiB << 20}
-	cache, err := openCacheWithDownloadConfig(cacheAbs, *cacheGiB<<30, *cacheDurability, downloadConfig)
+	cache, err := openCacheWithIndexBudget(cacheAbs, *cacheGiB<<30, *indexBudgetMiB<<20, *cacheDurability, downloadConfig)
 	if err != nil {
 		return err
 	}
@@ -195,8 +217,7 @@ func run() error {
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}
-	timeout := time.Second
-	server, err := fs.Mount(mountAbs, root, &fs.Options{MountOptions: fuse.MountOptions{Options: []string{"ro", "nodev", "nosuid", "noexec"}, FsName: "123pan", Name: "mount123", DisableXAttrs: true}, EntryTimeout: &timeout, AttrTimeout: &timeout})
+	server, err := fs.Mount(mountAbs, root, &fs.Options{MountOptions: fuse.MountOptions{Options: []string{"ro", "nodev", "nosuid", "noexec"}, FsName: "123pan", Name: "mount123", DisableXAttrs: true}, EntryTimeout: entryTTL, NegativeTimeout: entryTTL, AttrTimeout: attrTTL})
 	if err != nil {
 		return fmt.Errorf("FUSE mount: %w", err)
 	}

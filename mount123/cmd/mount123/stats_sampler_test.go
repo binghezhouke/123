@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -169,17 +170,56 @@ func TestIOStatsControlSamplingCountAndCancellation(t *testing.T) {
 		t.Fatal("interval records must have null first interval and measured second interval")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Millisecond)
+	// Cancel after the first sample arrives instead of racing a wall-clock
+	// deadline: a tight deadline can expire inside a dial and report a socket
+	// timeout rather than the cancellation this test is about.
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	output.Reset()
-	err = runControlCommand(ctx, []string{"io-stats", "-control-socket", socketPath, "-interval", "5ms"}, io.Discard, &output)
+	stream := &pollableBuffer{}
+	done := make(chan error, 1)
+	go func() {
+		done <- runControlCommand(ctx, []string{"io-stats", "-control-socket", socketPath, "-interval", "5ms"}, io.Discard, stream)
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for stream.lines() < 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("continuous io-stats emitted no samples: %s", stream.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
 	var exitErr *commandExitError
-	if !errors.As(err, &exitErr) || exitErr.code != controlExitCanceled {
+	if err := <-done; !errors.As(err, &exitErr) || exitErr.code != controlExitCanceled {
 		t.Fatalf("continuous io-stats cancellation error = %v, want exit code %d", err, controlExitCanceled)
 	}
-	if lines := bytes.Count(output.Bytes(), []byte("\n")); lines < 1 {
-		t.Fatalf("continuous io-stats emitted no samples before cancellation: %s", output.String())
+	if lines := stream.lines(); lines < 1 {
+		t.Fatalf("continuous io-stats emitted no samples before cancellation: %s", stream.String())
 	}
+}
+
+// pollableBuffer lets the test observe sampler output while the command writes
+// it from another goroutine.
+type pollableBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *pollableBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *pollableBuffer) lines() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Count(b.buf.Bytes(), []byte("\n"))
+}
+
+func (b *pollableBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 func mustReadFile(t *testing.T, path string) []byte {

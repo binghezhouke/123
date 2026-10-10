@@ -136,6 +136,7 @@ type Tree struct {
 	builds            chan struct{}
 	buildGate         *workqueue.Gate
 	buildOnce         sync.Once
+	scan              *scanGuard
 	sources           map[string]*sourceCall
 	archiveTasks      map[string]*sourceCall
 	indexStatuses     *indexStatusTracker
@@ -239,11 +240,16 @@ func (n *Node) IOStats() iostats.Snapshot {
 		snapshot.Configuration.ReadAheadMaxBytes = 0
 	}
 	downloads := n.tree.cache.DownloadStats()
-	snapshot.SetDownloadScheduler(downloads.MaxRequests, downloads.MaxInFlightBytes, downloads.ActiveRequests, downloads.ActiveBytes, downloads.AvailableBackgroundBytes, downloads.WaitingForeground, downloads.WaitingBackground)
+	snapshot.SetDownloadScheduler(downloads.MaxRequests, downloads.MaxInFlightBytes, downloads.ActiveRequests, downloads.ActiveBytes, downloads.AvailableBackgroundBytes, downloads.WaitingForeground, downloads.WaitingBackground, downloads.CompletedRequests)
 	snapshot.DownloadScheduler.StagingActiveBytes = downloads.StagingActiveBytes
 	snapshot.DownloadScheduler.StagingPeakBytes = downloads.StagingPeakBytes
 	snapshot.DownloadScheduler.StagingWaitingForeground = downloads.StagingWaitingForeground
 	snapshot.DownloadScheduler.StagingWaitingBackground = downloads.StagingWaitingBackground
+	if gate := n.tree.buildGate; gate != nil {
+		q := gate.Stats()
+		snapshot.SetIndexQueue(q.Limit, q.Active, q.Background, q.Waiting, uint64(q.Requests))
+	}
+	snapshot.SetScan(n.tree.scanState())
 	return snapshot
 }
 
@@ -289,6 +295,7 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 		ctx = context.Background()
 	}
 	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}, indexStatuses: newIndexStatusTracker()}
+	t.scan = newScanGuard(t.applyScanShedding)
 	if identity, ok := api.(interface{ CacheIdentity() string }); ok {
 		t.cacheScope = identity.CacheIdentity()
 		t.cacheScopeStable = t.cacheScope != ""
@@ -1001,6 +1008,7 @@ func modeForEntry(item *entry) uint32 {
 	return fuse.S_IFREG | 0444
 }
 func (n *Node) Getattr(ctx context.Context, fh fs.FileHandle, out *fuse.AttrOut) syscall.Errno {
+	defer n.tree.beginOperation(ctx, iostats.OperationGetattr)()
 	n.getattrEntry(ctx, n.item, out, !n.root)
 	return 0
 }
@@ -1035,6 +1043,7 @@ func (n *Node) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.At
 	return syscall.EROFS
 }
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
+	defer n.tree.beginOperation(ctx, iostats.OperationLookup)()
 	if (name == probeControlName || name == probeStatusControlName) && n.isCloudDirectory() {
 		return n.probeControl(ctx, name, out), 0
 	}
@@ -1127,6 +1136,7 @@ func setFuseTime(seconds *uint64, nanos *uint32, value time.Time) {
 	*nanos = uint32(value.Nanosecond())
 }
 func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
+	defer n.tree.beginOperation(ctx, iostats.OperationReaddir)()
 	entries, err := n.list(ctx)
 	if err != nil {
 		return nil, toErrno(err)
@@ -1147,6 +1157,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	return fs.NewListDirStream(result), 0
 }
 func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	defer n.tree.beginOperation(ctx, iostats.OperationOpen)()
 	started := time.Now()
 	defer n.observeStage(iostats.StageFileOpen, started)
 	if n.tree.prefetch != nil {

@@ -147,3 +147,59 @@ func TestAnalyzeStageDeltasAndLegacyFillOutcomeUnknown(t *testing.T) {
 		t.Fatalf("legacy stage schema was treated as a valid baseline: %+v", r.Stages.BuildQueue)
 	}
 }
+
+func TestAnalyzeReportsWindowedMetadataRates(t *testing.T) {
+	p, c := tuningSamples()
+	p.Readdir = OperationSummary{Status: "measured", Requests: 10, ForegroundRequests: 10}
+	c.Readdir = OperationSummary{Status: "measured", Requests: 40, ForegroundRequests: 34, BackgroundRequests: 6, ActiveForeground: 2, ActiveBackground: 1}
+	p.Lookup = OperationSummary{Status: "measured", Requests: 100, ForegroundRequests: 100}
+	c.Lookup = OperationSummary{Status: "measured", Requests: 400, ForegroundRequests: 400}
+	r := Analyze(p, c)
+	if got := r.Operations.Readdir; got.Status != "measured" || got.Requests != 30 || got.ForegroundRequests != 24 || got.BackgroundRequests != 6 || got.RequestsPerSecond != 1 {
+		t.Fatalf("readdir delta = %+v", got)
+	}
+	if got := r.Operations.Readdir; got.ActiveForeground != 2 || got.ActiveBackground != 1 {
+		t.Fatalf("readdir active gauges = %+v", got)
+	}
+	if got := r.Operations.Lookup; got.Requests != 300 || got.RequestsPerSecond != 10 {
+		t.Fatalf("lookup delta = %+v", got)
+	}
+	if got := r.Operations.Getattr; got.Status != "idle" || got.Requests != 0 {
+		t.Fatalf("idle operation reported activity: %+v", got)
+	}
+	// A counter that moves backwards means the mount restarted: the whole
+	// report is rejected instead of publishing a negative rate.
+	c.Readdir.Requests = 1
+	if r := Analyze(p, c); r.Status != "reset" {
+		t.Fatalf("decreasing operation counter report = %+v", r)
+	}
+}
+
+func TestAnalyzeDistinguishesIdleBrowseAndBulkScanWindows(t *testing.T) {
+	idleStart, idleEnd := tuningSamples()
+	if r := Analyze(idleStart, idleEnd); r.Operations.Readdir.Requests != 0 || r.Operations.Lookup.Requests != 0 || r.Operations.Readdir.RequestsPerSecond != 0 {
+		t.Fatalf("idle window reported activity: %+v", r.Operations)
+	}
+
+	browseStart, browseEnd := tuningSamples()
+	browseEnd.Readdir = OperationSummary{Status: "measured", Requests: 4, ForegroundRequests: 4}
+	browseEnd.Lookup = OperationSummary{Status: "measured", Requests: 12, ForegroundRequests: 12}
+	browse := Analyze(browseStart, browseEnd)
+	if got := browse.Operations.Lookup; got.RequestsPerSecond != 0.4 || got.BackgroundRequests != 0 {
+		t.Fatalf("browse window = %+v", got)
+	}
+
+	scanStart := browseEnd
+	scanStart.CollectedAt = browseEnd.CollectedAt
+	scanEnd := scanStart
+	scanEnd.CollectedAt = scanStart.CollectedAt.Add(30 * time.Second)
+	scanEnd.Readdir = OperationSummary{Status: "measured", Requests: 904, ForegroundRequests: 904}
+	scanEnd.Lookup = OperationSummary{Status: "measured", Requests: 5412, ForegroundRequests: 5412}
+	scan := Analyze(scanStart, scanEnd)
+	if scan.Operations.Readdir.RequestsPerSecond <= browse.Operations.Readdir.RequestsPerSecond || scan.Operations.Lookup.RequestsPerSecond <= browse.Operations.Lookup.RequestsPerSecond {
+		t.Fatalf("scan window is not distinguishable from browsing: %+v vs %+v", scan.Operations, browse.Operations)
+	}
+	if scan.Operations.Lookup.RequestsPerSecond != 180 {
+		t.Fatalf("scan lookup rate = %v, want 180", scan.Operations.Lookup.RequestsPerSecond)
+	}
+}

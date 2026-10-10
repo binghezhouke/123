@@ -17,6 +17,9 @@ func (t *Tree) acquireBuild(ctx context.Context) (func(), error) {
 			limit = defaults(t.opts).MaxConcurrentBuilds
 		}
 		t.buildGate = workqueue.New(limit)
+		if t.scanShedding() {
+			t.buildGate.SetBackgroundLimit(shedBackgroundBuilds)
+		}
 	})
 	return t.buildGate.Acquire(ctx)
 }

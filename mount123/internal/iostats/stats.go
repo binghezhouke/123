@@ -29,6 +29,81 @@ type Tracker struct {
 	readAheadConsumed   counter
 	readAheadWasted     counter
 	stages              [stageCount]duration
+	operations          [operationCount]operation
+}
+
+// Operation identifies a FUSE metadata operation. The set is deliberately
+// fixed so a busy mount cannot grow the diagnostic output with path names.
+type Operation uint8
+
+const (
+	OperationReaddir Operation = iota
+	OperationLookup
+	OperationGetattr
+	OperationOpen
+	operationCount
+)
+
+type operation struct {
+	requests         atomic.Uint64
+	foreground       atomic.Uint64
+	background       atomic.Uint64
+	activeForeground atomic.Int64
+	activeBackground atomic.Int64
+}
+
+// OperationSummary is a bounded point-in-time view of metadata pressure.
+// Requests that wait for capacity are reported by QueueSummary, because
+// metadata handlers share one build queue rather than queueing per operation.
+type OperationSummary struct {
+	Status             string `json:"status"`
+	Requests           uint64 `json:"requests"`
+	ForegroundRequests uint64 `json:"foreground_requests"`
+	BackgroundRequests uint64 `json:"background_requests"`
+	ActiveForeground   int    `json:"active_foreground"`
+	ActiveBackground   int    `json:"active_background"`
+}
+
+// OperationTotals is the cumulative metadata request count by scheduling
+// priority. Samplers that watch for bulk scans read one aggregate instead of
+// walking every operation family.
+type OperationTotals struct {
+	Foreground uint64
+	Background uint64
+}
+
+// OperationTotals reports cumulative metadata requests by priority.
+func (t *Tracker) OperationTotals() OperationTotals {
+	var totals OperationTotals
+	for i := range t.operations {
+		totals.Foreground += t.operations[i].foreground.Load()
+		totals.Background += t.operations[i].background.Load()
+	}
+	return totals
+}
+
+// ScanSummary reports whether sustained metadata traffic has put the mount
+// into background load shedding. The rates are observations, not limits
+// enforced on callers: no request is rejected while shedding.
+type ScanSummary struct {
+	Status                    string    `json:"status"`
+	Shedding                  bool      `json:"shedding"`
+	Reason                    string    `json:"reason,omitempty"`
+	MetadataRequestsPerSecond float64   `json:"metadata_requests_per_second"`
+	EnterRequestsPerSecond    float64   `json:"enter_requests_per_second"`
+	ExitRequestsPerSecond     float64   `json:"exit_requests_per_second"`
+	Since                     time.Time `json:"since,omitempty"`
+}
+
+// QueueSummary is the shared archive-index build queue, which is where
+// metadata requests queue while they wait for capacity.
+type QueueSummary struct {
+	Status           string `json:"status"`
+	Limit            int    `json:"limit"`
+	Active           int    `json:"active"`
+	BackgroundActive int    `json:"background_active"`
+	Waiting          int    `json:"waiting"`
+	Requests         uint64 `json:"requests"`
 }
 
 // Stage is a fixed-cardinality operation family. Stage durations are
@@ -122,6 +197,21 @@ type Snapshot struct {
 	Stages                StageSummary         `json:"stages"`
 	StageSchemaVersion    uint8                `json:"stage_schema_version,omitempty"`
 	ImagePrefetch         ImagePrefetchSummary `json:"image_prefetch"`
+	Readdir               OperationSummary     `json:"readdir"`
+	Lookup                OperationSummary     `json:"lookup"`
+	Getattr               OperationSummary     `json:"getattr"`
+	Open                  OperationSummary     `json:"open"`
+	IndexQueue            QueueSummary         `json:"index_queue"`
+	Scan                  ScanSummary          `json:"scan"`
+}
+
+func (s *Snapshot) SetIndexQueue(limit, active, background, waiting int, requests uint64) {
+	s.IndexQueue = QueueSummary{Status: "measured", Limit: limit, Active: active, BackgroundActive: background, Waiting: waiting, Requests: requests}
+}
+
+// SetScan attaches the scan-shedding state observed by the mount.
+func (s *Snapshot) SetScan(summary ScanSummary) {
+	s.Scan = summary
 }
 
 // SchedulerSummary is a point-in-time aggregate from the shared cache.
@@ -134,6 +224,7 @@ type SchedulerSummary struct {
 	AvailableBackgroundBytes int64  `json:"available_background_bytes"`
 	WaitingForeground        int    `json:"waiting_foreground"`
 	WaitingBackground        int    `json:"waiting_background"`
+	CompletedRequests        uint64 `json:"completed_requests"`
 	StagingActiveBytes       int64  `json:"staging_active_bytes"`
 	StagingPeakBytes         int64  `json:"staging_peak_bytes"`
 	StagingWaitingForeground int    `json:"staging_waiting_foreground"`
@@ -165,6 +256,36 @@ func (t *Tracker) ObserveStage(stage Stage, d time.Duration) {
 		t.stages[stage].observe(d)
 	}
 }
+
+// BeginOperation records a FUSE operation and returns a completion function
+// that releases its active gauge. Context priority is passed explicitly by
+// mountfs so this package remains independent of workqueue.
+func (t *Tracker) BeginOperation(op Operation, background bool) func() {
+	if op >= operationCount {
+		return func() {}
+	}
+	o := &t.operations[op]
+	o.requests.Add(1)
+	if background {
+		o.background.Add(1)
+		o.activeBackground.Add(1)
+	} else {
+		o.foreground.Add(1)
+		o.activeForeground.Add(1)
+	}
+	var released atomic.Bool
+	return func() {
+		if released.Swap(true) {
+			return
+		}
+		if background {
+			o.activeBackground.Add(-1)
+		} else {
+			o.activeForeground.Add(-1)
+		}
+	}
+}
+
 func (t *Tracker) ObserveTransferQueue(d time.Duration) { t.transferQueue.observe(d) }
 func (t *Tracker) ObserveHTTPBodyTTFB(d time.Duration)  { t.httpBodyTTFB.observe(d) }
 func (t *Tracker) ObserveHTTPTransfer(d time.Duration)  { t.httpTransfer.observe(d) }
@@ -191,8 +312,8 @@ func (t *Tracker) AddReadAheadWasted(n uint64) {
 
 // SetDownloadScheduler attaches cache-wide capacity to a mount snapshot while
 // keeping this package independent of storage.
-func (s *Snapshot) SetDownloadScheduler(maximumRequests int, maximumInFlightBytes int64, activeRequests int, activeBytes, availableBackgroundBytes int64, waitingForeground, waitingBackground int) {
-	s.DownloadScheduler = SchedulerSummary{Status: "measured", MaximumRequests: maximumRequests, MaximumInFlightBytes: maximumInFlightBytes, ActiveRequests: activeRequests, ActiveBytes: activeBytes, AvailableBackgroundBytes: availableBackgroundBytes, WaitingForeground: waitingForeground, WaitingBackground: waitingBackground}
+func (s *Snapshot) SetDownloadScheduler(maximumRequests int, maximumInFlightBytes int64, activeRequests int, activeBytes, availableBackgroundBytes int64, waitingForeground, waitingBackground int, completedRequests uint64) {
+	s.DownloadScheduler = SchedulerSummary{Status: "measured", MaximumRequests: maximumRequests, MaximumInFlightBytes: maximumInFlightBytes, ActiveRequests: activeRequests, ActiveBytes: activeBytes, AvailableBackgroundBytes: availableBackgroundBytes, WaitingForeground: waitingForeground, WaitingBackground: waitingBackground, CompletedRequests: completedRequests}
 }
 
 // AddDownloadedBytes records bytes actually received into a range-cache fill.
@@ -257,7 +378,30 @@ func (t *Tracker) Snapshot() Snapshot {
 		},
 		StageSchemaVersion: 1,
 		ImagePrefetch:      ImagePrefetchSummary{Status: "unknown"},
+		Readdir:            t.operations[OperationReaddir].snapshot(),
+		Lookup:             t.operations[OperationLookup].snapshot(),
+		Getattr:            t.operations[OperationGetattr].snapshot(),
+		Open:               t.operations[OperationOpen].snapshot(),
 	}
+}
+
+func (o *operation) snapshot() OperationSummary {
+	requests := o.requests.Load()
+	s := OperationSummary{Status: "idle", Requests: requests, ForegroundRequests: o.foreground.Load(), BackgroundRequests: o.background.Load(), ActiveForeground: maxInt64(o.activeForeground.Load()), ActiveBackground: maxInt64(o.activeBackground.Load())}
+	if requests > 0 {
+		s.Status = "measured"
+	}
+	return s
+}
+
+func maxInt64(v int64) int {
+	if v < 0 {
+		return 0
+	}
+	if v > int64(^uint(0)>>1) {
+		return int(^uint(0) >> 1)
+	}
+	return int(v)
 }
 
 func (d *duration) observe(value time.Duration) {

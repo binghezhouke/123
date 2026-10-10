@@ -28,6 +28,7 @@ type cacheEntry struct {
 	path                 string
 	size                 int64
 	class                cacheClass
+	kind                 indexKind
 	hasUse               bool
 	scanDir              int8
 	lastUseStart         int64
@@ -87,6 +88,13 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 // NewCacheWithDownloadConfig opens a cache with a process-wide HTTP transfer
 // budget. The budget covers in-flight response bytes, not memory or disk use.
 func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadConfig) (*Cache, error) {
+	return NewCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), download)
+}
+
+// NewCacheWithIndexBudget opens a cache with an independent archive-index
+// budget. Index entries are admitted to their protected retention class only
+// within indexBudget; ordinary range data cannot consume that reservation.
+func NewCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, download DownloadConfig) (*Cache, error) {
 	var err error
 	download, err = download.normalized()
 	if err != nil {
@@ -94,6 +102,9 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 	}
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("cache size must be non-negative")
+	}
+	if indexBudget < 0 || indexBudget > maxBytes {
+		return nil, fmt.Errorf("index budget must be between 0 and cache size")
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -115,7 +126,6 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 		return nil, err
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
-	indexBudget := min(maxBytes/8, int64(64<<20))
 	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel, ghost: make(map[string]*list.Element), ghostLRU: list.New()}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
@@ -128,6 +138,8 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 	c.statsReady = true
 	return c, nil
 }
+
+func defaultIndexBudget(maxBytes int64) int64 { return maxBytes / 8 }
 
 // DownloadStats returns a point-in-time snapshot of transfer scheduler usage.
 func (c *Cache) DownloadStats() DownloadStats {
@@ -327,7 +339,7 @@ func (c *Cache) Capacity() int64 { return c.max }
 
 func (c *Cache) filename(key string, class cacheClass) string {
 	h := sha256.Sum256([]byte(key))
-	return filepath.Join(c.dir, hex.EncodeToString(h[:])+"."+class.suffix()+".blob")
+	return filepath.Join(c.dir, hex.EncodeToString(h[:])+"."+entrySuffix(class, indexKindForKey(key))+".blob")
 }
 
 func (c *Cache) pathForKey(key string, class cacheClass) string {
@@ -337,24 +349,37 @@ func (c *Cache) pathForKey(key string, class cacheClass) string {
 	return c.filename(key, class)
 }
 
-func parseObjectFilename(name string) (string, cacheClass, bool) {
+func parseObjectFilename(name string) (string, cacheClass, indexKind, bool) {
 	base := strings.TrimSuffix(name, ".blob")
 	parts := strings.Split(base, ".")
 	if len(parts) == 1 && len(parts[0]) == 64 {
-		return parts[0], cacheProbation, true // pre-policy cache entry
+		return parts[0], cacheProbation, indexKindUnknown, true // pre-policy cache entry
 	}
 	if len(parts) != 2 || len(parts[0]) != 64 {
-		return "", cacheProbation, false
+		return "", cacheProbation, indexKindUnknown, false
+	}
+	// Protected index objects carry their family after the class letter, so
+	// archive indexes, directory snapshots and identity descriptors stay
+	// distinguishable across a restart.
+	if suffix := strings.ToLower(parts[1]); strings.HasPrefix(suffix, "i") {
+		if suffix == "i" {
+			return parts[0], cacheIndex, indexKindUnknown, true // pre-kind index entry
+		}
+		kind, ok := parseIndexKind(suffix[1:])
+		if !ok {
+			return "", cacheProbation, indexKindUnknown, false
+		}
+		return parts[0], cacheIndex, kind, true
 	}
 	class, ok := parseCacheClass(parts[1])
-	return parts[0], class, ok
+	return parts[0], class, indexKindUnknown, ok
 }
 
 func (c *Cache) pathForEntry(id string, e *cacheEntry, class cacheClass) string {
 	if e.rangeID != "" {
 		return filepath.Join(c.dir, rangeFilename(e.rangeID, e.rangeStart, e.rangeEnd, id, class))
 	}
-	return filepath.Join(c.dir, id+"."+class.suffix()+".blob")
+	return filepath.Join(c.dir, id+"."+entrySuffix(class, e.kind)+".blob")
 }
 
 func newClassLRUs() [cacheClassCount]*list.List {
@@ -396,6 +421,7 @@ func (c *Cache) load() error {
 		}
 		var id string
 		class := cacheProbation
+		kind := indexKindUnknown
 		var ranged *cacheRange
 		if strings.HasPrefix(name, "extent-") {
 			var err error
@@ -404,7 +430,7 @@ func (c *Cache) load() error {
 				continue
 			}
 		} else if strings.HasSuffix(name, ".blob") {
-			id, class, _ = parseObjectFilename(name)
+			id, class, kind, _ = parseObjectFilename(name)
 			if id == "" {
 				continue
 			}
@@ -423,7 +449,7 @@ func (c *Cache) load() error {
 			_ = os.Remove(p)
 			continue
 		}
-		entry := &cacheEntry{path: p, size: st.Size(), class: class, used: st.ModTime(), lastTouch: st.ModTime()}
+		entry := &cacheEntry{path: p, size: st.Size(), class: class, kind: kind, used: st.ModTime(), lastTouch: st.ModTime()}
 		if ranged != nil {
 			entry.rangeID, entry.rangeStart, entry.rangeEnd = ranged.identity, ranged.start, ranged.end
 		}
@@ -432,6 +458,25 @@ func (c *Cache) load() error {
 	}
 	sort.Slice(loaded, func(i, j int) bool { return loaded[i].entry.used.Before(loaded[j].entry.used) })
 	for _, item := range loaded {
+		// A protected object's file name carries its index family, which older
+		// versions did not record. Opening a cache written by such a version
+		// can therefore find two files for one id. Keep the newest and delete
+		// the older duplicate instead of leaving it outside the eviction index,
+		// where it would inflate the resident byte total forever.
+		if previous := c.entries[item.id]; previous != nil {
+			if previous.lru != nil {
+				c.lru[previous.class].Remove(previous.lru)
+				previous.lru = nil
+			}
+			if previous.class == cacheIndex {
+				c.indexUsed -= previous.size
+			}
+			if previous.rangeID != "" {
+				c.removeRangeLocked(previous.rangeID, item.id)
+			}
+			c.used -= previous.size
+			_ = os.Remove(previous.path)
+		}
 		item.entry.lru = c.lru[item.entry.class].PushFront(item.id)
 		c.entries[item.id] = item.entry
 		if item.entry.class == cacheIndex {
@@ -445,6 +490,10 @@ func (c *Cache) load() error {
 		previous := node.Prev()
 		id := node.Value.(string)
 		if e := c.entries[id]; e != nil && e.class == cacheIndex {
+			// Counted before statsReady is set: a persisted share that no
+			// longer fits the configured budget is a property of the reopened
+			// cache, not of this process's activity.
+			c.recordRestoredIndexDemotionLocked(e)
 			c.setClassLocked(id, e, cacheProbation)
 		}
 		node = previous
@@ -574,6 +623,9 @@ func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
 	}
 	if e.class == cacheIndex {
 		c.indexUsed -= e.size
+		if class != cacheIndex {
+			c.recordIndexDemotionLocked(e)
+		}
 	}
 	e.class = class
 	if class == cacheIndex {
@@ -744,7 +796,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 					}
 				}
 				if f.err == nil {
-					entry := &cacheEntry{path: finalPath, size: size, class: state.class, hasUse: state.hasUse, scanDir: state.scanDir, lastUseStart: state.lastUseStart, lastUseEnd: state.lastUseEnd, used: time.Now(), lastTouch: time.Now()}
+					entry := &cacheEntry{path: finalPath, size: size, class: state.class, kind: indexKindForKey(key), hasUse: state.hasUse, scanDir: state.scanDir, lastUseStart: state.lastUseStart, lastUseEnd: state.lastUseEnd, used: time.Now(), lastTouch: time.Now()}
 					entry.lru = c.lru[entry.class].PushFront(id)
 					c.entries[id] = entry
 					if start, end, identity, ok := parseRangeKey(key); ok {

@@ -19,8 +19,17 @@ func NewEphemeralCache(root string, maxBytes int64) (*Cache, error) {
 // NewEphemeralCacheWithDownloadConfig creates a process-private cache with a
 // configured process-wide HTTP transfer budget.
 func NewEphemeralCacheWithDownloadConfig(root string, maxBytes int64, download DownloadConfig) (*Cache, error) {
+	return NewEphemeralCacheWithIndexBudget(root, maxBytes, defaultIndexBudget(maxBytes), download)
+}
+
+// NewEphemeralCacheWithIndexBudget creates a process-private cache with an
+// independent archive-index budget.
+func NewEphemeralCacheWithIndexBudget(root string, maxBytes, indexBudget int64, download DownloadConfig) (*Cache, error) {
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("cache size must be non-negative")
+	}
+	if indexBudget < 0 || indexBudget > maxBytes {
+		return nil, fmt.Errorf("index budget must be between 0 and cache size")
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
@@ -47,7 +56,7 @@ func NewEphemeralCacheWithDownloadConfig(root string, maxBytes int64, download D
 		_ = guard.Close()
 		return nil, err
 	}
-	c, err := NewCacheWithDownloadConfig(dir, maxBytes, download)
+	c, err := NewCacheWithIndexBudget(dir, maxBytes, indexBudget, download)
 	_ = syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
 	_ = guard.Close()
 	if err != nil {

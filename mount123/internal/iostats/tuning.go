@@ -16,33 +16,80 @@ type RuntimeConfig struct {
 // denominator stay null. Advice is deliberately observational, never an
 // automatic change to capacity or concurrency.
 type TuningReport struct {
-	Status                      string              `json:"status"`
-	DirectoryCache              DirectorySummary    `json:"directory_cache"`
-	RemoteRecovery              RecoverySummary     `json:"remote_recovery"`
-	WindowSeconds               float64             `json:"window_seconds"`
-	CacheUtilization            *float64            `json:"cache_utilization"`
-	Foreground                  CacheRangeSummary   `json:"foreground"`
-	Background                  CacheRangeSummary   `json:"background"`
-	ForegroundByteHitRatio      *float64            `json:"foreground_byte_hit_ratio"`
-	BackgroundByteHitRatio      *float64            `json:"background_byte_hit_ratio"`
-	CapacityEvictions           uint64              `json:"capacity_evictions"`
-	CapacityEvictionBytes       int64               `json:"capacity_eviction_bytes"`
-	Refaults                    CacheRefaultSummary `json:"refaults"`
-	ENOSPC                      uint64              `json:"enospc"`
-	FillFailures                uint64              `json:"fill_failures"`
-	FillOutcomeStatus           string              `json:"fill_outcome_status"`
-	FillCancelled               *uint64             `json:"fill_cancelled,omitempty"`
-	FillErrors                  *uint64             `json:"fill_errors,omitempty"`
-	ExistingFillWaits           uint64              `json:"existing_fill_waits"`
-	DownloadedBytes             uint64              `json:"downloaded_bytes"`
-	DownloadBytesPerSecond      float64             `json:"download_bytes_per_second"`
-	MeanTransferQueueMillis     *float64            `json:"mean_transfer_queue_millis"`
-	MeanForegroundReadMillis    *float64            `json:"mean_foreground_read_millis"`
-	Stages                      StageDeltaSummary   `json:"stages"`
-	ReadAheadConsumedBytes      uint64              `json:"read_ahead_consumed_bytes"`
-	ReadAheadUnusedOnCloseBytes uint64              `json:"read_ahead_unused_on_close_bytes"`
-	LifetimeReadAheadUseRatio   *float64            `json:"lifetime_read_ahead_use_ratio"`
-	Recommendations             []TuningAdvice      `json:"recommendations"`
+	Status                      string                `json:"status"`
+	DirectoryCache              DirectorySummary      `json:"directory_cache"`
+	RemoteRecovery              RecoverySummary       `json:"remote_recovery"`
+	WindowSeconds               float64               `json:"window_seconds"`
+	CacheUtilization            *float64              `json:"cache_utilization"`
+	Foreground                  CacheRangeSummary     `json:"foreground"`
+	Background                  CacheRangeSummary     `json:"background"`
+	ForegroundByteHitRatio      *float64              `json:"foreground_byte_hit_ratio"`
+	BackgroundByteHitRatio      *float64              `json:"background_byte_hit_ratio"`
+	CapacityEvictions           uint64                `json:"capacity_evictions"`
+	CapacityEvictionBytes       int64                 `json:"capacity_eviction_bytes"`
+	Refaults                    CacheRefaultSummary   `json:"refaults"`
+	ENOSPC                      uint64                `json:"enospc"`
+	FillFailures                uint64                `json:"fill_failures"`
+	FillOutcomeStatus           string                `json:"fill_outcome_status"`
+	FillCancelled               *uint64               `json:"fill_cancelled,omitempty"`
+	FillErrors                  *uint64               `json:"fill_errors,omitempty"`
+	ExistingFillWaits           uint64                `json:"existing_fill_waits"`
+	DownloadedBytes             uint64                `json:"downloaded_bytes"`
+	DownloadBytesPerSecond      float64               `json:"download_bytes_per_second"`
+	MeanTransferQueueMillis     *float64              `json:"mean_transfer_queue_millis"`
+	MeanForegroundReadMillis    *float64              `json:"mean_foreground_read_millis"`
+	Stages                      StageDeltaSummary     `json:"stages"`
+	ReadAheadConsumedBytes      uint64                `json:"read_ahead_consumed_bytes"`
+	ReadAheadUnusedOnCloseBytes uint64                `json:"read_ahead_unused_on_close_bytes"`
+	LifetimeReadAheadUseRatio   *float64              `json:"lifetime_read_ahead_use_ratio"`
+	Recommendations             []TuningAdvice        `json:"recommendations"`
+	Operations                  OperationDeltaSummary `json:"operations"`
+	IndexQueue                  QueueDelta            `json:"index_queue"`
+	DownloadQueue               DownloadQueueDelta    `json:"download_queue"`
+}
+
+// QueueDelta reports the shared build queue at the end of the window plus the
+// requests it admitted during the interval.
+type QueueDelta struct {
+	Status            string  `json:"status"`
+	Limit             int     `json:"limit"`
+	Active            int     `json:"active"`
+	BackgroundActive  int     `json:"background_active"`
+	Waiting           int     `json:"waiting"`
+	Requests          uint64  `json:"requests"`
+	RequestsPerSecond float64 `json:"requests_per_second"`
+}
+
+// DownloadQueueDelta reports the transfer scheduler at the end of the window
+// plus the transfers it completed during the interval.
+type DownloadQueueDelta struct {
+	Status             string  `json:"status"`
+	Limit              int     `json:"limit"`
+	Active             int     `json:"active"`
+	WaitingForeground  int     `json:"waiting_foreground"`
+	WaitingBackground  int     `json:"waiting_background"`
+	Completed          uint64  `json:"completed"`
+	CompletedPerSecond float64 `json:"completed_per_second"`
+}
+
+// OperationDelta describes metadata activity during the sample window. The
+// active and waiting values are point-in-time gauges from the newer sample;
+// request values and rates are interval deltas.
+type OperationDelta struct {
+	Status             string  `json:"status"`
+	Requests           uint64  `json:"requests"`
+	ForegroundRequests uint64  `json:"foreground_requests"`
+	BackgroundRequests uint64  `json:"background_requests"`
+	RequestsPerSecond  float64 `json:"requests_per_second"`
+	ActiveForeground   int     `json:"active_foreground"`
+	ActiveBackground   int     `json:"active_background"`
+}
+
+type OperationDeltaSummary struct {
+	Readdir OperationDelta `json:"readdir"`
+	Lookup  OperationDelta `json:"lookup"`
+	Getattr OperationDelta `json:"getattr"`
+	Open    OperationDelta `json:"open"`
 }
 
 // DurationDelta reports interval samples and mean only. Cumulative percentile
@@ -86,6 +133,9 @@ func Analyze(previous, current Snapshot) TuningReport {
 	r.WindowSeconds = current.CollectedAt.Sub(previous.CollectedAt).Seconds()
 	p, c := previous.Cache, current.Cache
 	valid := true
+	r.Operations = operationDeltas(previous, current, r.WindowSeconds, &valid)
+	r.IndexQueue = indexQueueDelta(previous, current, r.WindowSeconds, &valid)
+	r.DownloadQueue = downloadQueueDelta(previous, current, r.WindowSeconds, &valid)
 	r.DirectoryCache = directoryDelta(previous.DirectoryCache, current.DirectoryCache, &valid)
 	r.RemoteRecovery = recoveryDelta(previous.RemoteRecovery, current.RemoteRecovery, &valid)
 	r.Foreground = rangeDelta(p.Foreground, c.Foreground, &valid)
@@ -156,6 +206,59 @@ func Analyze(previous, current Snapshot) TuningReport {
 		r.Recommendations = append(r.Recommendations, TuningAdvice{"download-requests/download-bytes-mib", "inspect_scheduler", "Foreground transfers are queued. Check active request and byte limits, plus staging pressure, before increasing concurrency."})
 	}
 	return r
+}
+
+func operationDeltas(previous, current Snapshot, window float64, valid *bool) OperationDeltaSummary {
+	return OperationDeltaSummary{
+		Readdir: operationDelta(previous.Readdir, current.Readdir, window, valid),
+		Lookup:  operationDelta(previous.Lookup, current.Lookup, window, valid),
+		Getattr: operationDelta(previous.Getattr, current.Getattr, window, valid),
+		Open:    operationDelta(previous.Open, current.Open, window, valid),
+	}
+}
+
+func operationDelta(p, c OperationSummary, window float64, valid *bool) OperationDelta {
+	d := OperationDelta{Status: "idle", ActiveForeground: c.ActiveForeground, ActiveBackground: c.ActiveBackground}
+	d.Requests = deltaUint(p.Requests, c.Requests, valid)
+	d.ForegroundRequests = deltaUint(p.ForegroundRequests, c.ForegroundRequests, valid)
+	d.BackgroundRequests = deltaUint(p.BackgroundRequests, c.BackgroundRequests, valid)
+	if d.Requests > 0 {
+		d.Status = "measured"
+		if window > 0 {
+			d.RequestsPerSecond = float64(d.Requests) / window
+		}
+	}
+	return d
+}
+
+func indexQueueDelta(p, c Snapshot, window float64, valid *bool) QueueDelta {
+	d := QueueDelta{
+		Status:           c.IndexQueue.Status,
+		Limit:            c.IndexQueue.Limit,
+		Active:           c.IndexQueue.Active,
+		BackgroundActive: c.IndexQueue.BackgroundActive,
+		Waiting:          c.IndexQueue.Waiting,
+	}
+	d.Requests = deltaUint(p.IndexQueue.Requests, c.IndexQueue.Requests, valid)
+	if d.Requests > 0 && window > 0 {
+		d.RequestsPerSecond = float64(d.Requests) / window
+	}
+	return d
+}
+
+func downloadQueueDelta(p, c Snapshot, window float64, valid *bool) DownloadQueueDelta {
+	d := DownloadQueueDelta{
+		Status:            c.DownloadScheduler.Status,
+		Limit:             c.DownloadScheduler.MaximumRequests,
+		Active:            c.DownloadScheduler.ActiveRequests,
+		WaitingForeground: c.DownloadScheduler.WaitingForeground,
+		WaitingBackground: c.DownloadScheduler.WaitingBackground,
+	}
+	d.Completed = deltaUint(p.DownloadScheduler.CompletedRequests, c.DownloadScheduler.CompletedRequests, valid)
+	if d.Completed > 0 && window > 0 {
+		d.CompletedPerSecond = float64(d.Completed) / window
+	}
+	return d
 }
 
 func rangeDelta(p, c CacheRangeSummary, valid *bool) CacheRangeSummary {

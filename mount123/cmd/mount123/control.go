@@ -26,6 +26,9 @@ const (
 	controlExitFailed   = 2
 	controlExitTimeout  = 3
 	controlExitCanceled = 130
+	// maxIOStatsSamples bounds continuous sampling output so a caller cannot
+	// accidentally make an unbounded diagnostic stream consume disk or memory.
+	maxIOStatsSamples = 10000
 )
 
 type commandExitError struct {
@@ -321,6 +324,9 @@ func runControlCommand(ctx context.Context, args []string, stderr, stdout io.Wri
 		}
 		if statsInterval < 0 || statsCount < 0 {
 			return errors.New("io-stats interval and count must be non-negative")
+		}
+		if statsCount > maxIOStatsSamples {
+			return fmt.Errorf("io-stats count must be at most %d", maxIOStatsSamples)
 		}
 		if statsInterval > 0 {
 			return runIOStatsSampling(ctx, *socketPath, statsInterval, statsCount, stdout)

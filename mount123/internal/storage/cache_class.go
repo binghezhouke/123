@@ -30,6 +30,17 @@ func (c cacheClass) suffix() string {
 	}
 }
 
+// entrySuffix renders the suffix used in an object's cache filename. Protected
+// index objects additionally carry their family so the split between archive
+// indexes, directory snapshots and remote identity descriptors survives a
+// restart. Ordinary data has nothing to distinguish.
+func entrySuffix(class cacheClass, kind indexKind) string {
+	if class != cacheIndex {
+		return class.suffix()
+	}
+	return "i" + kind.suffix()
+}
+
 func parseCacheClass(s string) (cacheClass, bool) {
 	switch strings.ToLower(s) {
 	case "s":
