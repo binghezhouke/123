@@ -329,6 +329,15 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		}
 		t.mu.Unlock()
 		seen := map[string]bool{}
+		// A checkpoint contains only the verified prefix. Reuse it as the
+		// starting directory snapshot; the decoder continues to validate the
+		// remaining headers and completion is still decided by this scan.
+		if a.kind() == ".rar" {
+			if partial, ok := t.loadArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest); ok {
+				idx = partial
+				for name := range idx.members { seen[name] = true }
+			}
+		}
 		nodes, names, entries := 0, 0, 0
 		// Indexing has a separate read budget, so recursive find cannot decompress
 		// an arbitrarily large solid RAR merely to discover names.
@@ -400,6 +409,9 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		close(idx.changed)
 		idx.mu.Unlock()
 		if err != nil {
+			if a.kind() == ".rar" {
+				t.persistArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest, idx, 0)
+			}
 			failure := failedArchiveStatus(size, archiveReadError(ctx, err, password))
 			failure.Members = entries
 			t.indexStatuses.set(statusKey, failure)

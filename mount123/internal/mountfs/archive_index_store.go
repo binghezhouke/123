@@ -34,6 +34,8 @@ type archiveIndexDTO struct {
 	ArchiveSize    int64                  `json:"archive_size"`
 	IdentityDigest string                 `json:"identity_digest"`
 	Entries        []archiveIndexEntryDTO `json:"entries"`
+	Complete       bool                   `json:"complete"`
+	ScanOffset     int64                  `json:"scan_offset,omitempty"`
 }
 
 type archiveIndexEntryDTO struct {
@@ -100,11 +102,22 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 	return idx, true
 }
 
+// loadArchiveCheckpoint restores a previously verified prefix.  It is kept
+// separate from the completed index so an interrupted scan can never be
+// mistaken for a complete directory.
+func (t *Tree) loadArchiveCheckpoint(ctx context.Context, cacheKey, kind string, size int64, identity string) (*zipIndex, bool) {
+	idx, ok := t.loadPersistentArchiveIndex(ctx, cacheKey+":checkpoint", kind, size, identity)
+	if !ok || idx.complete {
+		return nil, false
+	}
+	return idx, true
+}
+
 func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, size int64, identity string, idx *zipIndex) {
 	if t.cache == nil || cacheKey == "" || idx == nil {
 		return
 	}
-	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity}
+	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity, Complete: true, ScanOffset: size}
 	var walk func(*zipDir, string)
 	walk = func(dir *zipDir, prefix string) {
 		keys := make([]string, 0, len(dir.dirs))
@@ -159,12 +172,24 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 	_ = t.cache.StoreArchiveIndex(ctx, cacheKey, buffer.Bytes())
 }
 
+func (t *Tree) persistArchiveCheckpoint(ctx context.Context, cacheKey, kind string, size int64, identity string, idx *zipIndex, offset int64) {
+	if t.cache == nil || cacheKey == "" || idx == nil { return }
+	idx.mu.RLock()
+	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity, Complete: false, ScanOffset: offset}
+	var walk func(*zipDir, string)
+	walk = func(dir *zipDir, prefix string) { for name, child := range dir.dirs { p:=name; if prefix!="" {p=prefix+"/"+name}; dto.Entries=append(dto.Entries, archiveIndexEntryDTO{Path:p,Directory:true}); walk(child,p) }; for name,m := range dir.files { p:=name; if prefix!="" {p=prefix+"/"+name}; e:=archiveIndexEntryDTO{Path:p,Name:m.name,Ordinal:m.ordinal,Size:m.size,CRC:m.crc}; if m.rarLocator!=nil { l:=rardecode.ExportLocator(*m.rarLocator); e.RARLocator=&l }; dto.Entries=append(dto.Entries,e) } }
+	walk(idx.root, ""); idx.mu.RUnlock()
+	var b boundedJSONBuffer; b.limit=int(t.opts.MetadataBytes); if json.NewEncoder(&b).Encode(dto)==nil { _ = t.cache.StoreArchiveIndex(ctx, cacheKey+":checkpoint", b.Bytes()) }
+}
+
 func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDTO, archiveSize int64) (*zipIndex, error) {
 	if len(dto.Entries) > t.opts.MaxExpandedNodes+t.opts.MaxZIPEntries {
 		return nil, syscall.EFBIG
 	}
-	idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, complete: true, changed: make(chan struct{})}
-	close(idx.changed)
+	idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, complete: dto.Complete, changed: make(chan struct{})}
+	if dto.Complete {
+		close(idx.changed)
+	}
 	seen := make(map[string]bool, len(dto.Entries))
 	names, nodes := 0, 0
 	for _, record := range dto.Entries {
