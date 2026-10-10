@@ -25,8 +25,16 @@ type ArchivePasswordAPI interface {
 	SaveArchivePassword(context.Context, panapi.File, []byte, bool) (panapi.File, bool, error)
 }
 
+// SharedPasswordAPI stores the one hidden password file for a directory.
+// It is separate from ArchivePasswordAPI so older test/fake clients remain
+// valid for per-archive unlocks.
+type SharedPasswordAPI interface {
+	SaveSharedPassword(context.Context, panapi.File, []byte, bool) (panapi.File, bool, error)
+}
+
 type UnlockOptions struct {
 	All            bool `json:"all,omitempty"`
+	Shared         bool `json:"shared,omitempty"`
 	SkipValidation bool `json:"skip_validation,omitempty"`
 	Overwrite      bool `json:"overwrite,omitempty"`
 }
@@ -97,7 +105,7 @@ func (n *Node) UnlockArchives(ctx context.Context, value string, password []byte
 		return summary, err
 	}
 	parentPath, targetName := ".", ""
-	if options.All {
+	if options.All || options.Shared {
 		parentPath = strings.Join(parts, "/")
 		if parentPath == "" {
 			parentPath = "."
@@ -130,6 +138,52 @@ func (n *Node) UnlockArchives(ctx context.Context, value string, password []byte
 	directory, err := t.cloudDirectory(ctx, parentID)
 	if err != nil {
 		return summary, err
+	}
+	if options.Shared {
+		sharedSaver, ok := n.tree.api.(SharedPasswordAPI)
+		if !ok {
+			return summary, syscall.EOPNOTSUPP
+		}
+		if options.All {
+			return summary, syscall.EINVAL
+		}
+		defer func() {
+			summary.Cancelled = ctx.Err() != nil
+			refreshCtx, stop := context.WithTimeout(t.ctx, 25*time.Second)
+			defer stop()
+			_, refreshErr := t.requestDirectoryRefresh(refreshCtx, parentID, n, parentPath, false)
+			summary.Refreshed = refreshErr == nil
+		}()
+		summary.Total = 1
+		state := "saved"
+		reason := ""
+		for _, f := range directory.files {
+			if f.Name == panapi.SharedPasswordFileName && !f.IsDir {
+				if !options.Overwrite {
+					state = "skipped_existing"
+					summary.Skipped = 1
+				}
+				break
+			}
+		}
+		if state == "saved" {
+			directoryFile := panapi.File{ID: parentID, IsDir: true, ParentID: 0}
+			if _, skipped, e := sharedSaver.SaveSharedPassword(ctx, directoryFile, password, options.Overwrite); e != nil {
+				state, reason = "save_failed", "shared_password_error"
+				summary.Failed = 1
+			} else if skipped {
+				state = "skipped_existing"
+				summary.Skipped = 1
+			} else {
+				summary.Saved = 1
+			}
+		}
+		if progress != nil {
+			if err := progress(UnlockProgress{FileID: parentID, Name: panapi.SharedPasswordFileName, State: state, Reason: reason}); err != nil {
+				return summary, err
+			}
+		}
+		return summary, nil
 	}
 	var targets []*unlockTarget
 	if options.All {

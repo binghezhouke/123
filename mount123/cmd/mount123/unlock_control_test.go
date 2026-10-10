@@ -71,6 +71,29 @@ func (a *mountedUnlockAPI) SaveArchivePassword(ctx context.Context, f panapi.Fil
 	return sidecar, false, nil
 }
 
+func (a *mountedUnlockAPI) SaveSharedPassword(ctx context.Context, dir panapi.File, pw []byte, overwrite bool) (panapi.File, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return panapi.File{}, false, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, old := range a.files {
+		if old.ParentID == dir.ID && old.Name == panapi.SharedPasswordFileName {
+			if !overwrite {
+				return old, true, nil
+			}
+			a.password = append([]byte(nil), pw...)
+			a.saves++
+			return old, false, nil
+		}
+	}
+	a.password = append([]byte(nil), pw...)
+	a.saves++
+	file := panapi.File{ID: 2000 + dir.ID, ParentID: dir.ID, Name: panapi.SharedPasswordFileName, Size: int64(len(pw)), Version: "shared1"}
+	a.files = append(a.files, file)
+	return file, false, nil
+}
+
 func mountedUnlockControl(t *testing.T, api *mountedUnlockAPI, actualFUSE bool) (string, string, *mountfs.Node) {
 	t.Helper()
 	cache, err := storage.NewCache(t.TempDir(), 32<<20)
@@ -127,6 +150,30 @@ func TestMountedUnlockCLIUsesRunningMountAndSkipsExisting(t *testing.T) {
 	if api.saves != 1 || string(api.password) != "private-test-password" {
 		t.Fatal("running mount did not save password")
 	}
+}
+
+func TestMountedUnlockCLISharedPassword(t *testing.T) {
+	api := &mountedUnlockAPI{files: []panapi.File{{ID: 1, Name: "a.zip", Version: "v1"}}}
+	socket, mountpoint, _ := mountedUnlockControl(t, api, false)
+	var output bytes.Buffer
+	err := runUnlockWith(context.Background(), []string{"-shared", "-skip-validation", "-control-socket", socket, "-password-stdin", mountpoint}, strings.NewReader("shared-test-password\n"), io.Discard, &output, false, nil, unlockDeps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output.String(), "total=1 saved=1 skipped=0 failed=0 refreshed=true") {
+		t.Fatalf("unexpected CLI result: %s", output.String())
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.saves != 1 || string(api.password) != "shared-test-password" {
+		t.Fatalf("shared password was not saved: saves=%d password=%q", api.saves, api.password)
+	}
+	for _, f := range api.files {
+		if f.Name == panapi.SharedPasswordFileName {
+			return
+		}
+	}
+	t.Fatal("shared password file was not created")
 }
 
 func TestMountedUnlockRejectsOutsideMountAndCancelsDisconnectedClient(t *testing.T) {

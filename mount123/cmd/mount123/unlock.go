@@ -134,7 +134,7 @@ func runUnlockWith(ctx context.Context, args []string, stdin io.Reader, stderr, 
 	flags := flag.NewFlagSet("mount123 unlock", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() {
-		_, _ = io.WriteString(stderr, "Usage: mount123 unlock [flags] MOUNTED_ARCHIVE\n       mount123 unlock -all [flags] MOUNTED_DIRECTORY\n       mount123 unlock -file-id ID [-config PATH] [-cache-dir PATH] [-password-stdin]\n")
+		_, _ = io.WriteString(stderr, "Usage: mount123 unlock [flags] MOUNTED_ARCHIVE\n       mount123 unlock -all [flags] MOUNTED_DIRECTORY\n       mount123 unlock -shared [flags] MOUNTED_DIRECTORY\n       mount123 unlock -file-id ID [-config PATH] [-cache-dir PATH] [-password-stdin]\n")
 		flags.PrintDefaults()
 	}
 	fileID := flags.Int64("file-id", 0, "cloud file ID of the encrypted ZIP")
@@ -143,6 +143,7 @@ func runUnlockWith(ctx context.Context, args []string, stdin io.Reader, stderr, 
 	passwordStdin := flags.Bool("password-stdin", false, "read the archive password from stdin")
 	socketPath := flags.String("control-socket", "", "running mount control socket (default: cache-dir/control.sock)")
 	all := flags.Bool("all", false, "set the same password for archives in this cloud directory only")
+	shared := flags.Bool("shared", false, "write one hidden .mount123.pwd for this directory and its descendants")
 	skipValidation := flags.Bool("skip-validation", false, "save password sidecars without opening archives")
 	overwrite := flags.Bool("overwrite", false, "replace existing sidecars (mounted-path mode)")
 	timeout := flags.Duration("timeout", 10*time.Minute, "mounted request timeout, up to 30m")
@@ -153,7 +154,7 @@ func runUnlockWith(ctx context.Context, args []string, stdin io.Reader, stderr, 
 		return err
 	}
 	mounted := *fileID == 0 && flags.NArg() == 1
-	if (!mounted && (*fileID <= 0 || flags.NArg() != 0)) || (!mounted && (*all || *skipValidation || *overwrite)) || (mounted && (*timeout <= 0 || *timeout > 30*time.Minute)) {
+	if (*all && *shared) || (!mounted && (*all || *shared || *skipValidation || *overwrite)) || (!mounted && (*fileID <= 0 || flags.NArg() != 0)) || (mounted && (*timeout <= 0 || *timeout > 30*time.Minute)) {
 		return errors.New("expected a mounted path, or -file-id ID; flags must precede the path")
 	}
 
@@ -174,7 +175,7 @@ func runUnlockWith(ctx context.Context, args []string, stdin io.Reader, stderr, 
 		if *socketPath == "" {
 			*socketPath = controlSocketPath(*cacheDir)
 		}
-		return runMountedUnlock(ctx, *socketPath, mountPath, password, mountfs.UnlockOptions{All: *all, SkipValidation: *skipValidation, Overwrite: *overwrite}, *timeout, stdout)
+		return runMountedUnlock(ctx, *socketPath, mountPath, password, mountfs.UnlockOptions{All: *all, Shared: *shared, SkipValidation: *skipValidation, Overwrite: *overwrite}, *timeout, stdout)
 	}
 
 	var appConfig struct {

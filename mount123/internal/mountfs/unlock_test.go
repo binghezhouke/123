@@ -71,6 +71,29 @@ func (a *passwordSaveAPI) SaveArchivePassword(ctx context.Context, archive panap
 	return f, false, nil
 }
 
+func (a *passwordSaveAPI) SaveSharedPassword(ctx context.Context, directory panapi.File, password []byte, overwrite bool) (panapi.File, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return panapi.File{}, false, err
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, f := range a.files {
+		if f.ParentID == directory.ID && f.Name == panapi.SharedPasswordFileName {
+			if !overwrite {
+				return f, true, nil
+			}
+			a.data[f.ID] = append([]byte(nil), password...)
+			a.saves++
+			return f, false, nil
+		}
+	}
+	f := panapi.File{ID: directory.ID + 2000, ParentID: directory.ID, Name: panapi.SharedPasswordFileName, Size: int64(len(password)), Version: "shared1"}
+	a.files = append(a.files, f)
+	a.data[f.ID] = append([]byte(nil), password...)
+	a.saves++
+	return f, false, nil
+}
+
 func passwordSaveFixture(t *testing.T, files []panapi.File, data map[int64][]byte) (*Node, *passwordSaveAPI) {
 	t.Helper()
 	a := &passwordSaveAPI{files: files, data: data}
@@ -169,6 +192,31 @@ func TestUnlockDetectedBatchSkipsExistingAndDeduplicatesAliases(t *testing.T) {
 	}
 	if _, err = root.UnlockArchives(context.Background(), "video.mp4", []byte("password"), UnlockOptions{SkipValidation: true}, nil); !errors.Is(err, syscall.EINVAL) {
 		t.Fatalf("ordinary file accepted: %v", err)
+	}
+}
+
+func TestUnlockSharedWritesOneDirectoryPasswordFile(t *testing.T) {
+	root, api := passwordSaveFixture(t, []panapi.File{{ID: 1, Name: "a.zip", Version: "v1"}, {ID: 2, Name: "b.7z", Version: "v1"}}, map[int64][]byte{})
+	summary, err := root.UnlockArchives(context.Background(), ".", []byte("shared-password"), UnlockOptions{Shared: true, SkipValidation: true}, nil)
+	if err != nil || summary.Total != 1 || summary.Saved != 1 || summary.Failed != 0 || !summary.Refreshed {
+		t.Fatalf("summary=%+v err=%v", summary, err)
+	}
+	files, _ := api.List(context.Background(), 0)
+	var found int
+	for _, f := range files {
+		if f.Name == panapi.SharedPasswordFileName {
+			found++
+			if got := string(api.data[f.ID]); got != "shared-password" {
+				t.Fatalf("shared password=%q", got)
+			}
+		}
+	}
+	if found != 1 || api.saves != 1 {
+		t.Fatalf("shared file count=%d saves=%d", found, api.saves)
+	}
+	summary, err = root.UnlockArchives(context.Background(), ".", []byte("different"), UnlockOptions{Shared: true, SkipValidation: true}, nil)
+	if err != nil || summary.Skipped != 1 || summary.Saved != 0 {
+		t.Fatalf("existing shared file was not skipped: %+v %v", summary, err)
 	}
 }
 

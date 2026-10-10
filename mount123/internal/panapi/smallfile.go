@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	maxSmallFileBytes   = 1 << 20
-	maxZIPPasswordBytes = 4096
+	maxSmallFileBytes      = 1 << 20
+	maxZIPPasswordBytes    = 4096
+	SharedPasswordFileName = ".mount123.pwd"
 )
 
 // ReadSmallFile downloads a file only when its complete content fits maxBytes.
@@ -100,10 +101,26 @@ func (c *Client) SaveArchivePassword(ctx context.Context, archive File, password
 	if err != nil {
 		return File{}, false, err
 	}
+	return c.savePasswordFile(ctx, archive.ParentID, name, password, overwrite)
+}
+
+// SaveSharedPassword stores the hidden directory-wide password file used by
+// recursive archive password lookup.
+func (c *Client) SaveSharedPassword(ctx context.Context, directory File, password []byte, overwrite bool) (File, bool, error) {
+	if directory.ID < 0 || !directory.IsDir || directory.Trashed || directory.ParentID < 0 {
+		return File{}, false, errors.New("panapi: invalid password directory metadata")
+	}
+	return c.savePasswordFile(ctx, directory.ID, SharedPasswordFileName, password, overwrite)
+}
+
+func (c *Client) savePasswordFile(ctx context.Context, parentID int64, name string, password []byte, overwrite bool) (File, bool, error) {
+	if parentID < 0 || name == "" || path.Base(name) != name || strings.ContainsAny(name, `\/`) {
+		return File{}, false, errors.New("panapi: invalid password file metadata")
+	}
 	if len(password) == 0 || len(password) > maxZIPPasswordBytes || !utf8.Valid(password) {
 		return File{}, false, errors.New("panapi: archive password must be valid UTF-8 between 1 byte and 4096 bytes")
 	}
-	files, err := c.List(ctx, archive.ParentID)
+	files, err := c.List(ctx, parentID)
 	if err != nil {
 		return File{}, false, err
 	}
@@ -156,7 +173,7 @@ func (c *Client) SaveArchivePassword(ctx context.Context, archive File, password
 		Size       int    `json:"size"`
 		Duplicate  int    `json:"duplicate"`
 		ContainDir bool   `json:"containDir"`
-	}{archive.ParentID, name, hex.EncodeToString(md5sum[:]), len(password), duplicate, false}
+	}{parentID, name, hex.EncodeToString(md5sum[:]), len(password), duplicate, false}
 	body, err := json.Marshal(createPayload)
 	if err != nil {
 		return File{}, false, errors.New("panapi: could not encode upload request")
@@ -171,7 +188,7 @@ func (c *Client) SaveArchivePassword(ctx context.Context, archive File, password
 		if created.FileID <= 0 {
 			return File{}, false, errors.New("panapi: upload reuse response missing file ID")
 		}
-		return File{ID: created.FileID, ParentID: archive.ParentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, false, nil
+		return File{ID: created.FileID, ParentID: parentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, false, nil
 	}
 	if created.Preupload == "" || created.SliceSize <= 0 || len(created.Servers) == 0 {
 		return File{}, false, errors.New("panapi: upload response missing required fields")
@@ -204,7 +221,7 @@ func (c *Client) SaveArchivePassword(ctx context.Context, archive File, password
 	if !completed.Completed || completed.FileID <= 0 {
 		return File{}, false, errors.New("panapi: upload completion was not confirmed")
 	}
-	return File{ID: completed.FileID, ParentID: archive.ParentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, false, nil
+	return File{ID: completed.FileID, ParentID: parentID, Name: name, Size: int64(len(password)), Version: hex.EncodeToString(md5sum[:]) + ":" + strconv.Itoa(len(password))}, false, nil
 }
 
 func (c *Client) uploadSmallFileSlice(ctx context.Context, server, preupload string, sliceNo int64, content []byte) error {
