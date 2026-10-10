@@ -14,6 +14,26 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 )
 
+// numeric7zVolume reports the first volume of the alternate naming scheme
+// emitted by some archivers: 001.7z, 002.7z, ... .  Keep this separate from
+// the conventional archive.7z.001 form because the visible archive name is
+// also used for password sidecars and cache identities.
+func numeric7zVolume(name string) (width int, ok bool) {
+	lower := strings.ToLower(name)
+	if !strings.HasSuffix(lower, ".7z") {
+		return 0, false
+	}
+	digits := name[:len(name)-3]
+	if len(digits) < 3 || strings.Trim(digits, "0123456789") != "" {
+		return 0, false
+	}
+	n, err := strconv.Atoi(digits)
+	if err != nil || n != 1 {
+		return 0, false
+	}
+	return len(digits), true
+}
+
 type volumeReaderAt struct {
 	mu           sync.Mutex
 	owner        *Tree
@@ -101,10 +121,11 @@ func (r *volumeReaderAt) sourceAt(ctx context.Context, index int) (*storage.Remo
 }
 
 func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *archiveDescriptor) (io.ReaderAt, int64, string, error) {
-	if !strings.HasSuffix(strings.ToLower(a.name), ".7z.001") {
+	conventional := strings.HasSuffix(strings.ToLower(a.name), ".7z.001")
+	width, numeric := numeric7zVolume(a.name)
+	if !conventional && !numeric {
 		return contextRemote{ctx: ctx, source: source}, a.size, archiveIdentity(source, a), nil
 	}
-	stem := a.name[:len(a.name)-4]
 	directory, err := t.cloudDirectory(ctx, a.parentID)
 	if err != nil {
 		return nil, 0, "", err
@@ -113,13 +134,26 @@ func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *arc
 	value, err := t.loadMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		parts := map[int]panapi.File{}
 		for _, f := range directory.files {
-			if !strings.HasPrefix(f.Name, stem+".") {
-				continue
-			}
-			suffix := strings.TrimPrefix(f.Name, stem+".")
-			number, e := strconv.Atoi(suffix)
-			if e != nil || len(suffix) < 3 || strings.Trim(suffix, "0123456789") != "" {
-				continue
+			var number int
+			if conventional {
+				stem := a.name[:len(a.name)-4]
+				if !strings.HasPrefix(f.Name, stem+".") {
+					continue
+				}
+				suffix := strings.TrimPrefix(f.Name, stem+".")
+				var e error
+				number, e = strconv.Atoi(suffix)
+				if e != nil || len(suffix) < 3 || strings.Trim(suffix, "0123456789") != "" {
+					continue
+				}
+			} else {
+				if len(f.Name) != width+3 || !strings.HasSuffix(strings.ToLower(f.Name), ".7z") {
+					continue
+				}
+				number, _ = strconv.Atoi(f.Name[:width])
+				if number < 1 || fmt.Sprintf("%0*d.7z", width, number) != f.Name {
+					continue
+				}
 			}
 			if number < 1 || number > 1000 || f.IsDir || f.Size <= 0 {
 				return nil, 0, syscall.EIO

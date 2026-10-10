@@ -17,6 +17,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"slices"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -150,15 +151,21 @@ func (t *Tree) archivePassword(ctx context.Context, archive *archiveDescriptor) 
 	key := fmt.Sprintf("password:%d:%s:%d:%d:%s:g%d", archive.id, archive.version, archive.size, archive.parentID, archive.name, directory.generation)
 	value, err := t.loadRefreshingMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
 		wanted := archive.name + ".pwd"
+		wants := []string{wanted}
 		if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {
 			wanted = archive.name[:len(archive.name)-4] + ".pwd"
+			wants = []string{wanted}
+		} else if width, ok := numeric7zVolume(archive.name); ok {
+			// Numeric split volumes conventionally keep the sidecar beside
+			// the logical archive as 001.pwd; accept the literal suffix too.
+			wants = []string{archive.name[:width] + ".pwd", wanted}
 		}
 		var found *struct {
 			id   int64
 			size int64
 		}
 		for _, f := range directory.files {
-			if f.Name == wanted && !f.IsDir {
+			if !f.IsDir && slices.Contains(wants, f.Name) {
 				if found != nil {
 					return nil, 0, syscall.EACCES
 				}
