@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,12 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
+)
+
+var (
+	version   = "dev"
+	commit    = "unknown"
+	buildTime = "unknown"
 )
 
 func openCache(dir string, maxBytes int64, durability string) (*storage.Cache, error) {
@@ -215,10 +222,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	indexBudget := *indexBudgetMiB
+	if indexBudget <= 0 {
+		indexBudget = (*cacheGiB << 30) / 8 >> 20
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// Fail authentication/list errors before installing a mount.
-	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{DisableISODirs: !*isoDirs, MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableStreamMembers: !*streamMembers, DisableArchivePageCache: !*archivePageCache, ReadAheadMaxBytes: *readAheadMiB << 20, DisableReadAhead: *readAheadMiB == 0})
+	executable, _ := os.Executable()
+	mountInfo := fmt.Sprintf("version=%s\ncommit=%s\nbuild_time=%s\ngo=%s\nos_arch=%s/%s\nexecutable=%s\nmountpoint=%s\ncache_dir=%s\ncache_capacity_bytes=%d\nindex_budget_mib=%d\ncache_durability=%s\ncontrol_socket=%s\nroot_id=%d\nzip_dirs=%t\niso_dirs=%t\ndirectory_ttl=%s\nsource_ttl=%s\nentry_ttl=%s\nattr_ttl=%s\nmetadata_mib=%d\nprefetch_files=%d\nprefetch_workers=%d\nprefetch_mib=%d\ndownload_requests=%d\ndownload_bytes_mib=%d\nread_ahead_mib=%d\n", version, commit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH, executable, mountAbs, cacheAbs, *cacheGiB<<30, indexBudget, *cacheDurability, socketPath, *rootID, *zipDirs, *isoDirs, directoryTTL.String(), sourceTTL.String(), entryTTL.String(), attrTTL.String(), *metadataMiB, *prefetchFiles, *prefetchWorkers, *prefetchMiB, *downloadRequests, *downloadBytesMiB, *readAheadMiB)
+	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MountInfo: mountInfo, DisableISODirs: !*isoDirs, MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableStreamMembers: !*streamMembers, DisableArchivePageCache: !*archivePageCache, ReadAheadMaxBytes: *readAheadMiB << 20, DisableReadAhead: *readAheadMiB == 0})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}
@@ -273,6 +286,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  .mount123-refresh       read to refresh the current cloud directory")
 	_, _ = fmt.Fprintln(w, "  .mount123-probe         read to detect renamed archives in one level")
 	_, _ = fmt.Fprintln(w, "  .mount123-probe-status  read to query the last probe without starting one")
+	_, _ = fmt.Fprintln(w, "  .mount123-info          read mount version, cache and runtime configuration")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Use 'mount123 <command> -h' for command flags. See mount123/README.md for limits and examples.")
 	_, _ = fmt.Fprintln(w)

@@ -14,7 +14,7 @@ import (
 func TestHelpDocumentsHiddenDirectoryControls(t *testing.T) {
 	var output bytes.Buffer
 	printUsage(&output)
-	for _, name := range []string{".mount123-refresh", ".mount123-probe", ".mount123-probe-status"} {
+	for _, name := range []string{".mount123-refresh", ".mount123-probe", ".mount123-probe-status", ".mount123-info"} {
 		if !bytes.Contains(output.Bytes(), []byte(name)) {
 			t.Fatalf("help output does not mention %s: %s", name, output.String())
 		}

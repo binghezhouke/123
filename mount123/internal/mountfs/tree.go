@@ -50,6 +50,8 @@ type PasswordAPI interface {
 // Options sets mount-local metadata and source reuse lifetimes. Zero values
 // select documented defaults.
 type Options struct {
+	// MountInfo is exposed through the root-only .mount123-info control file.
+	MountInfo               string
 	DisableISODirs          bool
 	ReadAheadMaxBytes       int64
 	DisableReadAhead        bool
@@ -1059,6 +1061,9 @@ func (n *Node) Setattr(context.Context, fs.FileHandle, *fuse.SetAttrIn, *fuse.At
 }
 func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	defer n.tree.beginOperation(ctx, iostats.OperationLookup)()
+	if name == mountInfoControlName && n.root && n.tree.opts.MountInfo != "" {
+		return n.mountInfoControl(ctx, out), 0
+	}
 	if (name == probeControlName || name == probeStatusControlName) && n.isCloudDirectory() {
 		return n.probeControl(ctx, name, out), 0
 	}

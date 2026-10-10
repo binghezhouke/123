@@ -27,12 +27,13 @@ import (
 const (
 	probeControlName       = ".mount123-probe"
 	probeStatusControlName = ".mount123-probe-status"
+	mountInfoControlName   = ".mount123-info"
 	maxProbeFiles          = 1000
 	probeReadBudget        = 1 << 20
 )
 
 func isDirectoryControlName(name string) bool {
-	return name == refreshControlName || name == probeControlName || name == probeStatusControlName
+	return name == refreshControlName || name == probeControlName || name == probeStatusControlName || name == mountInfoControlName
 }
 
 // Results contain no source URL, password or archive-controlled error text.
