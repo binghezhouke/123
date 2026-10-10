@@ -34,7 +34,15 @@ outside the data-cache byte budget. `-stats-interval=0` disables the writer.
 The `cache` snapshot includes:
 
 - Capacity, resident and reserved bytes; unique pinned bytes; entry count;
-  protected index budget and occupancy; residency/pins by retention class.
+  protected index budget and occupancy; residency/pins by retention class, and
+  the same residency split by protected index family under `index_kinds`
+  (`archive_index`, `directory_snapshot`, `remote_identity`, `archive_probe`,
+  `unclassified_index`). Each family also carries the objects that left the
+  share and why: `over_budget_demotions` for objects pushed back to ordinary
+  data because the share was already taken, and `capacity_evictions` for the
+  last-resort removal of a still-protected object. `-index-budget-mib` sets the
+  share; the default is the cache limit divided by eight, with no 64 MiB
+  ceiling, so a 50 GiB cache protects 6.25 GiB of metadata.
 - Capacity evictions and bytes, by retention class. Explicit removals and
   corruption cleanup are not capacity evictions. Startup capacity trimming is
   outside operation counters.
@@ -50,6 +58,18 @@ The `cache` snapshot includes:
   Its byte counter measures the evicted objects' sizes, not new network bytes.
   Changed extent boundaries and older evictions can escape this detector; it
   is a lower-bound signal, not a complete working-set estimator.
+
+`io-stats` also reports metadata request pressure, which is what makes a
+directory scan visible without a live trace. `readdir`, `lookup`, `getattr` and
+`open` each carry cumulative, foreground, background and currently-active
+request counts; `index_queue` reports the shared archive-index build queue
+(limit, active, background-active, waiting and granted requests), which is
+where metadata requests queue when they need capacity. Interval reports turn
+the cumulative counters into per-second rates for operations, the index queue
+and the download queue, so a sample pair answers "is the traversal still
+running?" without reading file names. `scan` reports whether sustained
+foreground metadata traffic has put the mount into background load shedding,
+with the observed rate, the enter/exit thresholds and the start time.
 
 Range statistics do not cover `ReadMetadataAtContext`, `ReadRangeAtContext`,
 direct decoded-member handles or reads satisfied entirely by the kernel page
