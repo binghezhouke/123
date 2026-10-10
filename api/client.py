@@ -147,6 +147,13 @@ class Pan123Client:
             file_id, password, archive_kind=archive_kind,
             skip_existing=skip_existing, expected_archive=expected_archive)
 
+    def save_shared_password(self, parent_id: int, password: str, *, overwrite=False) -> dict:
+        """上传目录级 .mount123.pwd 共享密码文件。"""
+        return self.file_service.save_shared_password(parent_id, password, overwrite=overwrite)
+
+    def get_shared_password(self, parent_id: int):
+        return self.file_service.get_shared_password(parent_id)
+
     def get_file_path(self, file_id: int, use_cache: bool = True):
         """获取文件完整路径"""
         return self.file_service.get_file_path(file_id, use_cache)

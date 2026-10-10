@@ -728,6 +728,95 @@ class FileService:
     def save_zip_password(self, file_id: int, password: str) -> Dict[str, Any]:
         return self.save_archive_password(file_id, password)
 
+    def save_shared_password(self, parent_id: int, password: str, *, overwrite=False) -> Dict[str, Any]:
+        """Save the directory-wide password file used by mount123.
+
+        The hidden ``.mount123.pwd`` is resolved by the mount in the archive's
+        directory and, when enabled there, its parent directories. This
+        operation deliberately skips archive validation: it is intended for a
+        directory whose archives are known to share a password.
+        """
+        if not isinstance(parent_id, int) or isinstance(parent_id, bool) or parent_id < 0:
+            raise ValidationError("parent_id 必须是非负整数")
+        if not isinstance(password, str):
+            raise ValidationError("压缩包密码必须是文本")
+        try:
+            password_bytes = password.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValidationError("压缩包密码必须是有效UTF-8文本") from exc
+        if not password_bytes or len(password_bytes) > 4096:
+            raise ValidationError("密码长度必须为1到4096个UTF-8字节")
+
+        if parent_id:
+            directory = self.get_file_detail(parent_id)
+            if (directory is None or not directory.is_folder or
+                    _is_trashed({"trashed": directory.trashed})):
+                raise ValidationError("parent_id 必须指向有效目录")
+        siblings, _ = self.list_files(parent_id=parent_id, auto_fetch_all=True, use_cache=False)
+        matches = [item for item in siblings if item.filename == ".mount123.pwd"]
+        if any(item.is_folder for item in matches):
+            raise ValidationError("同名共享密码路径是目录，拒绝覆盖")
+        if len(matches) > 1:
+            raise ValidationError("同目录存在多个共享密码文件，拒绝覆盖")
+        if matches and not overwrite:
+            return {"skipped": True, "filename": ".mount123.pwd", "fileID": matches[0].file_id}
+
+        fd, temp_path = tempfile.mkstemp(prefix="pan123-shared-password-")
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as password_file:
+                fd = -1
+                password_file.write(password_bytes)
+                password_file.flush()
+            result = self.upload_file(
+                temp_path, parent_id, filename=".mount123.pwd", duplicate=2 if overwrite else 1,
+                skip_if_exists=False, try_sha1_reuse=False, sensitive=True)
+            if not isinstance(result, dict) or result.get("fileID") is None:
+                raise FileUploadError("共享密码文件上传失败")
+            self._invalidate_dir_cache(parent_id)
+            return result
+        finally:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.remove(temp_path)
+            except FileNotFoundError:
+                pass
+
+    def get_shared_password(self, parent_id: int) -> Optional[str]:
+        """Read the current directory's shared password for the web UI."""
+        if not isinstance(parent_id, int) or isinstance(parent_id, bool) or parent_id < 0:
+            raise ValidationError("parent_id 必须是非负整数")
+        siblings, _ = self.list_files(parent_id=parent_id, auto_fetch_all=True, use_cache=False)
+        matches = [item for item in siblings
+                   if item.filename == ".mount123.pwd" and not item.is_folder]
+        if not matches:
+            return None
+        if len(matches) > 1:
+            raise ValidationError("同目录存在多个共享密码文件，拒绝读取")
+        link = self.get_final_download_url(matches[0].file_id, prefer_webdav=False, use_cache=False)
+        if not link:
+            raise FileUploadError("无法获取共享密码文件下载地址")
+        import requests
+        response = None
+        try:
+            response = requests.get(link[0] if isinstance(link, tuple) else link,
+                                    timeout=(10, 30), stream=True)
+            response.raise_for_status()
+            data = bytearray()
+            for chunk in response.iter_content(chunk_size=4096):
+                if not chunk:
+                    continue
+                data.extend(chunk)
+                if len(data) > 4096:
+                    raise ValidationError("共享密码文件超过 4096 字节")
+            return bytes(data).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValidationError("共享密码文件不是有效 UTF-8 文本") from exc
+        finally:
+            if response is not None:
+                response.close()
+
     def save_archive_password(self, file_id: int, password: str, archive_kind=None,
                               *, skip_existing=False, expected_archive=None) -> Dict[str, Any]:
         """Save an archive password as a sibling `<archive>.pwd`.

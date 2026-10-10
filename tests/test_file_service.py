@@ -101,6 +101,39 @@ def test_batch_password_upload_never_uses_replace_mode(service, monkeypatch):
     assert calls[0]["sensitive"] is True
 
 
+def test_shared_password_uploads_directory_sidecar_without_archive_validation(service, monkeypatch):
+    directory = File({"fileId": 8, "parentFileId": 0, "filename": "photos", "type": 1, "trashed": 0})
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: directory)
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: (FileList([]), -1))
+    calls = []
+
+    def upload_file(local_path, parent_id, **kwargs):
+        calls.append((local_path, parent_id, kwargs, open(local_path, "rb").read()))
+        return {"fileID": 91}
+
+    monkeypatch.setattr(service, "upload_file", upload_file)
+    result = service.save_shared_password(8, "共享🔑", overwrite=False)
+
+    assert result == {"fileID": 91}
+    assert len(calls) == 1
+    path, parent_id, options, contents = calls[0]
+    assert parent_id == 8 and contents == "共享🔑".encode()
+    assert options == {"filename": ".mount123.pwd", "duplicate": 1,
+                       "skip_if_exists": False, "try_sha1_reuse": False,
+                       "sensitive": True}
+    assert not os.path.exists(path)
+
+
+def test_shared_password_skips_existing_sidecar_unless_overwriting(service, monkeypatch):
+    existing = make_file(90, ".mount123.pwd", parent_id=8)
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id:
+                        File({"fileId": 8, "filename": "photos", "type": 1, "trashed": 0}))
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: (FileList([existing]), -1))
+    monkeypatch.setattr(service, "upload_file", lambda *a, **kw: pytest.fail("must not upload"))
+    result = service.save_shared_password(8, "new", overwrite=False)
+    assert result == {"skipped": True, "filename": ".mount123.pwd", "fileID": 90}
+
+
 @pytest.mark.parametrize("name,sidecar", [("archive.zip", "archive.zip.pwd"),
     ("archive.7z", "archive.7z.pwd"), ("archive.rar", "archive.rar.pwd"),
     ("archive.7z.001", "archive.7z.pwd"), ("archive.7z.002", "archive.7z.pwd")])

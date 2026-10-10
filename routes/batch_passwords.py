@@ -35,8 +35,21 @@ def checked_json():
 def page(parent_id):
     csrf = session.setdefault("archive_csrf", secrets.token_urlsafe(32))
     session.setdefault("archive_session", secrets.token_urlsafe(32))
+    client = get_client()
+    shared_password = None
+    shared_password_error = None
+    # Keep the page compatible with lightweight clients used by integrations and
+    # older test fixtures while the shared-password capability is optional.
+    read_shared_password = getattr(client, "get_shared_password", None)
+    if callable(read_shared_password):
+        try:
+            shared_password = read_shared_password(parent_id)
+        except (Pan123APIError, requests.RequestException, OSError, ValueError) as exc:
+            current_app.logger.warning("读取目录共享密码失败，目录 ID: %s (%s)", parent_id, type(exc).__name__)
+            shared_password_error = "当前共享密码暂时无法读取"
     return render_template("batch_passwords.html", parent_id=parent_id, csrf_token=csrf,
-                           breadcrumbs=folder_breadcrumbs(get_client(), parent_id))
+                           breadcrumbs=folder_breadcrumbs(client, parent_id),
+                           shared_password=shared_password, shared_password_error=shared_password_error)
 
 
 @batch_passwords_bp.post("/directory/<int:parent_id>/zip-passwords/plan")
@@ -111,5 +124,37 @@ def apply(parent_id, file_id):
     except (Pan123APIError, requests.RequestException, OSError):
         current_app.logger.warning("批量 ZIP 密码验证或保存失败，文件 ID: %s", file_id)
         return jsonify(status="failed", message="读取或保存失败，请重试；已有密码文件不会被覆盖")
+    finally:
+        lock.release()
+
+
+@batch_passwords_bp.post("/directory/<int:parent_id>/shared-password")
+def apply_shared(parent_id):
+    data = checked_json()
+    if data is None:
+        return jsonify(error="请求校验失败，请刷新页面后重试"), 400
+    password = data.get("password")
+    overwrite = data.get("overwrite", False)
+    if not isinstance(password, str) or not password or len(password) > 1024:
+        return jsonify(error="请输入 1 到 1024 个字符的密码"), 400
+    if not isinstance(overwrite, bool):
+        return jsonify(error="覆盖选项必须为布尔值"), 400
+    try:
+        if len(password.encode("utf-8")) > 4096:
+            raise UnicodeError()
+    except UnicodeError:
+        return jsonify(error="密码必须是有效 UTF-8 文本，且不超过 4096 字节"), 400
+    lock = current_app.extensions["batch_password_locks"][parent_id % 32]
+    if not lock.acquire(blocking=False):
+        return jsonify(error="已有密码设置正在处理，请稍后重试"), 409
+    try:
+        result = get_client().save_shared_password(parent_id, password, overwrite=overwrite)
+        current_app.extensions["directory_pages"].invalidate_directory(parent_id)
+        if result.get("skipped"):
+            return jsonify(status="skipped", message="已存在共享密码，未覆盖")
+        return jsonify(status="saved", message="已保存当前目录共享密码")
+    except (Pan123APIError, requests.RequestException, OSError, ValueError):
+        current_app.logger.warning("目录共享密码保存失败，目录 ID: %s", parent_id)
+        return jsonify(status="failed", message="共享密码保存失败，请重试"), 502
     finally:
         lock.release()

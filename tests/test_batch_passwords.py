@@ -27,12 +27,14 @@ def batch(app, monkeypatch, remote):
     remote.data = data.getvalue()
     archive = File({"fileId": 1, "filename": "one.zip", "type": 0, "parentFileId": 8,
                     "size": len(remote.data), "etag": "v1"})
-    saves, calls = [], []
+    saves, shared_saves, calls = [], [], []
     client = SimpleNamespace(
         get_file_info_single=lambda *a, **k: None,
         get_file_detail=lambda *a: archive,
         get_final_download_url=lambda *a, **kw: ("https://example.test/archive", "api"),
         save_archive_password=lambda *args, **kw: saves.append((args, kw)) or {"fileID": 9},
+        get_shared_password=lambda parent_id: "旧共享密码",
+        save_shared_password=lambda *args, **kw: shared_saves.append((args, kw)) or {"fileID": 10},
     )
 
     def listing(**kwargs):
@@ -50,7 +52,27 @@ def batch(app, monkeypatch, remote):
     assert web.get(BASE).status_code == 200
     with web.session_transaction() as state:
         csrf = state["archive_csrf"]
-    return SimpleNamespace(web=web, csrf=csrf, saves=saves, calls=calls, client=client, archive=archive)
+    return SimpleNamespace(web=web, csrf=csrf, saves=saves, shared_saves=shared_saves,
+                           calls=calls, client=client, archive=archive)
+
+
+def test_shared_password_is_visible_and_can_be_saved(batch):
+    page = batch.web.get(BASE)
+    assert page.status_code == 200
+    assert "旧共享密码".encode() in page.data
+    response = batch.web.post("/directory/8/shared-password", json={
+        "csrf_token": batch.csrf, "password": "新共享密码", "overwrite": True})
+    assert response.status_code == 200
+    assert response.json == {"status": "saved", "message": "已保存当前目录共享密码"}
+    assert batch.shared_saves == [((8, "新共享密码"), {"overwrite": True})]
+
+
+@pytest.mark.parametrize("password", ["", None, "x" * 1025])
+def test_shared_password_rejects_invalid_input(batch, password):
+    response = batch.web.post("/directory/8/shared-password", json={
+        "csrf_token": batch.csrf, "password": password})
+    assert response.status_code == 400
+    assert not batch.shared_saves
 
 
 def test_directory_link_and_plan_scan_all_pages_without_subdirectories(batch):
