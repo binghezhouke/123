@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -130,6 +131,26 @@ func TestZIPIndexRestoresWithoutReadingCentralDirectory(t *testing.T) {
 	if _, err := idx2.members["entry.txt"].dataOffset(ctx); err != nil {
 		t.Fatalf("restored local header location: %v", err)
 	}
+}
+
+func TestArchiveCheckpointMarkerAndLegacyCompletion(t *testing.T) {
+	cache, err := storage.NewCache(t.TempDir(), 1<<20)
+	if err != nil { t.Fatal(err) }
+	defer cache.Close()
+	tree := New(context.Background(), indexStoreTestAPI{}, cache, 0, true).tree
+	ctx := context.Background()
+	identity := cache.StableDigest("test", "rar")
+	key := tree.archiveIndexCacheKey(".rar", "rar-identity", &archiveDescriptor{id: 7, name: "a.rar", size: 100, version: "v1"}, nil)
+	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: ".rar", ArchiveSize: 100, IdentityDigest: identity, Complete: false, ScanOffset: 42}
+	data, _ := json.Marshal(dto)
+	if err := cache.StoreArchiveIndex(ctx, key+":checkpoint", data); err != nil { t.Fatal(err) }
+	idx, ok := tree.loadArchiveCheckpoint(ctx, key, ".rar", 100, identity)
+	if !ok || idx.complete { t.Fatalf("checkpoint was treated as complete: ok=%v idx=%#v", ok, idx) }
+	var raw archiveIndexDTO
+	if err := json.Unmarshal(data, &raw); err != nil || raw.Complete || raw.ScanOffset != 42 { t.Fatalf("checkpoint marker lost: %#v", raw) }
+	legacy := []byte(fmt.Sprintf(`{"version":%d,"kind":".rar","archive_size":100,"identity_digest":"%s"}`, archiveIndexFormatVersion, identity))
+	if err := cache.StoreArchiveIndex(ctx, key, legacy); err != nil { t.Fatal(err) }
+	if restored, ok := tree.loadPersistentArchiveIndex(ctx, key, ".rar", 100, identity); !ok || !restored.complete { t.Fatalf("legacy index was not completed: ok=%v idx=%#v", ok, restored) }
 }
 
 func TestSevenZipIndexRestoresWithoutRescanningHeaders(t *testing.T) {
