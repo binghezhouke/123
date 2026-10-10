@@ -468,7 +468,15 @@ func requestControlStatus(ctx context.Context, socketPath, archivePath string) (
 	defer conn.Close()
 	stopClose := context.AfterFunc(ctx, func() { _ = conn.Close() })
 	defer stopClose()
-	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	// Resolving a deep path can require restoring several directory snapshots
+	// before the archive status request is queued. Keep the wire deadline in
+	// line with the server's 30-second handler deadline instead of failing
+	// healthy requests after the old fixed five-second window.
+	deadline := time.Now().Add(30 * time.Second)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
+		deadline = ctxDeadline
+	}
+	_ = conn.SetDeadline(deadline)
 	if err := json.NewEncoder(conn).Encode(controlRequest{Command: "status", Path: archivePath}); err != nil {
 		return mountfs.ArchiveIndexStatus{}, err
 	}

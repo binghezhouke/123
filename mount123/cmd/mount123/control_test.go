@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -26,6 +27,43 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
+
+func TestRequestControlStatusAllowsDeepPathResolutionBeyondFiveSeconds(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(socketPath, 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var request controlRequest
+		if err := json.NewDecoder(conn).Decode(&request); err != nil {
+			return
+		}
+		time.Sleep(5200 * time.Millisecond)
+		_ = json.NewEncoder(conn).Encode(controlResponse{Status: &mountfs.ArchiveIndexStatus{
+			State: "scanning", Members: 3, ScanOffset: 12, ArchiveSize: 34,
+		}})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	status, err := requestControlStatus(ctx, socketPath, "deep/archive.7z")
+	if err != nil {
+		t.Fatalf("status request timed out before the server response: %v", err)
+	}
+	if status.State != "scanning" || status.Members != 3 {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+}
 
 type controlTestAPI struct {
 	url   string
