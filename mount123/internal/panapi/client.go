@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/faults"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 const defaultBaseURL = "https://open-api.123pan.com"
@@ -572,27 +573,16 @@ func waitCompletionRetry(ctx context.Context, attempt int) error {
 	}
 }
 
+const maxIndividualRetryAfterWait = 30 * time.Second
+
+var errRetryAfterTooLong = errors.New("panapi: Retry-After exceeds individual wait limit")
+
 func waitThrottle(ctx context.Context, attempt int, retryAfter string) error {
-	var delay time.Duration
-	if value := strings.TrimSpace(retryAfter); value != "" {
-		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
-			if seconds > 30 {
-				return errors.New("panapi: Retry-After exceeds 30-second limit")
-			}
-			delay = time.Duration(seconds) * time.Second
-		} else if _, numericErr := strconv.ParseUint(value, 10, 64); numericErr == nil || strings.Trim(value, "0123456789") == "" {
-			return errors.New("panapi: invalid or excessive Retry-After value")
-		} else if when, err := http.ParseTime(value); err == nil {
-			delay = time.Until(when)
-			if delay > 30*time.Second {
-				return errors.New("panapi: Retry-After exceeds 30-second limit")
-			}
-		} else {
-			delay = throttleBackoff(attempt)
-		}
-	} else if when, err := http.ParseTime(retryAfter); err == nil {
-		delay = time.Until(when)
-	} else {
+	delay, valid := parseRetryAfter(retryAfter, time.Now())
+	if valid && delay > maxIndividualRetryAfterWait {
+		return errRetryAfterTooLong
+	}
+	if !valid {
 		delay = throttleBackoff(attempt)
 	}
 	if delay < 0 {
@@ -715,22 +705,44 @@ func (c *Client) invalidateTokenIf(failed string) {
 }
 
 func (c *Client) waitRateLimit(ctx context.Context, cat apiCategory) error {
-	return c.scheduler.acquire(ctx, cat, true)
+	return c.scheduler.acquire(ctx, cat, !workqueue.IsBackground(ctx))
 }
 
 func (c *Client) cooldown(cat apiCategory, d time.Duration) { c.scheduler.cooldown(cat, d) }
 
 func retryAfterDuration(raw string) time.Duration {
-	raw = strings.TrimSpace(raw)
-	if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
-		return time.Duration(n) * time.Second
+	d, valid := parseRetryAfter(raw, time.Now())
+	if !valid {
+		return 0
 	}
-	if when, err := http.ParseTime(raw); err == nil {
-		if wait := time.Until(when); wait > 0 {
-			return wait
+	return d
+}
+
+func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.ParseUint(value, 10, 64); err == nil {
+		maxSeconds := uint64((1<<63 - 1) / int64(time.Second))
+		if seconds > maxSeconds {
+			return time.Duration(1<<63 - 1), true
 		}
+		return time.Duration(seconds) * time.Second, true
 	}
-	return 0
+	// Numeric-looking values that overflow ParseUint are still valid server
+	// delays. Treat them as excessive and keep the category closed.
+	if value != "" && strings.Trim(value, "0123456789") == "" {
+		return time.Duration(1<<63 - 1), true
+	}
+	when, err := http.ParseTime(value)
+	if err != nil {
+		return 0, false
+	}
+	if !when.After(now) {
+		return 0, true
+	}
+	return when.Sub(now), true
 }
 
 func (c *Client) cachePath() string {
