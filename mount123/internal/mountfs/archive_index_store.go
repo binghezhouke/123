@@ -42,6 +42,7 @@ type archiveIndexDTO struct {
 	Complete       bool                   `json:"complete"`
 	ScanOffset     int64                  `json:"scan_offset,omitempty"`
 	ScanVersion    int                    `json:"scan_version,omitempty"`
+	ScanOrdinal    int                    `json:"scan_ordinal,omitempty"`
 }
 
 type archiveIndexEntryDTO struct {
@@ -112,6 +113,7 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 	}
 	idx.scanOffset = dto.ScanOffset
 	idx.scanVersion = dto.ScanVersion
+	idx.scanOrdinal = dto.ScanOrdinal
 	return idx, true
 }
 
@@ -196,7 +198,7 @@ func (t *Tree) persistArchiveCheckpoint(ctx context.Context, cacheKey, kind stri
 		return
 	}
 	idx.mu.RLock()
-	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity, Complete: false, ScanOffset: offset, ScanVersion: archiveCheckpointVersion}
+	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity, Complete: false, ScanOffset: offset, ScanVersion: archiveCheckpointVersion, ScanOrdinal: idx.scanOrdinal}
 	var walk func(*zipDir, string)
 	walk = func(dir *zipDir, prefix string) {
 		for name, child := range dir.dirs {

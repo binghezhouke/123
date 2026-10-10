@@ -384,7 +384,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		bounded := &budgetReaderAt{r: reader, left: readBudget}
 		lastCheckpoint := time.Now()
 		lastSafeOffset := resumeOffset
-		err := scanArchiveFrom(ctx, a.kind(), bounded, size, password, resumeOffset, len(idx.members), func(f archiveMember, nextOffset int64) error {
+		err := scanArchiveFrom(ctx, a.kind(), bounded, size, password, resumeOffset, idx.scanOrdinal, func(f archiveMember, nextOffset int64) error {
 			idx.mu.Lock()
 			entries++
 			if entries > t.opts.MaxZIPEntries || f.size >= math.MaxInt64 {
@@ -446,6 +446,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 				s.Members = entries
 				s.ArchiveSize = size
 			})
+			idx.scanOrdinal = f.ordinal + 1
 			close(idx.changed)
 			idx.changed = make(chan struct{})
 			idx.mu.Unlock()

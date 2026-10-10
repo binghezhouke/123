@@ -766,6 +766,7 @@ type zipIndex struct {
 	scanErr     error
 	scanOffset  int64
 	scanVersion int
+	scanOrdinal int
 	root        *zipDir
 	members     map[string]*member
 	bytes       int64
