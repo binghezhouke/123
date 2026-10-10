@@ -43,17 +43,21 @@ func openCacheWithDownloadConfig(dir string, maxBytes int64, durability string, 
 // openCacheWithIndexBudget opens a cache with an explicit protected archive
 // index budget. A non-positive budget keeps the cache's own default.
 func openCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, durability string, download storage.DownloadConfig) (*storage.Cache, error) {
+	return openCacheWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, 0, durability, download)
+}
+
+func openCacheWithIndexBudgetAndMinFree(dir string, maxBytes, indexBudget, minFreeBytes int64, durability string, download storage.DownloadConfig) (*storage.Cache, error) {
 	if indexBudget <= 0 {
-		return openCacheWithDownloadConfig(dir, maxBytes, durability, download)
+		indexBudget = maxBytes / 8
 	}
 	if indexBudget > maxBytes {
 		return nil, fmt.Errorf("archive index budget must not exceed the cache size")
 	}
 	switch durability {
 	case "durable":
-		return storage.NewCacheWithIndexBudget(dir, maxBytes, indexBudget, download)
+		return storage.NewCacheWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, download)
 	case "ephemeral":
-		return storage.NewEphemeralCacheWithIndexBudget(dir, maxBytes, indexBudget, download)
+		return storage.NewEphemeralCacheWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, download)
 	default:
 		return nil, fmt.Errorf("invalid cache durability: choose durable or ephemeral")
 	}
@@ -94,6 +98,7 @@ func run() error {
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 50, "maximum disk cache size in GiB")
+	cacheMinFreeGiB := flag.Int64("cache-min-free-gib", 0, "minimum free space to keep on the cache filesystem in GiB (0 disables)")
 	indexBudgetMiB := flag.Int64("index-budget-mib", 0, "protected archive index cache budget in MiB (0 derives it from the cache size)")
 	statsInterval := flag.Duration("stats-interval", 30*time.Second, "append aggregate I/O statistics to io-stats.jsonl (0 disables)")
 	cacheDurability := flag.String("cache-durability", "durable", "cache durability: durable or ephemeral")
@@ -135,7 +140,7 @@ func run() error {
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
 	}
-	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *indexBudgetMiB < 0 || *indexBudgetMiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *entryTTL < 0 || *attrTTL < 0 || *statsInterval < 0 {
+	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *cacheMinFreeGiB < 0 || *cacheMinFreeGiB > 1<<20 || *indexBudgetMiB < 0 || *indexBudgetMiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *entryTTL < 0 || *attrTTL < 0 || *statsInterval < 0 {
 		return fmt.Errorf("invalid cache size, freshness interval or root ID")
 	}
 	mountAbs, err := filepath.Abs(*mountpoint)
@@ -201,7 +206,7 @@ func run() error {
 		}
 	}
 	downloadConfig := storage.DownloadConfig{MaxRequests: *downloadRequests, MaxInFlightBytes: *downloadBytesMiB << 20, ForegroundReservedBytes: *downloadReserveMiB << 20}
-	cache, err := openCacheWithIndexBudget(cacheAbs, *cacheGiB<<30, *indexBudgetMiB<<20, *cacheDurability, downloadConfig)
+	cache, err := openCacheWithIndexBudgetAndMinFree(cacheAbs, *cacheGiB<<30, *indexBudgetMiB<<20, *cacheMinFreeGiB<<30, *cacheDurability, downloadConfig)
 	if err != nil {
 		return err
 	}

@@ -58,6 +58,8 @@ type Cache struct {
 	mu                  sync.Mutex
 	dir                 string
 	max, used, reserved int64
+	minFreeBytes        int64
+	statfs              func(string) (int64, error)
 	indexBudget         int64
 	indexUsed           int64
 	reservedIndex       int64
@@ -91,10 +93,28 @@ func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadCon
 	return NewCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), download)
 }
 
+// NewCacheWithMinFree is a convenience constructor using the default index
+// budget.
+func NewCacheWithMinFree(dir string, maxBytes, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
+	return newCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), minFreeBytes, download)
+}
+
 // NewCacheWithIndexBudget opens a cache with an independent archive-index
 // budget. Index entries are admitted to their protected retention class only
 // within indexBudget; ordinary range data cannot consume that reservation.
 func NewCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, download DownloadConfig) (*Cache, error) {
+	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, 0, download)
+}
+
+// NewCacheWithIndexBudgetAndMinFree opens a cache while reserving a minimum
+// amount of free space on the filesystem containing dir. Background fills are
+// shed while the reserve is breached; foreground fills remain available when
+// the requested object fits in the currently free space.
+func NewCacheWithIndexBudgetAndMinFree(dir string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
+	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, minFreeBytes, download)
+}
+
+func newCacheWithIndexBudget(dir string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
 	var err error
 	download, err = download.normalized()
 	if err != nil {
@@ -105,6 +125,9 @@ func NewCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, download D
 	}
 	if indexBudget < 0 || indexBudget > maxBytes {
 		return nil, fmt.Errorf("index budget must be between 0 and cache size")
+	}
+	if minFreeBytes < 0 {
+		return nil, fmt.Errorf("minimum free disk space must be non-negative")
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -126,7 +149,7 @@ func NewCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, download D
 		return nil, err
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
-	c := &Cache{dir: dir, max: maxBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel, ghost: make(map[string]*list.Element), ghostLRU: list.New()}
+	c := &Cache{dir: dir, max: maxBytes, minFreeBytes: minFreeBytes, statfs: diskFreeBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel, ghost: make(map[string]*list.Element), ghostLRU: list.New()}
 	if err = c.loadIdentityKey(); err != nil {
 		c.Close()
 		return nil, err
@@ -413,7 +436,13 @@ func (c *Cache) load() error {
 	for _, item := range items {
 		name := item.Name()
 		if strings.HasPrefix(name, ".fill-") || strings.HasPrefix(name, ".metadata-") {
-			_ = os.Remove(filepath.Join(c.dir, name))
+			// Only remove regular files created by our atomic-fill paths. A
+			// directory, symlink, or other process' object is left untouched.
+			if info, infoErr := item.Info(); infoErr == nil && info.Mode().IsRegular() {
+				if removeErr := os.Remove(filepath.Join(c.dir, name)); removeErr == nil {
+					c.telemetry.orphanFilesCleaned++
+				}
+			}
 			continue
 		}
 		if item.IsDir() {
@@ -757,6 +786,10 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 		if class == cacheIndex && size > c.indexBudget-c.indexUsed-c.reservedIndex {
 			class = cacheProbation
 			targetPath = c.pathForKey(key, class)
+		}
+		if err := c.diskAdmissionLocked(workqueue.IsBackground(ctx), size); err != nil {
+			c.mu.Unlock()
+			return nil, err
 		}
 		c.consumeCacheGhostLocked(id)
 		if err := c.evictLocked(size); err != nil {

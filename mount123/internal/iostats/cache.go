@@ -21,13 +21,19 @@ type CacheSummary struct {
 	FillFailures          uint64                  `json:"fill_failures"`
 	// FillOutcomeVersion is 1 when FillCancelled and FillErrors are populated.
 	// Older snapshots omit this field and must treat the new counters as unknown.
-	FillOutcomeVersion uint8               `json:"fill_outcome_version,omitempty"`
-	FillCancelled      uint64              `json:"fill_cancelled,omitempty"`
-	FillErrors         uint64              `json:"fill_errors,omitempty"`
-	ExistingFillWaits  uint64              `json:"existing_fill_waits"`
-	Foreground         CacheRangeSummary   `json:"foreground"`
-	Background         CacheRangeSummary   `json:"background"`
-	Refaults           CacheRefaultSummary `json:"refaults"`
+	FillOutcomeVersion    uint8               `json:"fill_outcome_version,omitempty"`
+	FillCancelled         uint64              `json:"fill_cancelled,omitempty"`
+	FillErrors            uint64              `json:"fill_errors,omitempty"`
+	ExistingFillWaits     uint64              `json:"existing_fill_waits"`
+	Foreground            CacheRangeSummary   `json:"foreground"`
+	Background            CacheRangeSummary   `json:"background"`
+	Refaults              CacheRefaultSummary `json:"refaults"`
+	DiskFreeBytes         int64               `json:"disk_free_bytes"`
+	DiskMinimumFreeBytes  int64               `json:"disk_minimum_free_bytes"`
+	DiskPressureEvents    uint64              `json:"disk_pressure_events"`
+	DiskPressureRejects   uint64              `json:"disk_pressure_rejects"`
+	DiskPressureEvictions uint64              `json:"disk_pressure_evictions"`
+	OrphanFilesCleaned    uint64              `json:"orphan_files_cleaned"`
 }
 
 // CacheClassSummary describes current residency and capacity evictions for one

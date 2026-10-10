@@ -107,6 +107,7 @@ type archiveFile interface {
 	io.WriterTo
 	writeToN(w io.Writer, n int64) (int64, error)
 	currFile() *fileBlockHeader
+	nextBlock() error
 	nextFile() (*fileBlockList, error)
 	newArchiveFile(blocks *fileBlockList) (archiveFile, error)
 	Stat() (fs.FileInfo, error)

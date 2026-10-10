@@ -117,6 +117,28 @@ func TestLargeZIPMemberStreamsBeforeLaterRangeAndWaitsForTail(t *testing.T) {
 		t.Fatal("tail bytes mismatch after decompression completed")
 	}
 	tail.Done()
+	if errno := h.(fs.FileReleaser).Release(context.Background()); errno != 0 {
+		t.Fatalf("close completed member: %v", errno)
+	}
+	// A second open reuses the validated retained object. Reading backwards
+	// after the forward fill must not request another compressed replay.
+	reopened, flags, errno := member.Open(context.Background(), syscall.O_RDONLY)
+	if errno != 0 {
+		t.Fatalf("reopen retained member: %v", errno)
+	}
+	defer reopened.(fs.FileReleaser).Release(context.Background())
+	if flags != fuse.FOPEN_KEEP_CACHE {
+		t.Fatalf("reopened retained member flags=%x, want KEEP_CACHE", flags)
+	}
+	back, errno := reopened.(fs.FileReader).Read(context.Background(), make([]byte, 4096), 0)
+	if errno != 0 {
+		t.Fatalf("backward read after reopen: %v", errno)
+	}
+	got, status = back.Bytes(nil)
+	if status != fuse.OK || !bytes.Equal(got, content[:4096]) {
+		t.Fatal("backward read after retained reopen mismatched content")
+	}
+	back.Done()
 }
 
 func TestSmallZIPMemberKeepsStrictOpenValidation(t *testing.T) {

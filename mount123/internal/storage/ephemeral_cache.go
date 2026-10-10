@@ -22,14 +22,33 @@ func NewEphemeralCacheWithDownloadConfig(root string, maxBytes int64, download D
 	return NewEphemeralCacheWithIndexBudget(root, maxBytes, defaultIndexBudget(maxBytes), download)
 }
 
+// NewEphemeralCacheWithMinFree is a convenience constructor using the
+// default index budget.
+func NewEphemeralCacheWithMinFree(root string, maxBytes, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
+	return newEphemeralCacheWithIndexBudget(root, maxBytes, defaultIndexBudget(maxBytes), minFreeBytes, download)
+}
+
 // NewEphemeralCacheWithIndexBudget creates a process-private cache with an
 // independent archive-index budget.
 func NewEphemeralCacheWithIndexBudget(root string, maxBytes, indexBudget int64, download DownloadConfig) (*Cache, error) {
+	return newEphemeralCacheWithIndexBudget(root, maxBytes, indexBudget, 0, download)
+}
+
+// NewEphemeralCacheWithIndexBudgetAndMinFree is the ephemeral counterpart of
+// NewCacheWithIndexBudgetAndMinFree.
+func NewEphemeralCacheWithIndexBudgetAndMinFree(root string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
+	return newEphemeralCacheWithIndexBudget(root, maxBytes, indexBudget, minFreeBytes, download)
+}
+
+func newEphemeralCacheWithIndexBudget(root string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
 	if maxBytes < 0 {
 		return nil, fmt.Errorf("cache size must be non-negative")
 	}
 	if indexBudget < 0 || indexBudget > maxBytes {
 		return nil, fmt.Errorf("index budget must be between 0 and cache size")
+	}
+	if minFreeBytes < 0 {
+		return nil, fmt.Errorf("minimum free disk space must be non-negative")
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
@@ -56,7 +75,7 @@ func NewEphemeralCacheWithIndexBudget(root string, maxBytes, indexBudget int64, 
 		_ = guard.Close()
 		return nil, err
 	}
-	c, err := NewCacheWithIndexBudget(dir, maxBytes, indexBudget, download)
+	c, err := NewCacheWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, download)
 	_ = syscall.Flock(int(guard.Fd()), syscall.LOCK_UN)
 	_ = guard.Close()
 	if err != nil {

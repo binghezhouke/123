@@ -111,6 +111,16 @@ func rarOptions(password []byte) []rardecode.Option {
 }
 
 func scanArchive(ctx context.Context, kind string, reader io.ReaderAt, size int64, password []byte, visit func(archiveMember) error) error {
+	return scanArchiveFrom(ctx, kind, reader, size, password, 0, 0, func(member archiveMember, _ int64) error {
+		return visit(member)
+	})
+}
+
+// scanArchiveFrom is the resumable form used by RAR indexing. resume is a
+// parser-validated boundary returned after a complete member; zero starts at
+// the archive's first member. ZIP and 7z do not currently expose a safe
+// continuation token and therefore ignore resume.
+func scanArchiveFrom(ctx context.Context, kind string, reader io.ReaderAt, size int64, password []byte, resume int64, ordinalBase int, visit func(archiveMember, int64) error) error {
 	if kind == ".7z" {
 		zr, err := sevenzip.NewReaderWithPassword(reader, size, string(password))
 		if err != nil {
@@ -134,25 +144,29 @@ func scanArchive(ctx context.Context, kind string, reader io.ReaderAt, size int6
 					return syscall.EIO
 				}
 			}
-			if err := visit(archiveMember{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}); err != nil {
+			if err := visit(archiveMember{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}, 0); err != nil {
 				return err
 			}
 		}
 		return nil
 	}
 	options := append(rarOptions(password), rardecode.FileSystem(singleArchiveFS{reader, size}), rardecode.BufferSize(512))
-	i := 0
-	return rardecode.WalkMembers("archive.rar", func(f *rardecode.FileHeader, locator rardecode.MemberLocator) error {
+	i := ordinalBase
+	callback := func(f *rardecode.FileHeader, locator rardecode.MemberLocator, nextOffset int64) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if f.UnKnownSize || f.UnPackedSize < 0 || (!f.IsDir && !f.Mode().IsRegular()) {
 			return syscall.EOPNOTSUPP
 		}
-		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator})
+		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator}, nextOffset)
 		i++
 		return err
-	}, options...)
+	}
+	if resume > 0 {
+		return rardecode.WalkMembersFrom("archive.rar", resume, callback, options...)
+	}
+	return rardecode.WalkMembersFrom("archive.rar", 0, callback, options...)
 }
 
 // List walks packed headers without constructing a decoder. Reader.Next would
@@ -321,6 +335,30 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		started := time.Now()
 		log.Printf("archive index started: file_id=%d format=%s", a.id, a.kind())
 		idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, changed: make(chan struct{})}
+		seen := map[string]bool{}
+		resumeOffset := int64(0)
+		// A checkpoint contains only the verified prefix. Reuse it as the
+		// starting directory snapshot; the decoder continues to validate the
+		// remaining headers and completion is still decided by this scan.
+		if a.kind() == ".rar" {
+			if partial, ok := t.loadArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest); ok {
+				if partial.scanVersion == archiveCheckpointVersion && partial.scanOffset > 0 {
+					idx = partial
+					resumeOffset = partial.scanOffset
+					for name := range idx.members {
+						seen[name] = true
+					}
+				} else if t.cache != nil {
+					// Checkpoints written by the earlier high-water-mark
+					// implementation are not safe resume tokens. Remove them
+					// before rebuilding so they cannot be retried indefinitely.
+					_ = t.cache.Remove(persistKey + ":checkpoint")
+				}
+			}
+		}
+		// Publish the actual snapshot (including any restored prefix) only
+		// after checkpoint loading. Readers never observe the discarded empty
+		// index as their progressive snapshot.
 		t.mu.Lock()
 		if call := t.archiveTasks[t.archiveTaskKey(source, a, password)]; call != nil {
 			call.partial = idx
@@ -328,35 +366,40 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 			call.updated = nil
 		}
 		t.mu.Unlock()
-		seen := map[string]bool{}
-		// A checkpoint contains only the verified prefix. Reuse it as the
-		// starting directory snapshot; the decoder continues to validate the
-		// remaining headers and completion is still decided by this scan.
-		if a.kind() == ".rar" {
-			if partial, ok := t.loadArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest); ok {
-				idx = partial
-				for name := range idx.members { seen[name] = true }
+		nodes, names, entries := 0, 0, 0
+		if resumeOffset > 0 {
+			entries = len(idx.members)
+			// Reconstruct conservative budget counters for the restored
+			// prefix. The persisted loader already validated these bounds;
+			// counting member paths again keeps newly discovered entries from
+			// exceeding the same limits after resume.
+			for name := range idx.members {
+				nodes++
+				names += len(name)
 			}
 		}
-		nodes, names, entries := 0, 0, 0
 		// Indexing has a separate read budget, so recursive find cannot decompress
 		// an arbitrarily large solid RAR merely to discover names.
 		readBudget := max(int64(64<<20), int64(t.opts.MaxZIPEntries)*512)
 		bounded := &budgetReaderAt{r: reader, left: readBudget}
-		err := scanArchive(ctx, a.kind(), bounded, size, password, func(f archiveMember) error {
+		lastCheckpoint := time.Now()
+		lastSafeOffset := resumeOffset
+		err := scanArchiveFrom(ctx, a.kind(), bounded, size, password, resumeOffset, len(idx.members), func(f archiveMember, nextOffset int64) error {
 			idx.mu.Lock()
-			defer idx.mu.Unlock()
 			entries++
 			if entries > t.opts.MaxZIPEntries || f.size >= math.MaxInt64 {
+				idx.mu.Unlock()
 				return syscall.EFBIG
 			}
 			name := strings.TrimSuffix(f.name, "/")
 			if name == "" || seen[name] {
+				idx.mu.Unlock()
 				return syscall.EIO
 			}
 			seen[name] = true
 			parts := strings.Split(name, "/")
 			if len(parts) > t.opts.MaxDepth {
+				idx.mu.Unlock()
 				return syscall.EFBIG
 			}
 			dir := idx.root
@@ -366,11 +409,13 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 			}
 			for i, part := range parts {
 				if !validName(part) {
+					idx.mu.Unlock()
 					return syscall.EIO
 				}
 				names += len(part)
 				if i < len(parts)-1 || f.directory {
 					if dir.files[part] != nil {
+						idx.mu.Unlock()
 						return syscall.EIO
 					}
 					if dir.dirs[part] == nil {
@@ -382,6 +427,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 					dir = dir.dirs[part]
 				} else {
 					if dir.dirs[part] != nil {
+						idx.mu.Unlock()
 						return syscall.EIO
 					}
 					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, sevenStream: f.sevenStream, format: a.kind()}
@@ -392,6 +438,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 					idx.bytes += int64(256 + len(part))
 				}
 				if nodes > t.opts.MaxExpandedNodes || names > t.opts.MaxNameBytes || idx.bytes > t.opts.MetadataBytes {
+					idx.mu.Unlock()
 					return syscall.EFBIG
 				}
 			}
@@ -401,23 +448,33 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 			})
 			close(idx.changed)
 			idx.changed = make(chan struct{})
+			idx.mu.Unlock()
+			lastSafeOffset = nextOffset
+			if a.kind() == ".rar" && (entries%32 == 0 || time.Since(lastCheckpoint) >= 5*time.Second) {
+				idx.mu.Lock()
+				idx.scanOffset = lastSafeOffset
+				idx.scanVersion = archiveCheckpointVersion
+				idx.mu.Unlock()
+				t.persistArchiveCheckpoint(context.WithoutCancel(ctx), persistKey, kind, size, identityDigest, idx, lastSafeOffset)
+				lastCheckpoint = time.Now()
+			}
 			return nil
 		})
 		idx.mu.Lock()
-		idx.complete = true
+		idx.complete = err == nil
 		idx.scanErr = archiveReadError(ctx, err, password)
 		close(idx.changed)
 		idx.mu.Unlock()
 		if err != nil {
-			if a.kind() == ".rar" {
-				// indexProgressReaderAt continuously records the highest byte
-				// fetched. Preserve that evidence with the verified prefix; a
-				// cancelled scan must never write a fabricated zero offset.
-				offset := int64(0)
-				if status, _ := t.indexStatuses.snapshot(statusKey); status.ScanOffset > 0 {
-					offset = status.ScanOffset
-				}
-				t.persistArchiveCheckpoint(ctx, persistKey, kind, size, identityDigest, idx, offset)
+			if a.kind() == ".rar" && lastSafeOffset > 0 {
+				// Persist only a parser-safe boundary. The context deliberately
+				// outlives the canceled scan so a foreground interruption cannot
+				// erase the last verified prefix.
+				idx.mu.Lock()
+				idx.scanOffset = lastSafeOffset
+				idx.scanVersion = archiveCheckpointVersion
+				idx.mu.Unlock()
+				t.persistArchiveCheckpoint(context.WithoutCancel(ctx), persistKey, kind, size, identityDigest, idx, lastSafeOffset)
 			}
 			failure := failedArchiveStatus(size, archiveReadError(ctx, err, password))
 			failure.Members = entries

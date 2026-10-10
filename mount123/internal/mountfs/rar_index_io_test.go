@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -22,6 +23,16 @@ import (
 type sparseRAR struct {
 	size    int64
 	headers map[int64][]byte
+}
+
+type recordingRAR struct {
+	sparseRAR
+	offsets []int64
+}
+
+func (r *recordingRAR) ReadAt(p []byte, off int64) (int, error) {
+	r.offsets = append(r.offsets, off)
+	return r.sparseRAR.ReadAt(p, off)
 }
 
 func (r sparseRAR) ReadAt(p []byte, off int64) (int, error) {
@@ -148,6 +159,41 @@ func TestRARListingSkipsSolidCompressedPayload(t *testing.T) {
 	err := scanArchive(context.Background(), ".rar", data, data.size, nil, func(archiveMember) error { count++; return nil })
 	if err != nil || count != 8 {
 		t.Fatalf("metadata listing decoded solid payload: count=%d error=%v", count, err)
+	}
+}
+
+func TestRARScanResumesAtVerifiedMemberBoundary(t *testing.T) {
+	data := rarFixture(4, 128<<10)
+	recording := &recordingRAR{sparseRAR: data}
+	var resume int64
+	count := 0
+	err := scanArchiveFrom(context.Background(), ".rar", recording, data.size, nil, 0, 0, func(member archiveMember, next int64) error {
+		count++
+		if count == 2 {
+			resume = next
+			return syscall.EAGAIN
+		}
+		return nil
+	})
+	if err != syscall.EAGAIN || resume <= 0 {
+		t.Fatalf("initial scan error=%v resume=%d", err, resume)
+	}
+	recording.offsets = nil
+	var names []string
+	err = scanArchiveFrom(context.Background(), ".rar", recording, data.size, nil, resume, 2, func(member archiveMember, _ int64) error {
+		names = append(names, member.name)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("resumed scan: %v", err)
+	}
+	if got, want := strings.Join(names, ","), "0002.jpg,0003.jpg"; got != want {
+		t.Fatalf("resumed names=%q, want %q", got, want)
+	}
+	for _, off := range recording.offsets {
+		if off >= 20 && off < resume {
+			t.Fatalf("resumed scan reread earlier member header at offset %d before token %d", off, resume)
+		}
 	}
 }
 

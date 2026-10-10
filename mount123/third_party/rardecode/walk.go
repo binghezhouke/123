@@ -44,15 +44,50 @@ func Walk(name string, visit func(*FileHeader) error, opts ...Option) error {
 
 // WalkMembers also supplies a location usable to reopen independent members.
 func WalkMembers(name string, visit func(*FileHeader, MemberLocator) error, opts ...Option) error {
+	return walkMembers(name, 0, func(h *FileHeader, locator MemberLocator, _ int64) error {
+		return visit(h, locator)
+	}, opts...)
+}
+
+// WalkMembersFrom resumes a metadata walk at a previously returned resume
+// offset. The offset must be the end of a complete file's packed blocks as
+// returned to the callback; it is validated by parsing the next header with
+// the freshly initialized archive state. A zero offset starts at the first
+// file. This is intentionally limited to a single archive stream: callers
+// using multi-volume archives must retain the volume-aware source and use a
+// fresh walk.
+func WalkMembersFrom(name string, offset int64, visit func(*FileHeader, MemberLocator, int64) error, opts ...Option) error {
+	if offset < 0 {
+		return ErrInvalidHeaderOff
+	}
+	return walkMembers(name, offset, visit, opts...)
+}
+
+func walkMembers(name string, offset int64, visit func(*FileHeader, MemberLocator, int64) error, opts ...Option) error {
 	options := getOptions(opts)
 	v, err := openVolume(name, options)
 	if err != nil {
 		return err
 	}
 	defer v.Close()
+	if offset > 0 {
+		// openVolume has parsed the archive header, which initializes version,
+		// encryption and volume state. Seeking after that header preserves the
+		// state required to parse subsequent file headers without replaying the
+		// earlier file entries.
+		if offset < v.br.off || !v.br.canSeek() {
+			return ErrInvalidHeaderOff
+		}
+		if err := v.br.seek(offset); err != nil {
+			return err
+		}
+		v.n = 0
+	}
 	pr := newPackedFileReader(v, options)
 	for {
-		offset := v.br.off + v.n
+		if offset == 0 {
+			offset = v.br.off + v.n
+		}
 		blocks, err := pr.nextFile()
 		if err == io.EOF {
 			return nil
@@ -63,9 +98,21 @@ func WalkMembers(name string, visit func(*FileHeader, MemberLocator) error, opts
 		first := blocks.firstBlock()
 		h := first.FileHeader
 		locator := MemberLocator{offset: offset, solid: h.Solid, valid: first.first && first.last && first.volnum == 0}
-		if err := visit(&h, locator); err != nil {
+		// nextFile returns the first block without reading the rest of a
+		// split member. Advance through continuation blocks now (discarding
+		// their packed bytes, never decoding them) so the token is the exact
+		// boundary after the complete member.
+		for !pr.currFile().last {
+			if err := pr.nextBlock(); err != nil {
+				return err
+			}
+		}
+		last := pr.currFile()
+		next := last.dataOff + last.PackedSize
+		if err := visit(&h, locator, next); err != nil {
 			return err
 		}
+		offset = next
 	}
 }
 

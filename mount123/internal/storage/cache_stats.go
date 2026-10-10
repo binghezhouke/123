@@ -19,6 +19,10 @@ type cacheTelemetry struct {
 	indexKinds            [indexKindCount]cacheIndexKindTelemetry
 	rangeReads            [2]cacheRangeTelemetry
 	refaults              iostats.CacheRefaultSummary
+	diskPressureEvents    uint64
+	diskPressureRejects   uint64
+	diskPressureEvictions uint64
+	orphanFilesCleaned    uint64
 }
 
 type cacheClassTelemetry struct {
@@ -81,6 +85,12 @@ func (c *Cache) Stats() iostats.CacheSummary {
 		FillErrors:            c.telemetry.fillErrors,
 		ExistingFillWaits:     c.telemetry.existingFillWaits,
 		Refaults:              c.telemetry.refaults,
+		DiskFreeBytes:         c.diskFreeBytesLocked(),
+		DiskMinimumFreeBytes:  c.minFreeBytes,
+		DiskPressureEvents:    c.telemetry.diskPressureEvents,
+		DiskPressureRejects:   c.telemetry.diskPressureRejects,
+		DiskPressureEvictions: c.telemetry.diskPressureEvictions,
+		OrphanFilesCleaned:    c.telemetry.orphanFilesCleaned,
 		Classes:               make([]iostats.CacheClassSummary, cacheClassCount),
 		IndexKinds:            make([]iostats.CacheIndexKindSummary, indexKindCount),
 	}
