@@ -122,6 +122,10 @@
             const key = victim;
             if (key === undefined) break;
             const old = cache.get(key); URL.revokeObjectURL(old.url); stats.cacheBytes -= old.size; cache.delete(key);
+            // An evicted item must be eligible for a future directional
+            // prefetch. `attempted` only suppresses duplicate work while an
+            // item is still resident (or has a current failure).
+            attempted.delete(key);
         }
     }
     function cancelOutside() {

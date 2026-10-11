@@ -4,8 +4,12 @@
         constructor() {
             this.db = new Promise(resolve => {
                 if (!globalThis.indexedDB) return resolve(null);
-                const request = indexedDB.open('cloudarchive-thumbnails-v1', 1);
-                request.onupgradeneeded = () => request.result.createObjectStore('images', {keyPath: 'key'});
+                const request = indexedDB.open('cloudarchive-thumbnails-v1', 2);
+                request.onupgradeneeded = () => {
+                    const db = request.result;
+                    const store = db.objectStoreNames.contains('images') ? request.transaction.objectStore('images') : db.createObjectStore('images', {keyPath: 'key'});
+                    if (!store.indexNames.contains('at')) store.createIndex('at', 'at');
+                };
                 request.onsuccess = () => resolve(request.result);
                 request.onerror = request.onblocked = () => resolve(null);
             });
@@ -15,8 +19,15 @@
             if (!db) return null;
             return new Promise(resolve => {
                 try {
-                    const request = db.transaction('images').objectStore('images').get(key);
-                    request.onsuccess = () => resolve(request.result?.blob || null);
+                    const tx = db.transaction('images', 'readwrite'), store = tx.objectStore('images');
+                    const request = store.get(key);
+                    request.onsuccess = () => {
+                        const row = request.result;
+                        if (!row) return resolve(null);
+                        row.at = Date.now();
+                        store.put(row);
+                        resolve(row.blob || null);
+                    };
                     request.onerror = () => resolve(null);
                 } catch { resolve(null); }
             });
@@ -80,7 +91,7 @@
         constructor(root, output) {
             this.root = root; this.output = output; this.store = new ThumbnailStore();
             this.near = new Set(); this.urls = new Map(); this.jobs = new Map(); this.queue = [];
-            this.active = 0; this.hits = 0; this.observed = new WeakSet(); this.closed = false;
+            this.active = 0; this.hits = 0; this.observed = new WeakSet(); this.sequence = 0; this.closed = false;
             this.observer = new IntersectionObserver(entries => {
                 for (const entry of entries) {
                     if (entry.isIntersecting) { this.near.add(entry.target); this.enqueue(entry.target); }
@@ -100,10 +111,23 @@
         }
         enqueue(item) {
             if (this.closed || this.urls.has(item) || this.jobs.has(item)) return;
-            const job = {state: '排队', controller: new AbortController()};
+            const job = {state: '排队', sequence: this.sequence++, controller: new AbortController()};
             this.jobs.set(item, job); this.queue.push({item, job});
         }
+        distance(item) {
+            if (!this.root?.getBoundingClientRect) return Number.POSITIVE_INFINITY;
+            const root = this.root.getBoundingClientRect(), rect = item.getBoundingClientRect?.();
+            if (!rect || rect.width === 0 || rect.height === 0) return Number.POSITIVE_INFINITY;
+            if (rect.bottom < root.top) return root.top - rect.bottom;
+            if (rect.top > root.bottom) return rect.top - root.bottom;
+            return 0;
+        }
         pump() {
+            // IntersectionObserver does not guarantee entry order. Always
+            // decode visible rows first, then the nearest rows above/below;
+            // this prevents a far prefetch from occupying both slots while
+            // the image the user can see is still waiting.
+            this.queue.sort((a, b) => this.distance(a.item) - this.distance(b.item) || a.job.sequence - b.job.sequence);
             while (!this.closed && this.active < 2 && this.queue.length) {
                 const entry = this.queue.shift(), item = entry.item, job = entry.job;
                 if (!this.near.has(item) || this.jobs.get(item) !== job) { continue; }
