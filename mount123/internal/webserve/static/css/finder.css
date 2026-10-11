@@ -340,9 +340,34 @@
 .toolbar-breadcrumbs .path-item { font-size: 12px; }
 .toolbar-breadcrumbs .path-separator { font-size: 9px; color: #aab2bf; }
 body:has(.toolbar-breadcrumbs) .toolbar-location { display: none; }
+.toolbar-directory-title {
+    min-width: 0;
+    margin-left: 4px;
+    overflow: hidden;
+}
+.toolbar-directory-title .eyebrow { display: none; }
+.toolbar-directory-title h1 {
+    max-width: min(26vw, 360px);
+    margin: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: -.02em;
+}
+#probe-archive-status {
+    max-width: min(28vw, 320px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 11px;
+    color: var(--text-tertiary);
+}
 
 @media (max-width: 600px) {
     .toolbar-breadcrumbs { max-width: calc(100vw - 150px); margin-left: 4px; }
+    .toolbar-directory-title h1 { max-width: 34vw; }
 }
 
 /* Row numbers stay out of the way until a row is hovered, keeping the

@@ -88,6 +88,21 @@ document.addEventListener('DOMContentLoaded', function () {
         path.classList.add('toolbar-breadcrumbs');
         toolbarLeft.insertBefore(path, location || null);
     });
+    const directoryHeading = document.querySelector('.directory-heading');
+    const directoryTitle = directoryHeading?.querySelector(':scope > div:first-child');
+    const directoryCount = directoryHeading?.querySelector('[data-file-count]');
+    const probeStatus = directoryHeading?.querySelector('#probe-archive-status');
+    const statusCount = document.getElementById('statusCount');
+    const toolbarRight = document.querySelector('.finder-toolbar .toolbar-right');
+    if (directoryTitle && toolbarLeft) {
+        directoryTitle.classList.add('toolbar-directory-title');
+        toolbarLeft.append(directoryTitle);
+    }
+    if (directoryCount && statusCount) {
+        statusCount.replaceWith(directoryCount);
+    }
+    if (probeStatus && toolbarRight) toolbarRight.prepend(probeStatus);
+    if (directoryHeading) directoryHeading.remove();
     const savedView = localStorage.getItem('finderViewMode');
     if (savedView && typeof switchView === 'function') switchView(savedView);
     updateStatusBar();
