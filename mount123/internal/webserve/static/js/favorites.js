@@ -197,6 +197,12 @@
     });
 
     window.addEventListener('storage', event => { if (event.key === KEY || event.key === null) { records = read(); render(); decorate(); } });
+    // Partial navigation replaces the grid/list nodes themselves, so the
+    // observers below cannot see the new nodes. Re-apply markers after every
+    // navigation or appended page.
+    const refreshMarkers = () => { records = read(); decorate(); };
+    document.addEventListener('cloudarchive:navigated', refreshMarkers);
+    document.addEventListener('files:appended', refreshMarkers);
     for (const id of ['fileContainer', 'fileListView']) {
         const container = document.getElementById(id);
         if (container) new MutationObserver(() => decorate(container)).observe(container, {childList: true});
