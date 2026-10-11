@@ -374,56 +374,61 @@ document.addEventListener('DOMContentLoaded', function () {
         while (previewCache.size > PREVIEW_CACHE_LIMIT) {
             const key = [...previewCache.keys()].find(candidate => !protectedKeys.has(candidate));
             if (!key) break;
-            previewCacheBytes -= previewCache.get(key)?.bytes || 0;
+            const old = previewCache.get(key);
+            previewCacheBytes -= old?.bytes || 0;
+            if (old?.url?.startsWith('blob:')) URL.revokeObjectURL(old.url);
             previewCache.delete(key);
             removePreviewThumbnail(key);
             previewEvictions++;
         }
+    };
+    const fetchPreviewThumbnail = async (url, priority) => {
+        const response = await fetch(url, {cache: 'force-cache', priority: priority ? 'high' : 'low'});
+        if (!response.ok) throw new Error(`缩略图读取失败（HTTP ${response.status}）`);
+        const blob = await response.blob();
+        if (typeof createImageBitmap !== 'function') return {url, bytes: blob.size || 1};
+        const bitmap = await createImageBitmap(blob, {resizeWidth: 180, resizeHeight: 180, resizeQuality: 'high'});
+        const canvas = document.createElement('canvas');
+        canvas.width = bitmap.width; canvas.height = bitmap.height;
+        canvas.getContext('2d').drawImage(bitmap, 0, 0);
+        bitmap.close?.();
+        const thumb = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('缩略图编码失败')), 'image/jpeg', 0.78));
+        const thumbUrl = URL.createObjectURL(thumb);
+        return {url: thumbUrl, bytes: thumb.size || 1};
     };
     const prefetchPreviewImage = (item, priority = false) => {
         if (!previewIsImage(item)) return;
         const key = previewIdentity(item);
         if (!key || previewCache.has(key) || previewFailed.has(key)) return;
         if (previewPending.has(key)) {
-            const existing = previewPending.get(key)?.image;
-            if (priority && existing && 'fetchPriority' in existing) existing.fetchPriority = 'high';
             return;
         }
         const direct = item.dataset.directUrl || '';
         const fallback = item.dataset.url || '';
-        const image = new Image();
-        // Keep the immediate next/previous image ahead of speculative work.
-        // Browsers otherwise let a farther, smaller image finish first even
-        // when all requests were started in the desired order.
-        if ('fetchPriority' in image) image.fetchPriority = priority ? 'high' : 'low';
-        image.decoding = 'async';
-        const request = {image, url: direct || fallback};
+        const request = {url: direct || fallback};
         previewAttempted.add(key);
         previewPending.set(key, request);
-        const finish = url => {
+        const finish = ({url, bytes}) => {
             const old = previewCache.get(key);
             if (old) previewCacheBytes -= old.bytes || 0;
             request.url = url;
-            const bytes = Math.max(1, (image.naturalWidth || 0) * (image.naturalHeight || 0) * 4);
-            previewCache.set(key, {url, image, bytes});
+            previewCache.set(key, {url, bytes});
             previewCacheBytes += bytes;
             previewPending.delete(key);
             updatePreviewThumbnail(key, url);
             trimPreviewCache();
             renderPreviewDebug();
         };
-        image.onload = () => finish(request.url);
-        image.onerror = () => {
+        fetchPreviewThumbnail(request.url, priority).then(finish).catch(async error => {
             if (request.url !== fallback && fallback) {
                 request.url = fallback;
-                image.src = fallback;
-                return;
+                try { finish(await fetchPreviewThumbnail(fallback, priority)); return; }
+                catch { /* Report the combined direct and proxy failure below. */ }
             }
             previewPending.delete(key);
-            previewFailed.set(key, '直链/代理均失败');
+            previewFailed.set(key, error.message || '缩略图读取失败');
             renderPreviewDebug();
-        };
-        image.src = request.url;
+        });
     };
     const prefetchPreviewNeighbors = item => {
         if (!previewIsImage(item)) return;
@@ -478,14 +483,9 @@ document.addEventListener('DOMContentLoaded', function () {
             stage.append(icon);
         } else if (kind === 'image') {
             const img = document.createElement('img');
-            const cached = previewCache.get(previewSelectedId);
-            if (cached) {
-                previewCache.delete(previewSelectedId);
-                previewCache.set(previewSelectedId, cached);
-                img.src = cached.url;
-            } else {
-                img.src = previewUrl;
-            }
+            // Prefetch stores only a client-side thumbnail. The selected item
+            // still loads the original preview URL in the right pane.
+            img.src = previewUrl;
             img.alt = name;
             img.onload = () => {
                 if (img.naturalWidth && img.naturalHeight) {
