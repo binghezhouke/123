@@ -77,6 +77,8 @@
     </div>
 </aside>
 </div>
+<button id="preview-debug-toggle" class="gallery-debug-toggle preview-debug-toggle" type="button" aria-expanded="false">预取调试</button>
+<pre id="preview-debug-output" class="gallery-debug-output preview-debug-output" hidden></pre>
 
 <button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
 <dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="directory:{{.ParentID}}">
@@ -286,12 +288,43 @@ document.addEventListener('DOMContentLoaded', function () {
     // Finder preview does not make every image a cold request.
     const previewCache = new Map();
     const previewPending = new Map();
+    const previewDebugToggle = document.getElementById('preview-debug-toggle');
+    const previewDebugOutput = document.getElementById('preview-debug-output');
     const PREVIEW_PREFETCH_COUNT = 9;
     const PREVIEW_CACHE_LIMIT = 30;
     const PREVIEW_CACHE_BYTES = 256 * 1024 * 1024;
     let previewCacheBytes = 0;
     let previewSelectedId = '';
     let previewDirection = 1;
+    const renderPreviewDebug = () => {
+        if (!previewDebugOutput) return;
+        const list = visiblePreviewItems();
+        const current = list.findIndex(item => previewIdentity(item) === previewSelectedId);
+        const neighbors = [];
+        if (current >= 0) {
+            for (let step = 1; step <= PREVIEW_PREFETCH_COUNT && neighbors.length < PREVIEW_PREFETCH_COUNT; step++) {
+                for (const sign of [previewDirection, -previewDirection]) {
+                    const index = current + step * sign;
+                    if (index >= 0 && index < list.length && previewIsImage(list[index])) neighbors.push(list[index]);
+                    if (neighbors.length >= PREVIEW_PREFETCH_COUNT) break;
+                }
+            }
+        }
+        const state = item => {
+            const key = previewIdentity(item);
+            if (previewCache.has(key)) return '缓存';
+            if (previewPending.has(key)) return '请求中';
+            return '待调度';
+        };
+        const mode = item => item?.dataset.directUrl ? '直链' : '代理';
+        const lines = [
+            `当前: ${current >= 0 ? `${current + 1}/${list.length}` : '—'} ${previewSelectedId || '—'}`,
+            `方向: ${previewDirection > 0 ? '向后' : '向前'} · 缓存 ${previewCache.size} · 请求中 ${previewPending.size} · 窗口 ${PREVIEW_PREFETCH_COUNT}`,
+        ];
+        if (!neighbors.length) lines.push('邻近预取: —');
+        else neighbors.forEach((item, index) => lines.push(`${index + 1}. ${state(item)} · ${mode(item)} · ${item.dataset.favoriteName || item.dataset.fileId}`));
+        previewDebugOutput.textContent = lines.join('\n');
+    };
     const visiblePreviewItems = () => {
         const list = document.getElementById('fileListView');
         const grid = document.getElementById('fileContainer');
@@ -326,6 +359,7 @@ document.addEventListener('DOMContentLoaded', function () {
             previewCacheBytes += bytes;
             previewPending.delete(key);
             trimPreviewCache();
+            renderPreviewDebug();
         };
         image.onload = () => finish(request.url);
         image.onerror = () => {
@@ -335,6 +369,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 return;
             }
             previewPending.delete(key);
+            renderPreviewDebug();
         };
         image.src = request.url;
     };
@@ -427,7 +462,16 @@ document.addEventListener('DOMContentLoaded', function () {
         actions.hidden = false;
         openLink.href = isDir ? `/browse?parent_id=${id}` : `/file/${id}`;
         prefetchPreviewNeighbors(item);
+        renderPreviewDebug();
     }
+
+    previewDebugToggle?.addEventListener('click', () => {
+        if (!previewDebugOutput) return;
+        const open = previewDebugOutput.hidden;
+        previewDebugOutput.hidden = !open;
+        previewDebugToggle.setAttribute('aria-expanded', String(open));
+        if (open) renderPreviewDebug();
+    });
 
     document.addEventListener('click', event => {
         const item = event.target.closest('.file-item');
