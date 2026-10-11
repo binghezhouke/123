@@ -103,7 +103,13 @@
             document.addEventListener('files:appended', () => this.observe());
             window.addEventListener('pagehide', () => this.close());
         }
-        key(item) { return [item.dataset.fileId, item.dataset.updated, item.dataset.size].join(':'); }
+        key(item) {
+            // Archive members do not have a cloud file ID; using the old
+            // undefined-based key made every same-sized member share one
+            // thumbnail. Prefer the stable member URL/path before metadata.
+            const identity = item.dataset.fileId || item.dataset.memberId || item.dataset.url || item.dataset.favoriteUrl || item.dataset.name || 'unknown';
+            return [identity, item.dataset.updated, item.dataset.size].join(':');
+        }
         observe() {
             document.querySelectorAll('.file-item[data-gallery-image]').forEach(item => {
                 if (!this.observed.has(item)) { this.observed.add(item); this.observer.observe(item); }

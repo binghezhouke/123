@@ -41,3 +41,12 @@ test('two jobs at most; offscreen completions never reinstall decoded thumbnails
     resolves.forEach(resolve=>resolve({size:100}));await tick();
     assert.equal(view.urls.size,0);assert.equal(view.active,0);assert.equal(view.queue.length,0);
 });
+test('archive members use their own identity for thumbnail cache keys',async()=>{
+    const {view,item}=setup();
+    const first=item(), second=item();
+    delete first.dataset.fileId; delete second.dataset.fileId;
+    first.dataset.memberId='/archive/1/member?path=a.jpg';
+    second.dataset.memberId='/archive/1/member?path=b.jpg';
+    first.dataset.size=second.dataset.size='100';
+    assert.notEqual(view.key(first), view.key(second));
+});
