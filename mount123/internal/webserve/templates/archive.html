@@ -1,15 +1,15 @@
 {{define "grid-item"}}
-<div class="file-grid-item file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="zip:{{$.FileID}}:{{$.Prefix}}:{{.Name}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}"{{end}}>
+<div class="file-grid-item file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="{{.FavoriteKey}}" data-favorite-member-path="{{.MemberPath}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-download="{{.Download}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}"{{end}}>
     <a class="favorite-file-link" href="{{.Href}}">
         <div class="file-grid-icon {{if .IsDir}}folder{{else if .Nested}}archive{{else}}{{.Icon}}{{end}}"><i class="{{.FAIcon}}" aria-hidden="true"></i></div>
-        <div class="file-grid-name">{{.Name}}{{if .IsDir}}/{{else if .Nested}}/{{end}}</div>
+        <div class="file-grid-name">{{.Name}}{{if .IsDir}}/{{else if .Nested}}/{{end}}{{if .Encrypted}} <span class="badge bg-secondary">加密</span>{{end}}</div>
         <span class="file-grid-meta">{{if .IsDir}}文件夹{{else if .Nested}}压缩包{{else}}{{.Size}}{{end}}</span>
     </a>
 </div>
 {{end}}
 {{define "list-item"}}
-<div class="file-list-row file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="zip:{{$.FileID}}:{{$.Prefix}}:{{.Name}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}"{{end}}>
-    <a class="file-list-name favorite-file-link" href="{{.Href}}"><span class="file-list-icon"><i class="{{.FAIcon}}" aria-hidden="true"></i></span>{{.Name}}{{if .IsDir}}/{{else if .Nested}}/{{end}}</a>
+<div class="file-list-row file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="{{.FavoriteKey}}" data-favorite-member-path="{{.MemberPath}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-download="{{.Download}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}"{{end}}>
+    <a class="file-list-name favorite-file-link" href="{{.Href}}"><span class="file-list-icon"><i class="{{.FAIcon}}" aria-hidden="true"></i></span>{{.Name}}{{if .IsDir}}/{{else if .Nested}}/{{end}}{{if .Encrypted}} <span class="badge bg-secondary">加密</span>{{end}}</a>
     <div class="file-list-date">—</div><div class="file-list-meta">{{if .IsDir}}—{{else}}{{.Size}}{{end}}</div><div class="file-list-meta">{{.Kind}}</div>
 </div>
 {{end}}
@@ -23,7 +23,7 @@
 <div class="file-grid" id="fileContainer">{{range .Rows}}{{template "grid-item" .}}{{end}}</div>
 <div class="file-list" id="fileListView" data-column-layout="files" style="display:none;"><div class="file-list-header"><div>名称</div><div>修改日期</div><div>大小</div><div>种类</div></div>{{range .Rows}}{{template "list-item" .}}{{end}}</div>
 {{if not .Rows}}<div class="empty-state"><div class="empty-state-icon"><i class="fas fa-folder-open"></i></div><div class="empty-state-title">文件夹为空</div><div class="empty-state-subtitle">这个压缩包目录中没有条目</div></div>{{end}}
-</div><div class="preview-resizer" id="preview-resizer"></div><aside class="preview-pane" id="preview-pane"><div class="preview-empty">选择一个文件以预览</div><div class="preview-stage" id="preview-stage" hidden></div><div class="preview-title" id="preview-title" hidden></div><div class="preview-meta" id="preview-meta" hidden></div><div class="preview-actions" id="preview-actions" hidden><button id="preview-fullscreen" class="btn btn-secondary" type="button">全屏</button><a id="preview-open" class="btn btn-primary" href="#">打开</a></div></aside></div>
+</div><div class="preview-resizer" id="preview-resizer"></div><aside class="preview-pane" id="preview-pane"><div class="preview-empty">选择一个文件以预览</div><div class="preview-stage" id="preview-stage" hidden></div><div class="preview-title" id="preview-title" hidden></div><div class="preview-meta" id="preview-meta" hidden></div><div class="preview-actions" id="preview-actions" hidden><button id="preview-fullscreen" class="btn btn-secondary" type="button">全屏</button><a id="preview-open" class="btn btn-primary" href="#">打开</a><a id="preview-download" class="btn btn-secondary" href="#">下载</a></div></aside></div>
 <button id="preview-debug-toggle" class="gallery-debug-toggle preview-debug-toggle" type="button" aria-expanded="false">预取调试</button><pre id="preview-debug-output" class="gallery-debug-output preview-debug-output" hidden></pre>
 <script src="/static/js/viewport_images.js"></script><script src="/static/js/archive_browser.js"></script>
 {{end}}

@@ -8,6 +8,7 @@
     const actions = document.getElementById('preview-actions');
     const empty = pane.querySelector('.preview-empty');
     const open = document.getElementById('preview-open');
+    const download = document.getElementById('preview-download');
     const selected = () => document.querySelector('.file-item.is-selected');
     const typeOf = name => {
         const ext = (name.split('.').pop() || '').toLowerCase();
@@ -36,6 +37,7 @@
         const url = item.dataset.url || item.dataset.favoriteUrl || '#';
         empty.hidden = true; title.hidden = false; title.textContent = name;
         stage.hidden = false; stage.replaceChildren(); actions.hidden = false; open.href = item.dataset.favoriteUrl || url;
+        if (download) { download.href = item.dataset.download || url; download.hidden = isFolder || !item.dataset.download; }
         meta.hidden = false;
         meta.innerHTML = `<div>类型：${item.dataset.kind || (isFolder ? '文件夹' : '文件')}</div><div>大小：${isFolder ? '—' : (item.dataset.size || '—')}</div>`;
         if (isFolder) {

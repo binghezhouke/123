@@ -45,19 +45,19 @@ type archivePageData struct {
 }
 
 type archiveRow struct {
-	FileID    int64
-	Prefix    string
-	Name      string
-	Size      string
-	IsDir     bool
-	Encrypted bool
-	IsImage   bool
-	Nested    bool
-	Kind      string
-	Icon      string
-	FAIcon    string
-	Href      string
-	Download  string
+	Name        string
+	Size        string
+	IsDir       bool
+	Encrypted   bool
+	IsImage     bool
+	Nested      bool
+	Kind        string
+	Icon        string
+	FAIcon      string
+	Href        string
+	Download    string
+	FavoriteKey string
+	MemberPath  string
 }
 
 func (s *Server) registerArchiveRoutes() {
@@ -133,20 +133,20 @@ func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []
 	for _, member := range members {
 		kind := classifyEntry(member.Name, member.IsDir)
 		row := archiveRow{
-			FileID:    fileID,
-			Prefix:    prefix,
-			Name:      member.Name,
-			IsDir:     member.IsDir,
-			Encrypted: member.Encrypted,
-			IsImage:   kind.class == "image",
-			Kind:      kind.label,
-			Icon:      kind.class,
-			FAIcon:    faIconFor(kind),
+			Name:        member.Name,
+			IsDir:       member.IsDir,
+			Encrypted:   member.Encrypted,
+			IsImage:     kind.class == "image",
+			Kind:        kind.label,
+			Icon:        kind.class,
+			FAIcon:      faIconFor(kind),
+			FavoriteKey: fmt.Sprintf("zip:%d:%s:%s", fileID, prefix, member.Name),
 		}
 		memberPath := member.Name
 		if prefix != "" {
 			memberPath = prefix + "/" + member.Name
 		}
+		row.MemberPath = memberPath
 		if member.IsDir || (!member.IsDir && isArchiveName(member.Name)) {
 			row.Href = "/archive/" + strconv.FormatInt(fileID, 10) + "?path=" + url.QueryEscape(memberPath)
 			row.Nested = !member.IsDir
