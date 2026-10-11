@@ -352,6 +352,11 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }, true);
 
+    document.addEventListener('file:keyboard-selected', event => {
+        const item = event.detail?.item || event.target.closest?.('.file-item');
+        if (item) showPreview(item);
+    });
+
     document.addEventListener('dblclick', event => {
         const item = event.target.closest('.file-item');
         if (!item || item.dataset.fileType === 'folder') return;

@@ -8,7 +8,7 @@
         const active = list && getComputedStyle(list).display !== 'none' ? list : grid;
         return [...(active?.querySelectorAll('.file-item') || [])];
     };
-    const mark = item => {
+    const mark = (item, announce = false) => {
         if (!item) return;
         document.querySelectorAll('.file-item.keyboard-selected').forEach(node => {
             node.classList.remove('keyboard-selected');
@@ -18,6 +18,13 @@
         item.setAttribute('aria-selected', 'true');
         item.focus({preventScroll: true});
         item.scrollIntoView({block: 'nearest', inline: 'nearest'});
+        // Keep keyboard selection on the same event path as pointer selection.
+        // The listing preview and position restore code subscribe to this event,
+        // so moving focus updates both the right-hand preview and saved state.
+        if (announce) item.dispatchEvent(new CustomEvent('file:keyboard-selected', {
+            bubbles: true,
+            detail: {item},
+        }));
     };
     const openItem = item => {
         const link = item?.querySelector('.favorite-file-link');
@@ -67,7 +74,7 @@
         default: return;
         }
         if (next !== index) {
-            mark(items[next]);
+            mark(items[next], true);
             event.preventDefault();
         }
     });

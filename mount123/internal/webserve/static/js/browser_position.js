@@ -50,6 +50,10 @@
         const row = target?.closest('.file-item');
         if (row) { clearSelectionMark(); selected = row.dataset.fileId || null; save(); }
     }, true);
+    document.addEventListener('file:keyboard-selected', event => {
+        const row = event.detail?.item || event.target.closest?.('.file-item');
+        if (row) { clearSelectionMark(); selected = row.dataset.fileId || null; save(); }
+    });
     document.addEventListener('files:appended', () => {
         loadedPages = Math.min(MAX_PAGES, loadedPages + 1);
         save();
