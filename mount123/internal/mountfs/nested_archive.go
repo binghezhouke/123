@@ -20,12 +20,13 @@ import (
 // Compressed outer members use the bounded cache fallback; neither path is
 // activated by Readdir, only by explicit Lookup.
 type nestedArchive struct {
-	mu       sync.Mutex
-	reader   io.ReaderAt
-	size     int64
-	format   string
-	index    *zipIndex
-	password []byte
+	mu          sync.Mutex
+	reader      io.ReaderAt
+	size        int64
+	format      string
+	index       *zipIndex
+	password    []byte
+	cachePrefix string
 	// handles pins fallback members in the cache while the virtual archive is
 	// reachable. Copy/Store members do not need a pin because they read from the
 	// outer source directly. The finalizer is a last-resort cleanup for FUSE
@@ -404,7 +405,7 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 		}
 		return nil, err
 	}
-	na := &nestedArchive{reader: cached, size: partSize, format: kind, index: idx, password: append([]byte(nil), password...)}
+	na := &nestedArchive{reader: cached, size: partSize, format: kind, index: idx, password: append([]byte(nil), password...), cachePrefix: n.tree.diskCacheScope() + ":" + identity + ":nested-content:" + n.tree.passwordTag(archive, password)}
 	na.handles = handles
 	// Nodes are owned by the FUSE inode tree and may not receive a Go-level
 	// release callback. Keep the handles pinned while the archive is reachable,
@@ -427,7 +428,7 @@ func (n *Node) openNestedMember(ctx context.Context) (fs.FileHandle, uint32, sys
 	if n.tree.cache == nil {
 		return nil, 0, syscall.EIO
 	}
-	key := n.tree.diskCacheScope() + ":nested-content:" + m.name + fmt.Sprintf(":%d:%08x", m.size, m.crc)
+	key := n.item.nested.cachePrefix + ":" + m.name + fmt.Sprintf(":%d:%08x", m.size, m.crc)
 	cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
 		return archiveReadError(fillCtx, extractArchiveMember(fillCtx, na.reader, na.size, m, na.password, w), na.password)
 	})

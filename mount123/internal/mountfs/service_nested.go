@@ -204,11 +204,11 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 		}
 		return nil, err
 	}
-	return &nestedArchive{reader: cached, size: partSize, format: ".7z", index: innerIndex, password: append([]byte(nil), password...), handles: handles}, nil
+	return &nestedArchive{reader: cached, size: partSize, format: ".7z", index: innerIndex, password: append([]byte(nil), password...), cachePrefix: s.tree.diskCacheScope() + ":" + identity + ":nested-content:" + s.tree.passwordTag(outer, password), handles: handles}, nil
 }
 
 func (s *Service) openNestedMember(ctx context.Context, na *nestedArchive, m *member) (io.ReaderAt, int64, error) {
-	key := s.tree.diskCacheScope() + ":nested-content:" + m.name + fmt.Sprintf(":%d:%08x", m.size, m.crc)
+	key := na.cachePrefix + ":" + m.name + fmt.Sprintf(":%d:%08x", m.size, m.crc)
 	handle, err := s.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
 		return archiveReadError(fillCtx, extractArchiveMember(fillCtx, na.reader, na.size, m, na.password, w), na.password)
 	})

@@ -32,6 +32,7 @@
     }
     function source(item) { return item.dataset.url || ''; }
     function identity(item) { return item.dataset.fileId || item.dataset.memberId || source(item); }
+    function backgroundTasks() { return [...pending.values()].filter(task => !task.priority && !task.thumbOnly); }
     function title(item) { return item.dataset.name || item.getAttribute('aria-label') || item.textContent.trim(); }
     function setCounter(text) { el('counter').textContent = text; const fsCounter = document.getElementById('zip-gallery-fs-counter'); if (fsCounter) fsCounter.textContent = text; }
     function pageKey() { return dialog.dataset.galleryScope || location.pathname + location.search.replace(/([?&])(last_file_id|limit)=.*?(&|$)/g, '$1'); }
@@ -94,7 +95,7 @@
         }
     }
     function enforceConcurrency() {
-        while ([...pending.values()].filter(task => !task.priority).length > settings.concurrency) {
+        while (backgroundTasks().length > settings.concurrency) {
             const expendable = [...pending.entries()].reverse().find(([key, task]) => key !== selected && !task.priority);
             if (!expendable) break;
             expendable[1].controller.abort(); pending.delete(expendable[0]);
@@ -104,8 +105,8 @@
         const list = items(), item = list[index];
         if (!item) return Promise.reject(new Error('图片不存在'));
         if (cache.has(index)) { stats.hits++; const value = cache.get(index); cache.delete(index); cache.set(index, value); return Promise.resolve(value.url); }
-        if (pending.has(index)) { const task=pending.get(index); if (priority) {task.thumbOnly=false; task.priority=true;} return task.promise; }
-        const task = {controller: new AbortController(), priority, thumbOnly:Boolean(ownerSignal)};
+        if (pending.has(index)) { const task=pending.get(index); if (priority && !task.priority) { task.controller.abort(); pending.delete(index); } else { if (priority) {task.thumbOnly=false; task.priority=true;} return task.promise; } }
+        const task = {controller: new AbortController(), priority, thumbOnly:Boolean(ownerSignal), failed:false};
         if (ownerSignal) ownerSignal.addEventListener('abort', () => { if (task.thumbOnly && pending.get(index) === task) { task.controller.abort(); pending.delete(index); } }, {once:true});
         task.promise = (async () => {
         const started = typeof performance !== 'undefined' ? performance.now() : Date.now(); stats.misses++;
@@ -122,15 +123,14 @@
                 const url = URL.createObjectURL(blob); touchCache(index, url, blob.size || 0);
                 stats.durations.push((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started); if (stats.durations.length > 100) stats.durations.shift();
                 return url;
-            } catch (error) { if (error.name !== 'AbortError') stats.failures++; throw error; }
-        })().finally(() => { if (pending.get(index) === task) pending.delete(index); renderDiagnostics(); pumpThumbQueue(); pumpPrefetch(); });
+            } catch (error) { if (error.name !== 'AbortError') { stats.failures++; task.failed=true; if (!task.priority) attempted.delete(index); } throw error; }
+        })().finally(() => { if (pending.get(index) === task) pending.delete(index); renderDiagnostics(); if (!task.failed) pumpPrefetch(); pumpThumbQueue(); });
         pending.set(index, task); return task.promise;
     }
     function pumpPrefetch() {
         if (!dialog.open) return;
-        if (thumbQueue.length) { pumpThumbQueue(); return; }
         const max = settings.concurrency;
-        for (let step = 1; step <= settings.count && [...pending.values()].filter(task => !task.priority).length < max; step++) {
+        for (let step = 1; step <= settings.count && backgroundTasks().length < max; step++) {
             const index = selected + step * direction;
             if (index < 0 || index >= items().length) break;
             if (cache.has(index) || pending.has(index) || attempted.has(index)) continue;
@@ -155,7 +155,7 @@
         if (el('jump-input')) { el('jump-input').max = String(list.length); el('jump-input').value = String(selected + 1); }
     }
     function pumpThumbQueue() {
-        if (!dialog.open || [...pending.values()].filter(task => !task.priority).length >= settings.concurrency || !thumbQueue.length) return;
+        if (!dialog.open || backgroundTasks().length >= settings.concurrency || !thumbQueue.length) return;
         const entry=thumbQueue.shift();
         if (entry.controller.signal.aborted || !entry.button.isConnected) { pumpThumbQueue(); return; }
         load(entry.i, false, entry.controller.signal).then(url => { if (!entry.controller.signal.aborted && entry.button.isConnected) entry.image.src=url; }).catch(error => { if(error.name!=='AbortError' && entry.button.isConnected) entry.button.classList.add('thumb-failed'); }).finally(pumpThumbQueue);
@@ -238,7 +238,7 @@
         if (!Number.isInteger(value) || value < 1 || value > count) { el('jump-message').textContent = `请输入 1 到 ${count} 之间的序号`; return; }
         el('jump-message').textContent = ''; show(value - 1);
     });
-    el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,6,2), budget: clamp(el('setting-budget').value,16,2048,256)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
+    el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,6), budget: clamp(el('setting-budget').value,16,2048,256)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('settings-reset')?.addEventListener('click', () => { settings = {...DEFAULTS}; try { localStorage.removeItem(SETTINGS_KEY); } catch {} el('setting-count').value = settings.count; el('setting-concurrency').value = settings.concurrency; el('setting-budget').value = settings.budget; cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('diagnostics')?.addEventListener('toggle', renderDiagnostics);
     el('diagnostics-reset')?.addEventListener('click', () => { stats.hits=stats.misses=stats.failures=0; stats.durations=[]; stats.extracts=[]; renderDiagnostics(); });
