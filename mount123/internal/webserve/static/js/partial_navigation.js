@@ -23,8 +23,17 @@
         const incomingBrowse = incoming?.querySelector('.browse-files');
         if (!current || !incoming || !currentBrowse || !incomingBrowse) return false;
         const incomingPath = incoming.querySelector('.browser-path');
-        const currentPath = current.querySelector('.browser-path');
-        if (incomingPath && currentPath) currentPath.replaceChildren(...[...incomingPath.childNodes].map(node => document.importNode(node, true)));
+        // The base layout moves the live breadcrumb into the toolbar during
+        // the first paint, so it is no longer inside .finder-main on later
+        // navigations. Update that persistent wrapper instead of looking only
+        // in the replaced content subtree.
+        const currentPath = document.querySelector('.toolbar-breadcrumbs') || current.querySelector('.browser-path');
+        if (incomingPath && currentPath) {
+            const incomingBar = incomingPath.querySelector('.path-bar');
+            const currentBar = currentPath.querySelector('.path-bar');
+            if (incomingBar && currentBar) currentBar.replaceChildren(...[...incomingBar.childNodes].map(node => document.importNode(node, true)));
+            else currentPath.replaceChildren(...[...incomingPath.childNodes].map(node => document.importNode(node, true)));
+        }
         currentBrowse.replaceChildren(...[...incomingBrowse.childNodes].map(node => document.importNode(node, true)));
         const incomingHeading = incoming.querySelector('.directory-heading h1');
         const currentHeading = document.querySelector('.toolbar-directory-title h1');
