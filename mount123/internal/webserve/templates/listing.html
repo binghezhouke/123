@@ -139,13 +139,13 @@
     <button type="button" data-cm-action="refresh">刷新</button>
 </div>
 
-<script src="/static/js/vendor/panzoom/panzoom.min.js" defer></script>
-<script src="/static/js/image_viewport.js" defer></script>
-<script src="/static/js/zip_gallery.js" defer></script>
-<script src="/static/js/browser_position.js" defer></script>
-<script src="/static/js/file_pagination.js" defer></script>
-<script src="/static/js/keyboard_navigation.js" defer></script>
-<script src="/static/js/viewport_images.js"></script>
+<script src="/static/js/vendor/panzoom/panzoom.min.js?v={{.Version}}" defer></script>
+<script src="/static/js/image_viewport.js?v={{.Version}}" defer></script>
+<script src="/static/js/zip_gallery.js?v={{.Version}}" defer></script>
+<script src="/static/js/browser_position.js?v={{.Version}}" defer></script>
+<script src="/static/js/file_pagination.js?v={{.Version}}" defer></script>
+<script src="/static/js/keyboard_navigation.js?v={{.Version}}" defer></script>
+<script src="/static/js/viewport_images.js?v={{.Version}}"></script>
 <script>
 function switchView(view) {
     const iconBtn = document.getElementById('iconViewBtn');
