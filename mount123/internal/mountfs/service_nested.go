@@ -109,7 +109,7 @@ func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipInde
 // inner archive is never fully decompressed.
 func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote, outer *archiveDescriptor, idx *zipIndex, memberPath string, m *member) (*nestedArchive, error) {
 	kind := archiveKind(m.name)
-	if kind != ".7z" && kind != ".rar" {
+	if kind != ".7z" && kind != ".rar" && kind != ".zip" {
 		return nil, syscall.ENOTSUP
 	}
 	if err := defaultNestedArchivePolicy.allow(1, int64(m.size)); err != nil {
@@ -199,6 +199,8 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 	var innerMembers []archiveMember
 	if kind == ".rar" {
 		innerMembers, err = indexNestedRAR(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
+	} else if kind == ".zip" {
+		innerMembers, err = indexNestedZIP(cached, partSize, defaultNestedArchivePolicy)
 	} else {
 		innerMembers, err = indexNested7z(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
 	}

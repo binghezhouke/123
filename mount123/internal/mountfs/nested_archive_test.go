@@ -1,6 +1,7 @@
 package mountfs
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"github.com/bodgit/sevenzip"
@@ -12,6 +13,33 @@ import (
 
 	"github.com/binghezhouke/123/mount123/internal/storage"
 )
+
+func TestIndexNestedZIPExplicitSeam(t *testing.T) {
+	var data bytes.Buffer
+	zw := zip.NewWriter(&data)
+	f, err := zw.Create("folder/hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.Write([]byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader := bytes.NewReader(data.Bytes())
+	members, err := indexNestedZIP(reader, int64(reader.Len()), defaultNestedArchivePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := nestedIndexFromMembers(members, defaultNestedArchivePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if idx.members["folder/hello.txt"] == nil {
+		t.Fatalf("nested ZIP member missing: %#v", idx.members)
+	}
+}
 
 func TestIndexNested7zExplicitSeam(t *testing.T) {
 	data, err := os.ReadFile("testdata/encrypted/plain.7z")

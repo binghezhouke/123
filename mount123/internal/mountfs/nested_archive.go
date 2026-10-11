@@ -1,6 +1,7 @@
 package mountfs
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
@@ -268,6 +269,36 @@ func indexNestedRAR(ctx context.Context, reader io.ReaderAt, size int64, passwor
 	return result, nil
 }
 
+func indexNestedZIP(reader io.ReaderAt, size int64, policy nestedArchivePolicy) ([]archiveMember, error) {
+	if err := policy.allow(1, size); err != nil {
+		return nil, err
+	}
+	zr, err := zip.NewReader(reader, size)
+	if err != nil {
+		return nil, err
+	}
+	if len(zr.File) > policy.MaxMembers {
+		return nil, syscall.EFBIG
+	}
+	result := make([]archiveMember, 0, len(zr.File))
+	for i, f := range zr.File {
+		name, err := zipName(f)
+		if err != nil {
+			return nil, err
+		}
+		name = strings.TrimSuffix(name, "/")
+		if name == "" {
+			continue
+		}
+		result = append(result, archiveMember{
+			name: name, size: f.UncompressedSize64, crc: f.CRC32,
+			directory: f.FileInfo().IsDir(), ordinal: i, zipFile: f,
+			encrypted: f.Flags&1 != 0,
+		})
+	}
+	return result, nil
+}
+
 func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy) (*zipIndex, error) {
 	idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, complete: true, changed: make(chan struct{})}
 	for _, f := range members {
@@ -304,6 +335,13 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 				format = ".rar"
 			}
 			m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, format: format, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
+			if f.zipFile != nil {
+				m.format = ".zip"
+				m.file = f.zipFile
+				m.flags = f.zipFile.Flags
+				m.method = f.zipFile.Method
+				m.encrypted = f.encrypted
+			}
 			dir.order = append(dir.order, part)
 			dir.files[part] = m
 			idx.members[f.name] = m

@@ -1,6 +1,7 @@
 package mountfs
 
 import (
+	"archive/zip"
 	"context"
 	"errors"
 	"fmt"
@@ -61,6 +62,7 @@ type archiveMember struct {
 	ordinal     int
 	rarLocator  *rardecode.MemberLocator
 	sevenStream *sevenStreamLocation
+	zipFile     *zip.File
 }
 
 type budgetReaderAt struct {
@@ -511,7 +513,17 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 
 func extractArchiveMember(ctx context.Context, reader io.ReaderAt, size int64, m *member, password []byte, w io.Writer) error {
 	var stream io.Reader
-	if m.format == ".7z" {
+	if m.format == ".zip" && m.file != nil {
+		if m.encrypted {
+			return syscall.EACCES
+		}
+		rc, err := m.file.Open()
+		if err != nil {
+			return err
+		}
+		defer rc.Close()
+		stream = rc
+	} else if m.format == ".7z" {
 		zr, err := sevenzip.NewReaderWithPassword(reader, size, string(password))
 		if err != nil {
 			return err
