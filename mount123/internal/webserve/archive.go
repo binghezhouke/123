@@ -8,6 +8,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path"
 	"strconv"
 	"strings"
@@ -206,6 +207,14 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 		http.ServeContent(w, r, base, time.Time{}, section)
 		return
 	}
+	// Browsers generally cannot decode Matroska directly, even when the
+	// underlying video/audio codecs are browser-compatible. Remux it to a
+	// fragmented MP4 stream on demand so the archive preview can behave like
+	// an ordinary MP4 without first materialising the member on disk.
+	if suffix == ".mkv" && r.URL.Query().Get("transcode") == "mp4" {
+		s.serveArchiveMKVAsMP4(w, r, section, base)
+		return
+	}
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
@@ -227,4 +236,21 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(base))
 	http.ServeContent(w, r, base, time.Time{}, section)
+}
+
+func (s *Server) serveArchiveMKVAsMP4(w http.ResponseWriter, r *http.Request, input io.Reader, name string) {
+	ctx := r.Context()
+	cmd := exec.CommandContext(ctx, "ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-i", "pipe:0", "-map", "0:v:0?", "-map", "0:a:0?", "-c", "copy",
+		"-movflags", "frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", "pipe:1")
+	cmd.Stdin = input
+	cmd.Stdout = w
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Content-Disposition", "inline; filename*=UTF-8''"+url.PathEscape(strings.TrimSuffix(name, path.Ext(name))+".mp4"))
+	w.Header().Set("Cache-Control", "no-store")
+	if err := cmd.Run(); err != nil && ctx.Err() == nil {
+		s.logger.Printf("webserve: remux MKV %q: %v (%s)", name, err, strings.TrimSpace(stderr.String()))
+	}
 }

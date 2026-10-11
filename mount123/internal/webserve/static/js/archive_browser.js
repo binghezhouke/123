@@ -31,6 +31,13 @@
         node.style.cssText = `font-size:64px;color:${color};`;
         return node;
     };
+    const remuxURL = url => {
+        try {
+            const target = new URL(url, window.location.href);
+            target.searchParams.set('transcode', 'mp4');
+            return target.href;
+        } catch (_) { return `${url}${url.includes('?') ? '&' : '?'}transcode=mp4`; }
+    };
     function show(item) {
         if (!item) return;
         const key = memberKey(item);
@@ -63,7 +70,16 @@
             image.onload = () => { meta.innerHTML += `<div>分辨率：${image.naturalWidth} × ${image.naturalHeight}</div>`; };
             stage.append(image);
         } else if (kind === 'video') {
-            const video = document.createElement('video'); video.src = url; video.controls = true; video.preload = 'metadata'; stage.append(video);
+            const video = document.createElement('video');
+            video.controls = true; video.preload = 'metadata';
+            const isMKV = /\.mkv$/i.test(name);
+            const native = !isMKV || (typeof video.canPlayType === 'function' && video.canPlayType('video/x-matroska') !== '');
+            video.src = native ? url : remuxURL(url);
+            video.addEventListener('error', () => {
+                if (!isMKV || video.dataset.remuxed) return;
+                video.dataset.remuxed = 'true'; video.src = remuxURL(url); video.load();
+            }, {once: true});
+            stage.append(video);
         } else if (kind === 'text') {
             const pre = document.createElement('pre'); pre.textContent = '正在读取…';
             fetch(url).then(response => response.ok ? response.text() : Promise.reject(new Error('读取失败'))).then(text => { pre.textContent = text.slice(0, 20000); }).catch(() => { pre.textContent = '无法预览此文件'; });
