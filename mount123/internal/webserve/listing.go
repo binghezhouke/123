@@ -460,6 +460,10 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		s.serveFileContent(w, r, meta, false)
 		return
 	}
+	if r.URL.Query().Get("direct") == "1" {
+		s.redirectDirectFile(w, r, meta)
+		return
+	}
 	switch previewKind(meta.Name) {
 	case "text":
 		s.serveInlineText(w, r, meta)
@@ -468,6 +472,25 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Redirect(w, r, fileHref(meta.ID, "download"), http.StatusSeeOther)
 	}
+}
+
+func (s *Server) redirectDirectFile(w http.ResponseWriter, r *http.Request, meta *panapi.File) {
+	if meta == nil || meta.IsDir {
+		http.Error(w, "目录不能直接下载。", http.StatusBadRequest)
+		return
+	}
+	// A gallery prefetch may cancel its HTTP request immediately after the
+	// redirect is no longer needed. Let URL resolution finish in a bounded,
+	// detached operation so the file-ID-to-link cache is still populated.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 20*time.Second)
+	defer cancel()
+	url, err := s.service.DirectURL(ctx, meta.ID)
+	if err != nil {
+		s.logger.Printf("webserve: direct URL for file %d: %v", meta.ID, err)
+		http.Error(w, "无法获取文件直链，请刷新重试。", httpStatusForError(err))
+		return
+	}
+	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
 }
 
 // lookupFile resolves the {id} path value, answering the request itself when
@@ -647,7 +670,9 @@ func newListingRow(entry mountfs.FileEntry) listingRow {
 	row.Size = humanBytes(entry.Size)
 	if kind.class == "image" {
 		row.IsImage = true
-		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview"
+		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview?direct=1"
+	} else if kind.class == "video" {
+		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview?direct=1"
 	}
 	return row
 }

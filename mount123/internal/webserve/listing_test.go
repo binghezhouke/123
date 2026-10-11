@@ -369,6 +369,17 @@ func TestPreviewServesImagesAndTextInline(t *testing.T) {
 	}
 }
 
+func TestPreviewDirectRedirectsCachedImageURL(t *testing.T) {
+	fixture := newListingFixture(t)
+	recorder := authenticatedGET(t, fixture.server.Handler(), "/file/3/preview?direct=1", nil)
+	if recorder.Code != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want 307", recorder.Code)
+	}
+	if location := recorder.Header().Get("Location"); location != fixture.api.url+"/3" {
+		t.Fatalf("Location = %q, want %q", location, fixture.api.url+"/3")
+	}
+}
+
 func TestPreviewRedirectsOpaqueFilesToDownload(t *testing.T) {
 	fixture := newListingFixture(t)
 	recorder := authenticatedGET(t, fixture.server.Handler(), "/file/6/preview", nil)

@@ -8,7 +8,10 @@
     const pending = new Map();
     const attempted = new Set();
     const stats = {hits: 0, misses: 0, failures: 0, durations: [], extracts: [], cacheBytes: 0};
-    const DEFAULTS = {count: 9, concurrency: 6, budget: 256};
+    // Download requests use cached short-lived URLs and are separate from
+    // platform API calls. Keep a generous client-side window for direct-link
+    // reads while the API scheduler continues to protect metadata requests.
+    const DEFAULTS = {count: 9, concurrency: 9, budget: 256};
     const SETTINGS_KEY = 'imageGallerySettings';
     let settings = readSettings();
     let selected = 0, direction = 1, generation = 0, prefetchReady = false, touchStart;
@@ -17,7 +20,9 @@
     function readSettings() {
         try {
             const value = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
-            return {count: clamp(value.count, 0, 50, DEFAULTS.count), concurrency: clamp(value.concurrency, 1, 12, DEFAULTS.concurrency), budget: clamp(value.budget, 16, 2048, DEFAULTS.budget)};
+            const legacyDefault = Number(value.concurrency) === 6 && Number(value.count) === 9 && Number(value.budget) === 256;
+            const concurrency = legacyDefault ? DEFAULTS.concurrency : clamp(value.concurrency, 1, 12, DEFAULTS.concurrency);
+            return {count: clamp(value.count, 0, 50, DEFAULTS.count), concurrency, budget: clamp(value.budget, 16, 2048, DEFAULTS.budget)};
         } catch { return {...DEFAULTS}; }
     }
     function clamp(value, min, max, fallback) { const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback; }
@@ -31,6 +36,19 @@
         });
     }
     function source(item) { return item.dataset.url || ''; }
+    function isDirectSource(item) { try { return new URL(source(item), location.href).searchParams.get('direct') === '1'; } catch { return false; } }
+    function proxySource(url) { try { const target = new URL(url, location.href); target.searchParams.delete('direct'); return target.pathname + target.search; } catch { return url; } }
+    function preloadImage(url, signal) {
+        return new Promise((resolve, reject) => {
+            const image = new Image();
+            const abort = () => { image.src = ''; reject(new DOMException('Aborted', 'AbortError')); };
+            image.onload = () => { signal?.removeEventListener('abort', abort); resolve(image); };
+            image.onerror = () => { signal?.removeEventListener('abort', abort); reject(new Error('图片读取失败')); };
+            if (signal?.aborted) return abort();
+            signal?.addEventListener('abort', abort, {once:true});
+            image.src = url;
+        });
+    }
     function identity(item) { return item.dataset.fileId || item.dataset.memberId || source(item); }
     function backgroundTasks() { return [...pending.values()].filter(task => !task.priority && !task.thumbOnly); }
     function title(item) { return item.dataset.name || item.getAttribute('aria-label') || item.textContent.trim(); }
@@ -76,8 +94,8 @@
         }
         return findIndex(items(), String(activeId));
     }
-    function touchCache(index, url, size) {
-        cache.set(index, {url, size}); stats.cacheBytes += size;
+    function touchCache(index, url, size, image = null) {
+        cache.set(index, {url, size, image}); stats.cacheBytes += size;
         trimCache();
     }
     function trimCache() {
@@ -90,8 +108,7 @@
     }
     function cancelOutside() {
         for (const [idx, task] of pending) {
-            const distance = (idx - selected) * direction;
-            if (distance < -1 || distance > settings.count) { task.controller.abort(); pending.delete(idx); }
+            if (Math.abs(idx - selected) > settings.count) { task.controller.abort(); pending.delete(idx); }
         }
     }
     function enforceConcurrency() {
@@ -105,12 +122,28 @@
         const list = items(), item = list[index];
         if (!item) return Promise.reject(new Error('图片不存在'));
         if (cache.has(index)) { stats.hits++; const value = cache.get(index); cache.delete(index); cache.set(index, value); return Promise.resolve(value.url); }
-        if (pending.has(index)) { const task=pending.get(index); if (priority && !task.priority) { task.controller.abort(); pending.delete(index); } else { if (priority) {task.thumbOnly=false; task.priority=true;} return task.promise; } }
+        if (pending.has(index)) { const task=pending.get(index); if (priority) { task.thumbOnly=false; task.priority=true; } return task.promise; }
         const task = {controller: new AbortController(), priority, thumbOnly:Boolean(ownerSignal), failed:false};
         if (ownerSignal) ownerSignal.addEventListener('abort', () => { if (task.thumbOnly && pending.get(index) === task) { task.controller.abort(); pending.delete(index); } }, {once:true});
         task.promise = (async () => {
         const started = typeof performance !== 'undefined' ? performance.now() : Date.now(); stats.misses++;
             try {
+                if (isDirectSource(item)) {
+                    let url = source(item), loadedImage;
+                    try {
+                        loadedImage = await preloadImage(url, task.controller.signal);
+                    } catch (error) {
+                        if (error.name === 'AbortError') throw error;
+                        // A signed URL can expire between metadata rendering and
+                        // the browser request. Retry through the same-origin
+                        // proxy, which can refresh the link and preserve access.
+                        url = proxySource(url);
+                        loadedImage = await preloadImage(url, task.controller.signal);
+                    }
+                    touchCache(index, url, loadedImage.naturalWidth * loadedImage.naturalHeight * 4, loadedImage);
+                    stats.durations.push((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started); if (stats.durations.length > 100) stats.durations.shift();
+                    return url;
+                }
                 const headers = priority ? {} : {'X-Priority': 'background'};
                 const response = await fetch(source(item), {signal: task.controller.signal, headers});
                 if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
@@ -129,10 +162,22 @@
     }
     function pumpPrefetch() {
         if (!dialog.open) return;
+        // Register the selected image before planning speculative work. A
+        // foreground request must get the first decoder/cache slot; otherwise
+        // opening a gallery can put the first image behind several neighbors.
+        const selectedTask = pending.get(selected);
+        if (selectedTask?.priority) return;
         const max = settings.concurrency;
-        for (let step = 1; step <= settings.count && backgroundTasks().length < max; step++) {
-            const index = selected + step * direction;
-            if (index < 0 || index >= items().length) break;
+        const indexes = [];
+        for (let step = 1; step <= settings.count && indexes.length < settings.count; step++) {
+            for (const sign of [direction, -direction]) {
+                if (indexes.length >= settings.count) break;
+                const index = selected + step * sign;
+                if (index >= 0 && index < items().length) indexes.push(index);
+            }
+        }
+        for (const index of indexes) {
+            if (backgroundTasks().length >= max) break;
             if (cache.has(index) || pending.has(index) || attempted.has(index)) continue;
             attempted.add(index);
             load(index).catch(() => {});
@@ -173,15 +218,22 @@
         }
         if (index !== selected) { direction = Math.sign(index - selected) || direction; attempted.clear(); }
         selected = index; prefetchReady = false; const token = ++generation; cancelOutside(); viewport?.detach();
-        pumpPrefetch();
         el('stage').replaceChildren(); el('title').textContent = title(list[index]); setCounter(`${index + 1} / ${list.length}`);
         const url = source(list[index]); el('download').href = `${url}${url.includes('?') ? '&' : '?'}download=1`;
         el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…'; saveProgress(list[index]);
         try {
-            const objectUrl = await load(index, true); if (token !== generation || !dialog.open) return;
-            const image = new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { setCounter(`${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`); } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
+            // Start the foreground request before allowing pumpPrefetch() to
+            // schedule neighbors. load() installs the priority task
+            // synchronously, so the guard above keeps the first image ahead.
+            const foreground = load(index, true);
+            pumpPrefetch();
+            const objectUrl = await foreground; if (token !== generation || !dialog.open) return;
+            const retained = cache.get(index)?.image;
+            const image = retained || new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { setCounter(`${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`); } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
             image.onerror = () => { if (token !== generation) return; el('status').textContent = '浏览器无法显示此图片，可下载原图查看'; el('retry').hidden = false; };
-            image.src = objectUrl; el('stage').replaceChildren(image);
+            if (!retained) image.src = objectUrl;
+            el('stage').replaceChildren(image);
+            if (retained) image.onload();
         } catch (error) { if (token !== generation || error.name === 'AbortError') return; el('status').textContent = error.message; el('retry').hidden = false; }
         renderDiagnostics();
     }
@@ -190,7 +242,9 @@
         const avg = stats.durations.length ? `${Math.round(stats.durations.reduce((a,b)=>a+b,0)/stats.durations.length)} ms` : '未知';
         const extract = stats.extracts.length ? `${Math.round(stats.extracts.reduce((a,b)=>a+b,0)/stats.extracts.length)} ms` : '未知';
         const list=items(); let queued=0;
-        for(let step=1;step<=settings.count;step++){const index=selected+step*direction;if(index<0||index>=list.length)break;if(!cache.has(index)&&!pending.has(index)&&!attempted.has(index))queued++;}
+        const diagnosticsIndexes=[];
+        for(let step=1;step<=settings.count&&diagnosticsIndexes.length<settings.count;step++){for(const sign of [direction,-direction]){if(diagnosticsIndexes.length>=settings.count)break;const index=selected+step*sign;if(index>=0&&index<list.length)diagnosticsIndexes.push(index);}}
+        for(const index of diagnosticsIndexes){if(!cache.has(index)&&!pending.has(index)&&!attempted.has(index))queued++;}
         const background=[...pending.values()].filter(task=>!task.priority).length;
         box.textContent = `预取队列 ${queued} · 缩略图队列 ${thumbQueue.length} · 活跃请求 ${pending.size} · 后台并发 ${background}/${settings.concurrency} · 缓存 ${(stats.cacheBytes/1048576).toFixed(1)} MiB · 命中 ${stats.hits} · 未命中 ${stats.misses} · 失败 ${stats.failures} · 请求平均 ${avg} · 服务器解压平均 ${extract}`;
     }
@@ -238,7 +292,7 @@
         if (!Number.isInteger(value) || value < 1 || value > count) { el('jump-message').textContent = `请输入 1 到 ${count} 之间的序号`; return; }
         el('jump-message').textContent = ''; show(value - 1);
     });
-    el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,6), budget: clamp(el('setting-budget').value,16,2048,256)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
+    el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,9), budget: clamp(el('setting-budget').value,16,2048,256)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('settings-reset')?.addEventListener('click', () => { settings = {...DEFAULTS}; try { localStorage.removeItem(SETTINGS_KEY); } catch {} el('setting-count').value = settings.count; el('setting-concurrency').value = settings.concurrency; el('setting-budget').value = settings.budget; cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('diagnostics')?.addEventListener('toggle', renderDiagnostics);
     el('diagnostics-reset')?.addEventListener('click', () => { stats.hits=stats.misses=stats.failures=0; stats.durations=[]; stats.extracts=[]; renderDiagnostics(); });

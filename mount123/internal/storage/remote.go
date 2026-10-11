@@ -136,6 +136,32 @@ func namespaceWithoutValidator(key string) string {
 
 func (r *Remote) Key() string { return r.key }
 
+// DirectURL returns the currently cached signed URL for this remote. It
+// refreshes the URL only when the six-day link cache has expired, allowing
+// browser clients to download ordinary files without proxying their bytes
+// through mount123.
+func (r *Remote) DirectURL(ctx context.Context) (string, error) {
+	if r == nil {
+		return "", errors.New("nil remote reader")
+	}
+	r.mu.Lock()
+	url := r.url
+	expired := url == "" || time.Now().After(r.urlUntil)
+	r.mu.Unlock()
+	if expired {
+		if err := r.refresh(ctx); err != nil {
+			return "", err
+		}
+		r.mu.Lock()
+		url = r.url
+		r.mu.Unlock()
+	}
+	if url == "" {
+		return "", errors.New("remote download URL is empty")
+	}
+	return url, nil
+}
+
 // DownloadStats reports the cache-wide range scheduler capacity available to
 // this reader. It deliberately exposes aggregate counters only.
 func (r *Remote) DownloadStats() DownloadStats {

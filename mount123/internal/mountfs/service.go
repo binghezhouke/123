@@ -101,6 +101,24 @@ func (s *Service) OpenFile(ctx context.Context, fileID int64) (io.ReaderAt, int6
 	return source, file.Size, nil
 }
 
+// DirectURL returns a cached signed URL for an ordinary cloud file. Archive
+// members must continue through OpenArchiveMember because they require
+// server-side decompression.
+func (s *Service) DirectURL(ctx context.Context, fileID int64) (string, error) {
+	file, err := s.File(ctx, fileID)
+	if err != nil {
+		return "", err
+	}
+	if file.IsDir {
+		return "", syscall.EISDIR
+	}
+	source, err := s.tree.cloudFileSource(ctx, file, s.tree.opts.SourceTTL)
+	if err != nil {
+		return "", err
+	}
+	return source.DirectURL(ctx)
+}
+
 // SaveArchivePassword uploads a sibling <name>.pwd sidecar for one archive.
 func (s *Service) SaveArchivePassword(ctx context.Context, archive panapi.File, password []byte, overwrite bool) (panapi.File, bool, error) {
 	saver, ok := s.tree.api.(ArchivePasswordAPI)
