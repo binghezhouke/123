@@ -279,6 +279,79 @@ document.addEventListener('DOMContentLoaded', function () {
         return 'file';
     };
 
+    // The inline preview has a separate lifecycle from the gallery dialog.
+    // Keep the same bounded neighboring-image prefetch here so moving through
+    // Finder preview does not make every image a cold request.
+    const previewCache = new Map();
+    const previewPending = new Map();
+    const PREVIEW_PREFETCH_COUNT = 9;
+    const PREVIEW_CACHE_LIMIT = 30;
+    const PREVIEW_CACHE_BYTES = 256 * 1024 * 1024;
+    let previewCacheBytes = 0;
+    let previewSelectedId = '';
+    let previewDirection = 1;
+    const visiblePreviewItems = () => {
+        const list = document.getElementById('fileListView');
+        const grid = document.getElementById('fileContainer');
+        const active = list && getComputedStyle(list).display !== 'none' ? list : grid;
+        return [...(active?.querySelectorAll('.file-item') || [])];
+    };
+    const previewIdentity = item => item?.dataset.fileId || item?.dataset.favoriteName || '';
+    const previewIsImage = item => item && item.dataset.fileType !== 'folder' && mediaType(item.dataset.favoriteName || '') === 'image';
+    const trimPreviewCache = () => {
+        while (previewCache.size > PREVIEW_CACHE_LIMIT || previewCacheBytes > PREVIEW_CACHE_BYTES) {
+            const key = [...previewCache.keys()].find(candidate => candidate !== previewSelectedId);
+            if (!key) break;
+            previewCacheBytes -= previewCache.get(key)?.bytes || 0;
+            previewCache.delete(key);
+        }
+    };
+    const prefetchPreviewImage = item => {
+        if (!previewIsImage(item)) return;
+        const key = previewIdentity(item);
+        if (!key || previewCache.has(key) || previewPending.has(key)) return;
+        const direct = item.dataset.directUrl || '';
+        const fallback = item.dataset.url || '';
+        const image = new Image();
+        const request = {image, url: direct || fallback};
+        previewPending.set(key, request);
+        const finish = url => {
+            const old = previewCache.get(key);
+            if (old) previewCacheBytes -= old.bytes || 0;
+            request.url = url;
+            const bytes = Math.max(1, (image.naturalWidth || 0) * (image.naturalHeight || 0) * 4);
+            previewCache.set(key, {url, image, bytes});
+            previewCacheBytes += bytes;
+            previewPending.delete(key);
+            trimPreviewCache();
+        };
+        image.onload = () => finish(request.url);
+        image.onerror = () => {
+            if (request.url !== fallback && fallback) {
+                request.url = fallback;
+                image.src = fallback;
+                return;
+            }
+            previewPending.delete(key);
+        };
+        image.src = request.url;
+    };
+    const prefetchPreviewNeighbors = item => {
+        if (!previewIsImage(item)) return;
+        const list = visiblePreviewItems();
+        const current = list.indexOf(item);
+        if (current < 0) return;
+        const candidates = [];
+        for (let step = 1; step <= PREVIEW_PREFETCH_COUNT && candidates.length < PREVIEW_PREFETCH_COUNT; step++) {
+            for (const sign of [previewDirection, -previewDirection]) {
+                const index = current + step * sign;
+                if (index >= 0 && index < list.length && previewIsImage(list[index])) candidates.push(list[index]);
+                if (candidates.length >= PREVIEW_PREFETCH_COUNT) break;
+            }
+        }
+        candidates.forEach(prefetchPreviewImage);
+    };
+
     function showPreview(item) {
         const id = item.dataset.fileId;
         const name = item.dataset.favoriteName || '';
@@ -288,6 +361,11 @@ document.addEventListener('DOMContentLoaded', function () {
         const updated = item.dataset.updated || '—';
         const kindLabel = item.dataset.kind || (isDir ? '文件夹' : '文件');
         const previewUrl = item.dataset.url || `/file/${id}/preview`;
+        const list = visiblePreviewItems();
+        const current = list.indexOf(item);
+        const previous = previewSelectedId && list.findIndex(candidate => previewIdentity(candidate) === previewSelectedId);
+        if (current >= 0 && previous >= 0 && current !== previous) previewDirection = Math.sign(current - previous) || previewDirection;
+        previewSelectedId = previewIdentity(item);
         let resolution = '';
         const renderMeta = () => {
             metaEl.hidden = false;
@@ -311,7 +389,14 @@ document.addEventListener('DOMContentLoaded', function () {
             stage.append(icon);
         } else if (kind === 'image') {
             const img = document.createElement('img');
-            img.src = previewUrl;
+            const cached = previewCache.get(previewSelectedId);
+            if (cached) {
+                previewCache.delete(previewSelectedId);
+                previewCache.set(previewSelectedId, cached);
+                img.src = cached.url;
+            } else {
+                img.src = previewUrl;
+            }
             img.alt = name;
             img.onload = () => {
                 if (img.naturalWidth && img.naturalHeight) {
@@ -339,6 +424,7 @@ document.addEventListener('DOMContentLoaded', function () {
         renderMeta();
         actions.hidden = false;
         openLink.href = isDir ? `/browse?parent_id=${id}` : `/file/${id}`;
+        prefetchPreviewNeighbors(item);
     }
 
     document.addEventListener('click', event => {
