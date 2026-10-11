@@ -10,7 +10,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="v" value="{{ archive_version }}">
       <label class="form-label" for="outer-password">外层压缩包密码（如需要）</label>
-      <input class="form-control mb-3" id="outer-password" name="outer_password" type="password" maxlength="1024" autocomplete="current-password">
+      <input class="form-control mb-3" id="outer-password" name="outer_password" type="password" maxlength="1024" autocomplete="current-password" value="{{ outer_hint or '' }}">
       <label class="form-label" for="inner-password">内层压缩包密码（如需要）</label>
       <input class="form-control mb-3" id="inner-password" name="inner_password" type="password" maxlength="1024" autocomplete="current-password">
       <button class="btn btn-primary" type="submit">开始准备</button>

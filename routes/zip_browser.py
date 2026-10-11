@@ -199,12 +199,13 @@ def browse(file_id, member_id=None):
                     folders.add(remainder.split("/", 1)[0])
                 elif not entry.is_dir():
                     suffix = PurePosixPath(name).suffix.lower()
+                    split_member = SPLIT_7Z.fullmatch(name)
                     files.append(
                         {
                             "id": index,
                             "name": remainder,
                             "member_path": name,
-                            "nested": suffix in (".zip", ".7z", ".7zz", ".rar"),
+                            "nested": suffix in (".zip", ".7z", ".7zz", ".rar") or bool(split_member and split_member[2] == "001"),
                             "size": entry.file_size,
                             "encrypted": bool(entry.flag_bits & 1),
                             "image": PREVIEW_TYPES.get(suffix, "").startswith("image/"),

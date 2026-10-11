@@ -377,3 +377,56 @@ def test_staging_disk_failure_becomes_visible_failed_job(nested_browser, remote,
     state = _wait_job(nested_browser, job_id)
     assert state['state'] == 'failed'
     assert '磁盘空间' in state['error']
+
+
+def test_nested_split_7z_member_inside_archive_browses_contents(tmp_path, monkeypatch, remote):
+    """An outer 7z containing .7z.001/.002/... volumes is prepared as one inner 7z."""
+    from app import create_app
+
+    # Build a small inner 7z, then slice it into numbered volumes.
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "a.jpg").write_bytes(b"JPGDATA" * 60)
+    (src / "b.jpg").write_bytes(b"PIXELS" * 40)
+    inner_single = tmp_path / "inner.7z"
+    with py7zr.SevenZipFile(inner_single, "w") as archive:
+        archive.writeall(str(src), arcname="pics")
+    inner_bytes = inner_single.read_bytes()
+    part_size = 120
+    volumes = []
+    for start in range(0, len(inner_bytes), part_size):
+        volumes.append(inner_bytes[start:start + part_size])
+
+    # Wrap the volumes in an outer archive. Use ZIP so the outer listing is
+    # non-solid; the split-volume concatenation path is identical for 7z.
+    outer = io.BytesIO()
+    with zipfile.ZipFile(outer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for index, chunk in enumerate(volumes, 1):
+            archive.writestr(f"inner.7z.{index:03d}", chunk)
+    remote.data = outer.getvalue()
+
+    fake_client = SimpleNamespace(
+        get_file_info_single=lambda *a, **kw: File({"fileId": 1, "filename": "outer.zip", "type": 0, "size": len(remote.data),
+                                                    "etag": "outer-v1", "updateAt": "today", "parentFileId": 0}),
+        get_final_download_url=lambda *a, **kw: ("https://download.test/outer.zip", "api"),
+    )
+    monkeypatch.setattr("routes.zip_browser.get_client", lambda: fake_client)
+    monkeypatch.setattr("routes.nested_archive.get_client", lambda: fake_client)
+    config = tmp_path / "config.json"
+    config.write_text(json.dumps({"CLIENT_ID": "id", "CLIENT_SECRET": "secret", "SECRET_KEY": "test",
+                                  "ARCHIVE_PREP_CACHE_BYTES": 128 * 1024**2}))
+    app = create_app(str(config))
+    app.config["TESTING"] = True
+    client = app.test_client()
+    try:
+        listing = client.get("/file/1/zip")
+        assert b"nested/" in listing.data
+        # The .001 volume must be offered as a nested archive, not "download original".
+        assert "准备并浏览内层压缩包".encode() in listing.data
+        job_id = _start_nested(client, member_id=0)
+        assert _wait_job(client, job_id)["state"] == "complete"
+        browse = client.get(f"/archive-jobs/{job_id}/browse")
+        assert b"pics" in browse.data
+        assert client.get(f"/archive-jobs/{job_id}/member/pics/a.jpg").data == b"JPGDATA" * 60
+    finally:
+        app.extensions["archive_preparation_jobs"].close()

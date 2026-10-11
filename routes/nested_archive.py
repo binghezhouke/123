@@ -54,8 +54,15 @@ def prepare(file_id, member_id):
         owner = _identity()
         token = _csrf()
         if request.method == "GET":
+            outer_hint = None
+            resolve_password = getattr(client, "resolve_archive_password", None)
+            if callable(resolve_password):
+                try:
+                    outer_hint = resolve_password(file)
+                except (Pan123APIError, requests.RequestException, OSError):
+                    outer_hint = None
             return render_template("nested_archive.html", file=file, member_id=member_id, archive_version=request.args.get("v", ""), csrf_token=token,
-                                   mode="prepare", status=None, browse_url=None)
+                                   mode="prepare", status=None, browse_url=None, outer_hint=outer_hint)
         if not hmac.compare_digest(request.form.get("csrf_token", ""), token):
             return render_template("error.html", error="请求校验失败，请刷新页面后重试"), 400
         outer_password = request.form.get("outer_password") or None
@@ -86,25 +93,62 @@ def prepare(file_id, member_id):
                 if not expected_version or source.index_version != expected_version:
                     raise ArchiveJobError("外层压缩包目录已变化，请刷新后重新选择内层成员")
                 name = member_name(entry)
+                if entry.is_dir():
+                    raise ArchiveJobError("请选择内层文件")
                 inner_kind = PurePosixPath(name).suffix.lower()
-                if entry.is_dir() or inner_kind not in (".zip", ".7z", ".7zz", ".rar"):
+                # A .7z.001 member is the entry point of a split 7z; collect
+                # every sibling volume with the same stem and concatenate them.
+                split = SPLIT_7Z.fullmatch(name)
+                if inner_kind in (".zip", ".7z", ".7zz", ".rar"):
+                    parts = [entry]
+                elif split:
+                    collected = []
+                    for other in entries:
+                        other_name = member_name(other)
+                        other_split = SPLIT_7Z.fullmatch(other_name)
+                        if other_split and other_split[1] == split[1] and not other.is_dir():
+                            collected.append((int(other_split[2]), other))
+                    collected.sort()
+                    for index, (number, _) in enumerate(collected, 1):
+                        if number != index:
+                            raise ArchiveJobError("内层分卷编号不连续")
+                    if not collected:
+                        raise ArchiveJobError("内层分卷为空")
+                    parts = [part for _, part in collected]
+                else:
                     raise ArchiveJobError("当前仅支持内层 ZIP、7z 或 RAR 文件")
-                if entry.file_size > max_member_bytes:
+                total_bytes = sum(part.file_size for part in parts)
+                if total_bytes > max_member_bytes:
                     raise ArchiveJobError("内层压缩包超过配置的暂存文件上限")
-                if shutil.disk_usage(staging).free < entry.file_size:
+                if shutil.disk_usage(staging).free < total_bytes:
                     raise ArchiveJobError("磁盘空间不足，无法暂存内层压缩包")
-                jobs.reserve_staging(record, entry.file_size)
+                jobs.reserve_staging(record, total_bytes)
                 if record["cancel"].is_set():
                     raise InterruptedError("已取消")
-                jobs.set_phase(record, "正在读取内层压缩包", 0, entry.file_size)
+                jobs.set_phase(record, "正在读取内层压缩包", 0, total_bytes)
                 record["deadline"] = time.monotonic() + prepare_timeout
                 source.deadline = record["deadline"]
                 source.cancel_event = record["cancel"]
-                read_archive_member_file(
-                    archive, source, entry, output_path=inner_path,
-                    on_progress=lambda done, total: jobs.set_phase(record, "正在读取内层压缩包", done, total),
-                )
-                return name
+                written = 0
+                with open(inner_path, "wb") as out:
+                    for index, part in enumerate(parts, 1):
+                        base = written
+                        part_path = staging / f"part-{index:04}"
+                        try:
+                            read_archive_member_file(
+                                archive, source, part, output_path=part_path,
+                                on_progress=lambda done, total, base=base: jobs.set_phase(
+                                    record, "正在读取内层压缩包", base + done, total_bytes),
+                            )
+                            with open(part_path, "rb") as src_file:
+                                shutil.copyfileobj(src_file, out)
+                        finally:
+                            try:
+                                part_path.unlink()
+                            except FileNotFoundError:
+                                pass
+                        written += part.file_size
+                return split[1] if len(parts) > 1 else name
 
             try:
                 if split:
