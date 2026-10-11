@@ -81,6 +81,23 @@
     <p id="favorite-message" role="status" aria-live="polite"></p>
 </dialog>
 
+<div id="context-menu" class="context-menu" hidden>
+    <button type="button" data-cm-action="favorite" hidden>收藏到颜色…</button>
+    <hr data-cm-favorite-separator hidden>
+    <button type="button" data-cm-sort="name">按名称排序</button>
+    <button type="button" data-cm-sort="date">按修改日期排序</button>
+    <button type="button" data-cm-sort="size">按大小排序</button>
+    <hr>
+    <button type="button" data-cm-arrange="">排列方式：无</button>
+    <button type="button" data-cm-arrange="kind">排列方式：种类</button>
+    <hr>
+    <button type="button" data-cm-view="icons">图标视图</button>
+    <button type="button" data-cm-view="list">列表视图</button>
+    <hr>
+    <button type="button" data-cm-action="probe">探测压缩格式</button>
+    <button type="button" data-cm-action="refresh">刷新</button>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/js/app.js?v={{.Version}}"></script>
 <script>
@@ -153,5 +170,29 @@ function refreshFiles() {
 <script src="/static/js/favorites.js?v={{.Version}}" defer></script>
 <script src="/static/js/column_resize.js?v={{.Version}}" defer></script>
 <script src="/static/js/partial_navigation.js?v={{.Version}}" defer></script>
+<script>
+(() => {
+    const menu = document.getElementById('context-menu');
+    const favorite = menu?.querySelector('[data-cm-action="favorite"]');
+    const divider = menu?.querySelector('[data-cm-favorite-separator]');
+    if (!menu || !favorite || !divider) return;
+    let item = null;
+    document.addEventListener('contextmenu', event => {
+        const candidate = event.target.closest('.file-item[data-favorite-key]');
+        if (!candidate) { item = null; favorite.hidden = true; divider.hidden = true; return; }
+        event.preventDefault();
+        item = candidate;
+        menu.hidden = false;
+        menu.style.left = event.clientX + 'px';
+        menu.style.top = event.clientY + 'px';
+        favorite.hidden = false; divider.hidden = false;
+        favorite.textContent = candidate.querySelector('.favorite-marker.is-favorite') ? '修改收藏颜色…' : '收藏到颜色…';
+    }, true);
+    favorite.addEventListener('click', () => {
+        menu.hidden = true;
+        if (item) window.openFavoritePicker?.(item);
+    });
+})();
+</script>
 </body>
 </html>{{end}}

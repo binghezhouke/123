@@ -85,13 +85,10 @@
         button.addEventListener('click', () => save(color)); palette.append(button);
     }
     document.getElementById('favorite-remove').addEventListener('click', () => save(null));
-    document.addEventListener('click', event => {
-        const button = event.target.closest('.favorite-marker');
-        if (!button) return;
-        event.preventDefault(); event.stopPropagation();
-        const item = button.closest('[data-favorite-key]');
+    function openPickerForElement(item) {
+        if (!item) return false;
         const candidate = {key: item.dataset.favoriteKey, name: item.dataset.favoriteName, url: item.dataset.favoriteUrl, memberPath: item.dataset.favoriteMemberPath};
-        if (!validRecord(candidate.key, {...candidate, color: records[candidate.key]?.color || 'gray'})) return;
+        if (!validRecord(candidate.key, {...candidate, color: records[candidate.key]?.color || 'gray'})) return false;
         selected = candidate;
         document.getElementById('favorite-picker-title').textContent = selected.name;
         document.getElementById('favorite-message').textContent = '';
@@ -99,6 +96,14 @@
         document.getElementById('favorite-remove').hidden = !color;
         palette.querySelectorAll('button').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.color === color)));
         picker.showModal();
+        return true;
+    }
+    window.openFavoritePicker = openPickerForElement;
+    document.addEventListener('click', event => {
+        const button = event.target.closest('.favorite-marker');
+        if (!button) return;
+        event.preventDefault(); event.stopPropagation();
+        openPickerForElement(button.closest('[data-favorite-key]'));
     });
 
     function openURL(key, item) {
