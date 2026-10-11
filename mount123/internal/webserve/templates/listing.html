@@ -345,13 +345,23 @@ document.addEventListener('DOMContentLoaded', function () {
             previewCache.delete(key);
         }
     };
-    const prefetchPreviewImage = item => {
+    const prefetchPreviewImage = (item, priority = false) => {
         if (!previewIsImage(item)) return;
         const key = previewIdentity(item);
-        if (!key || previewCache.has(key) || previewPending.has(key) || previewFailed.has(key)) return;
+        if (!key || previewCache.has(key) || previewFailed.has(key)) return;
+        if (previewPending.has(key)) {
+            const existing = previewPending.get(key)?.image;
+            if (priority && existing && 'fetchPriority' in existing) existing.fetchPriority = 'high';
+            return;
+        }
         const direct = item.dataset.directUrl || '';
         const fallback = item.dataset.url || '';
         const image = new Image();
+        // Keep the immediate next/previous image ahead of speculative work.
+        // Browsers otherwise let a farther, smaller image finish first even
+        // when all requests were started in the desired order.
+        if ('fetchPriority' in image) image.fetchPriority = priority ? 'high' : 'low';
+        image.decoding = 'async';
         const request = {image, url: direct || fallback};
         previewAttempted.add(key);
         previewPending.set(key, request);
@@ -392,7 +402,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (candidates.length >= PREVIEW_PREFETCH_COUNT) break;
             }
         }
-        candidates.forEach(prefetchPreviewImage);
+        candidates.forEach((candidate, index) => prefetchPreviewImage(candidate, index === 0));
     };
 
     function showPreview(item) {
