@@ -15,6 +15,7 @@
     const SETTINGS_KEY = 'imageGallerySettings';
     let settings = readSettings();
     let selected = 0, direction = 1, generation = 0, prefetchReady = false, touchStart;
+    let exifVisible = false;
     let thumbController = null, thumbQueue = [], indexController = null, indexPromise = null, indexComplete = false, indexGeneration = 0;
 
     function readSettings() {
@@ -55,6 +56,15 @@
     function identity(item) { return item.dataset.fileId || item.dataset.memberId || source(item); }
     function backgroundTasks() { return [...pending.values()].filter(task => !task.priority && !task.thumbOnly); }
     function title(item) { return item.dataset.name || item.getAttribute('aria-label') || item.textContent.trim(); }
+    function renderExif(info, loading = false) {
+        const panel = el('exif-panel'); if (!panel) return;
+        panel.hidden = !exifVisible;
+        if (!exifVisible) return;
+        if (loading) { panel.innerHTML = '<strong>EXIF</strong>正在读取…'; return; }
+        if (!info) { panel.innerHTML = '<strong>EXIF</strong>没有可用的 EXIF 信息'; return; }
+        const escape = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
+        panel.innerHTML = `<strong>EXIF</strong>${Object.entries(info).map(([key, value]) => `<div>${escape(key)}：${escape(value)}</div>`).join('')}`;
+    }
     function setCounter(text) { el('counter').textContent = text; const fsCounter = document.getElementById('zip-gallery-fs-counter'); if (fsCounter) fsCounter.textContent = text; }
     function pageKey() { return dialog.dataset.galleryScope || location.pathname + location.search.replace(/([?&])(last_file_id|limit)=.*?(&|$)/g, '$1'); }
     function savedProgress() { try { return JSON.parse(localStorage.getItem(`galleryProgress:${pageKey()}`) || 'null'); } catch { return null; } }
@@ -97,8 +107,8 @@
         }
         return findIndex(items(), String(activeId));
     }
-    function touchCache(index, url, size, image = null) {
-        cache.set(index, {url, size, image}); stats.cacheBytes += size;
+    function touchCache(index, url, size, image = null, exif = null) {
+        cache.set(index, {url, size, image, exif}); stats.cacheBytes += size;
         trimCache();
     }
     function trimCache() {
@@ -183,7 +193,9 @@
                 if (extract) { stats.extracts.push(Number(extract[1])); if (stats.extracts.length > 100) stats.extracts.shift(); }
                 const blob = await response.blob();
                 if (task.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-                const url = URL.createObjectURL(blob); touchCache(index, url, blob.size || 0);
+                const url = URL.createObjectURL(blob);
+                const exif = typeof readImageExif === 'function' ? await readImageExif(blob).catch(() => null) : null;
+                touchCache(index, url, blob.size || 0, null, exif);
                 stats.durations.push((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started); if (stats.durations.length > 100) stats.durations.shift();
                 return url;
             } catch (error) { if (error.name !== 'AbortError') { stats.failures++; task.failed=true; if (!task.priority) attempted.delete(index); } throw error; }
@@ -245,7 +257,8 @@
         }
         if (index !== selected) { direction = Math.sign(index - selected) || direction; attempted.clear(); }
         selected = index; prefetchReady = false; const token = ++generation; cancelOutside(); viewport?.detach();
-        el('stage').replaceChildren(); el('title').textContent = title(list[index]); setCounter(`${index + 1} / ${list.length}`);
+        const panel = el('exif-panel'); el('stage').replaceChildren(); if (panel) el('stage').append(panel);
+        renderExif(null, true); el('title').textContent = title(list[index]); setCounter(`${index + 1} / ${list.length}`);
         const url = source(list[index]); el('download').href = `${url}${url.includes('?') ? '&' : '?'}download=1`;
         el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…'; saveProgress(list[index]);
         try {
@@ -255,6 +268,7 @@
             const foreground = load(index, true);
             pumpPrefetch();
             const objectUrl = await foreground; if (token !== generation || !dialog.open) return;
+            renderExif(cache.get(index)?.exif || null);
             const retained = cache.get(index)?.image;
             const image = retained || new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { setCounter(`${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`); } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
             image.onerror = () => { if (token !== generation) return; el('status').textContent = '浏览器无法显示此图片，可下载原图查看'; el('retry').hidden = false; };
@@ -348,6 +362,14 @@
         el('jump-message').textContent = ''; show(value - 1);
     });
     el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,9), budget: clamp(el('setting-budget').value,1,200,30)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
+    try { exifVisible = localStorage.getItem('galleryExifVisible') === '1'; } catch {}
+    const exifToggle = el('exif-toggle');
+    exifToggle?.addEventListener('click', () => {
+        exifVisible = !exifVisible;
+        try { localStorage.setItem('galleryExifVisible', exifVisible ? '1' : '0'); } catch {}
+        exifToggle.setAttribute?.('aria-pressed', String(exifVisible));
+        renderExif(cache.get(selected)?.exif || null);
+    });
     el('settings-reset')?.addEventListener('click', () => { settings = {...DEFAULTS}; try { localStorage.removeItem(SETTINGS_KEY); } catch {} el('setting-count').value = settings.count; el('setting-concurrency').value = settings.concurrency; el('setting-budget').value = settings.budget; cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('diagnostics')?.addEventListener('toggle', renderDiagnostics);
     el('debug-toggle')?.addEventListener('click', () => {
@@ -362,6 +384,7 @@
     if (el('setting-count')) el('setting-count').value = settings.count;
     if (el('setting-concurrency')) el('setting-concurrency').value = settings.concurrency;
     if (el('setting-budget')) el('setting-budget').value = settings.budget;
+    exifToggle?.setAttribute?.('aria-pressed', String(exifVisible));
     const resumeButton = document.querySelector('[data-gallery-resume]');
     if (resumeButton) resumeButton.hidden = !savedProgress();
     dialog.addEventListener('keydown', event => {
@@ -371,6 +394,6 @@
     el('stage').addEventListener('touchstart', event => { touchStart = !viewport?.isZoomed() && event.touches.length === 1 ? event.touches[0].clientX : undefined; }, {passive:true});
     el('stage').addEventListener('touchend', event => { if (viewport?.isZoomed()) {touchStart=undefined; return;} if (touchStart === undefined) return; const dx=event.changedTouches[0].clientX-touchStart; touchStart=undefined; if (Math.abs(dx)>60) show(selected+(dx<0?1:-1)); }, {passive:true});
     el('stage').addEventListener('touchcancel',()=>{touchStart=undefined;},{passive:true});
-    dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; el('stage').replaceChildren(); const debug=el('debug-output'); if(debug) debug.hidden=true; const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false'); });
+    dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; const panel=el('exif-panel'); el('stage').replaceChildren(); if(panel) el('stage').append(panel); renderExif(null); const debug=el('debug-output'); if(debug) debug.hidden=true; const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false'); });
     // Restore exact progress by stable identity when the dialog opens with an explicit resume action.
 })();

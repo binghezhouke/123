@@ -93,6 +93,7 @@
     <div class="zip-gallery-toolbar">
         <h2 id="zip-gallery-title">图片预览</h2><span id="zip-gallery-counter"></span>
         <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
+        <button id="zip-gallery-exif-toggle" class="btn btn-secondary" type="button" aria-pressed="false">EXIF</button>
         <button id="zip-gallery-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">全屏</button>
         <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
     </div>
@@ -103,7 +104,7 @@
         <button id="zip-gallery-original" class="btn btn-secondary" type="button">原始尺寸 1:1</button>
         <button id="zip-gallery-rotate" class="btn btn-secondary" type="button">旋转 90°</button>
     </div>
-    <div id="zip-gallery-stage"></div>
+    <div id="zip-gallery-stage"><div id="zip-gallery-exif-panel" hidden></div></div>
     <p id="zip-gallery-status" role="status" aria-live="polite"></p>
     <div class="zip-gallery-toolbar gallery-controls">
         <button id="zip-gallery-prev" class="btn btn-secondary" type="button">← 上一张</button><button id="zip-gallery-retry" class="btn btn-secondary" type="button" hidden>重试</button><button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
@@ -141,7 +142,7 @@
 
 <script src="/static/js/vendor/panzoom/panzoom.min.js?v={{.Version}}" defer></script>
 <script src="/static/js/image_viewport.js?v={{.Version}}" defer></script>
-<script src="/static/js/zip_gallery.js?v={{.Version}}" defer></script>
+<script src="/static/js/image_exif.js?v={{.Version}}" defer></script><script src="/static/js/zip_gallery.js?v={{.Version}}" defer></script>
 <script src="/static/js/browser_position.js?v={{.Version}}" defer></script>
 <script src="/static/js/file_pagination.js?v={{.Version}}" defer></script>
 <script src="/static/js/keyboard_navigation.js?v={{.Version}}" defer></script>

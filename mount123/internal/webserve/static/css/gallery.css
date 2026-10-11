@@ -10,6 +10,8 @@
 #zip-gallery-stage.gallery-original { overflow:auto; align-items:flex-start; justify-content:flex-start; }
 #zip-gallery-stage.gallery-original img { max-width:none; max-height:none; object-fit:initial; }
 #zip-gallery-stage.is-zoomed { cursor:grab; } #zip-gallery-stage.is-zoomed:active { cursor:grabbing; }
+#zip-gallery-exif-panel { position:absolute; right:14px; bottom:14px; z-index:3; max-width:min(320px, calc(100% - 28px)); padding:10px 12px; border:1px solid #ffffff22; border-radius:10px; background:#111b; color:#f5f7fb; backdrop-filter:blur(12px); font-size:12px; line-height:1.55; pointer-events:none; }
+#zip-gallery-exif-panel strong { display:block; margin-bottom:3px; font-size:11px; color:#b7c9e9; }
 #zip-gallery-status,#zip-gallery-jump-message { margin:0; min-height:22px; text-align:center; color:#b2b8c3; font-size:12px; padding:2px 12px; }
 .zip-gallery-zoom { display:flex; justify-content:center; align-items:center; flex-wrap:wrap; gap:8px; padding:8px 12px; }
 #zip-gallery-zoom-level { min-width:5ch; text-align:center; font-size:12px; font-variant-numeric:tabular-nums; }
