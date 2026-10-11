@@ -279,7 +279,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const mediaType = name => {
         const ext = (name.split('.').pop() || '').toLowerCase();
         if (['jpg','jpeg','png','gif','webp','bmp'].includes(ext)) return 'image';
-        if (['mp4','m4v','webm','mov'].includes(ext)) return 'video';
+        if (['mp4','m4v','webm','mov','mkv'].includes(ext)) return 'video';
         if (['txt','md','log','json'].includes(ext)) return 'text';
         return 'file';
     };
@@ -289,6 +289,13 @@ document.addEventListener('DOMContentLoaded', function () {
     const viewportImages = new CloudViewportImages(document.querySelector('.browse-files'), previewDebugOutput);
     const renderPreviewDebug = () => viewportImages.render();
     let previewGeneration = 0;
+    const remuxURL = url => {
+        try {
+            const target = new URL(url, window.location.href);
+            target.searchParams.set('transcode', 'mp4');
+            return target.href;
+        } catch (_) { return `${url}${url.includes('?') ? '&' : '?'}transcode=mp4`; }
+    };
 
     function showPreview(item) {
         const id = item.dataset.fileId;
@@ -337,8 +344,17 @@ document.addEventListener('DOMContentLoaded', function () {
             stage.append(img);
         } else if (kind === 'video') {
             const video = document.createElement('video');
-            video.src = previewUrl;
             video.controls = true;
+            video.preload = 'metadata';
+            const isMKV = /\.mkv$/i.test(name);
+            const native = !isMKV || (typeof video.canPlayType === 'function' && video.canPlayType('video/x-matroska') !== '');
+            video.src = native ? previewUrl : remuxURL(previewUrl);
+            video.addEventListener('error', () => {
+                if (!isMKV || video.dataset.remuxed) return;
+                video.dataset.remuxed = 'true';
+                video.src = remuxURL(previewUrl);
+                video.load();
+            }, {once: true});
             stage.append(video);
         } else if (kind === 'text') {
             const pre = document.createElement('pre');

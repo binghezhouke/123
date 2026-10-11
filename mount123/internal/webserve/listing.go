@@ -466,6 +466,17 @@ func (s *Server) handlePreview(w http.ResponseWriter, r *http.Request) {
 		s.redirectDirectFile(w, r, meta)
 		return
 	}
+	if suffixOf(meta.Name) == ".mkv" && r.URL.Query().Get("transcode") == "mp4" {
+		ctx := r.Context()
+		reader, size, err := s.service.OpenFile(ctx, meta.ID)
+		if err != nil {
+			s.logger.Printf("webserve: open MKV %d: %v", meta.ID, err)
+			http.Error(w, "读取文件失败，请刷新重试。", httpStatusForError(err))
+			return
+		}
+		s.serveMKVAsMP4(w, r, io.NewSectionReader(reader, 0, size), meta.Name)
+		return
+	}
 	switch previewKind(meta.Name) {
 	case "text":
 		s.serveInlineText(w, r, meta)
