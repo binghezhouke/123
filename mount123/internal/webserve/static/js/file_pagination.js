@@ -1,7 +1,9 @@
 // Append server-rendered entries so preview links and filename escaping stay consistent.
 (() => {
+    function initFilePagination() {
     const button = document.querySelector('[data-load-more]');
-    if (!button) return;
+    if (!button || button.dataset?.paginationBound) return;
+    if (button.dataset) button.dataset.paginationBound = '1';
     const status = document.createElement('p');
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
@@ -106,4 +108,8 @@
         const label = document.getElementById('statusText');
         if (event.target.closest('.file-item') && label) label.textContent = '就绪';
     });
+    }
+    globalThis.initFilePagination = initFilePagination;
+    initFilePagination();
+    document.addEventListener('cloudarchive:navigated', initFilePagination);
 })();
