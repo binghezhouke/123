@@ -2,7 +2,7 @@
 <div class="card archive-browser">
     <div class="card-header browser-heading">
         <div><p class="eyebrow">压缩包</p><h1>{{.FileName}}</h1></div>
-        <span class="item-count">{{len .Rows}} 个条目</span>
+        <div class="browser-heading-actions"><span class="item-count">{{len .Rows}} 个条目</span>{{if .ImageCount}}<button type="button" class="btn btn-primary" data-gallery-open>图片浏览</button>{{end}}</div>
     </div>
     <div class="card-body">
         <nav aria-label="压缩包目录" class="archive-path">

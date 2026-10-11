@@ -313,6 +313,9 @@
             populateDirectoryIndex(identity(button)).then(found => { if (!dialog.open || generation !== openGeneration) return; if (found >= 0) show(found); else el('status').textContent='此图片已不在当前目录中'; }).catch(error => { if (dialog.open && generation === openGeneration && error.name !== 'AbortError') el('status').textContent=error.message; });
         } else show(index);
     });
+    document.querySelector('[data-gallery-open]')?.addEventListener('click', () => {
+        document.querySelector('[data-gallery-image], .zip-image')?.click();
+    });
     // Resume follows the stable file identity, loading metadata pages as needed.
     document.addEventListener('click', async event => {
         const button = event.target.closest('[data-gallery-resume]'); if (!button) return;

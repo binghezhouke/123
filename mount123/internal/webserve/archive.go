@@ -36,11 +36,12 @@ func archiveTemplate() (*template.Template, error) {
 
 type archivePageData struct {
 	pageData
-	FileID   int64
-	FileName string
-	Prefix   string
-	Parent   string
-	Rows     []archiveRow
+	FileID     int64
+	FileName   string
+	Prefix     string
+	Parent     string
+	Rows       []archiveRow
+	ImageCount int
 }
 
 type archiveRow struct {
@@ -106,13 +107,21 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	if parent == "." {
 		parent = ""
 	}
+	rows := archiveRows(fileID, prefix, members)
+	imageCount := 0
+	for _, row := range rows {
+		if row.IsImage {
+			imageCount++
+		}
+	}
 	s.renderArchive(w, archivePageData{
-		pageData: pageData{Info: s.info, Title: "压缩包浏览", Authenticated: s.authEnabled},
-		FileID:   fileID,
-		FileName: name,
-		Prefix:   prefix,
-		Parent:   parent,
-		Rows:     archiveRows(fileID, prefix, members),
+		pageData:   pageData{Info: s.info, Title: "压缩包浏览", Authenticated: s.authEnabled},
+		FileID:     fileID,
+		FileName:   name,
+		Prefix:     prefix,
+		Parent:     parent,
+		Rows:       rows,
+		ImageCount: imageCount,
 	})
 }
 

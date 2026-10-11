@@ -28,6 +28,13 @@ func archiveBytes(t *testing.T) []byte {
 	if _, err := file.Write([]byte("hello archive member")); err != nil {
 		t.Fatal(err)
 	}
+	image, err := writer.Create("pics/cover.jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := image.Write([]byte("fake image payload")); err != nil {
+		t.Fatal(err)
+	}
 	video, err := writer.Create("clips/sample.mp4")
 	if err != nil {
 		t.Fatal(err)
@@ -98,6 +105,10 @@ func TestArchiveListRendersMembers(t *testing.T) {
 	body := recorder.Body.String()
 	if !strings.Contains(body, "pics/") {
 		t.Fatalf("archive page does not list the folder:\n%s", body)
+	}
+	imagePage := authenticatedGET(t, server.Handler(), "/archive/1?path=pics", nil)
+	if imagePage.Code != http.StatusOK || !strings.Contains(imagePage.Body.String(), `data-gallery-open`) || !strings.Contains(imagePage.Body.String(), `data-gallery-image`) {
+		t.Fatalf("archive image browser controls are missing:\n%s", imagePage.Body.String())
 	}
 }
 
