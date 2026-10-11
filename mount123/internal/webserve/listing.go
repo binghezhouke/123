@@ -157,6 +157,7 @@ var (
 		".m4v":  "video/x-m4v",
 		".webm": "video/webm",
 		".mov":  "video/quicktime",
+		".mkv":  "video/x-matroska",
 	}
 	audioSuffixes = map[string]string{
 		".mp3": "audio/mpeg",

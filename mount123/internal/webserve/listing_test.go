@@ -369,6 +369,15 @@ func TestPreviewServesImagesAndTextInline(t *testing.T) {
 	}
 }
 
+func TestMKVIsRecognizedAsNativeVideo(t *testing.T) {
+	if got := previewKind("sample.mkv"); got != "video" {
+		t.Fatalf("previewKind(sample.mkv) = %q, want video", got)
+	}
+	if got := mediaTypes()[".mkv"]; got != "video/x-matroska" {
+		t.Fatalf("media type for MKV = %q", got)
+	}
+}
+
 func TestPreviewDirectRedirectsCachedImageURL(t *testing.T) {
 	fixture := newListingFixture(t)
 	recorder := authenticatedGET(t, fixture.server.Handler(), "/file/3/preview?direct=1", nil)

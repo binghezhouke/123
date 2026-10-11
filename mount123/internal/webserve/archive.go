@@ -180,6 +180,9 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 	base := path.Base(memberPath)
 	suffix := strings.ToLower(path.Ext(base))
 	contentType := mime.TypeByExtension(suffix)
+	if suffix == ".mkv" {
+		contentType = "video/x-matroska"
+	}
 	if suffix == ".txt" || suffix == ".md" || suffix == ".json" || suffix == ".log" {
 		contentType = "text/plain; charset=utf-8"
 	}
