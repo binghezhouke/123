@@ -273,7 +273,7 @@
             const image = retained || new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { setCounter(`${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`); } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
             image.onerror = () => { if (token !== generation) return; el('status').textContent = '浏览器无法显示此图片，可下载原图查看'; el('retry').hidden = false; };
             if (!retained) image.src = objectUrl;
-            el('stage').replaceChildren(image);
+            el('stage').replaceChildren(...(panel ? [panel, image] : [image]));
             if (retained) image.onload();
         } catch (error) { if (token !== generation || error.name === 'AbortError') return; el('status').textContent = error.message; el('retry').hidden = false; }
         renderDiagnostics(); renderDebugOverlay();
