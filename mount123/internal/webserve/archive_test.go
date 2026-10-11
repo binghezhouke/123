@@ -28,6 +28,13 @@ func archiveBytes(t *testing.T) []byte {
 	if _, err := file.Write([]byte("hello archive member")); err != nil {
 		t.Fatal(err)
 	}
+	video, err := writer.Create("clips/sample.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := video.Write([]byte("fake mp4 payload")); err != nil {
+		t.Fatal(err)
+	}
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +112,20 @@ func TestArchiveMemberPreview(t *testing.T) {
 	}
 	if recorder.Header().Get("Content-Type") != "text/plain; charset=utf-8" {
 		t.Fatalf("content type = %q", recorder.Header().Get("Content-Type"))
+	}
+}
+
+func TestArchiveVideoMemberPlaysInline(t *testing.T) {
+	server, _ := newArchiveFixture(t)
+	recorder := authenticatedGET(t, server.Handler(), "/archive/1/member?path=clips/sample.mp4", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "video/mp4" {
+		t.Fatalf("content type = %q, want video/mp4", got)
+	}
+	if got := recorder.Header().Get("Content-Disposition"); !strings.HasPrefix(got, "inline;") {
+		t.Fatalf("content disposition = %q, want inline", got)
 	}
 }
 

@@ -189,8 +189,10 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 		contentType = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", contentType)
-	// Serve inline images/text; every other type is offered as a download.
-	if strings.HasPrefix(contentType, "image/") {
+	// Serve browser-playable media, images, and text inline. ServeContent keeps
+	// Range support, which lets native video players seek inside the member.
+	if strings.HasPrefix(contentType, "video/") || strings.HasPrefix(contentType, "audio/") || strings.HasPrefix(contentType, "image/") {
+		w.Header().Set("Content-Disposition", "inline; filename*=UTF-8''"+url.PathEscape(base))
 		http.ServeContent(w, r, base, time.Time{}, section)
 		return
 	}
