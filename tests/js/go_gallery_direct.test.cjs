@@ -61,24 +61,22 @@ function setup({count = 5, blobSize = 1, viewport = null, indexPages = null, del
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 
-test('direct prefetch retains the loaded image when navigating forward and back', async () => {
-    const {buttons,get,images}=setup({count:3});
+test('Go gallery keeps encoded blobs and only creates an Image for the selected slide', async () => {
+    const {buttons,get,images,requests,revoked}=setup({count:3});
     buttons.forEach((b,i)=>b.dataset.url='/file/'+i+'/preview?direct=1');
     buttons[0].handlers.click();
+    assert.equal(images.length,0);
+    requests[0].resolve(); await tick();
     assert.equal(images.length,1);
-    const first=images[0]; first.onload();
-    await tick();
-    assert.equal(get('zip-gallery-stage').children[0],first);
-    assert.equal(first.assignments,1);
-    const next=images.find(i=>i.url.includes('/file/1/'));
-    assert.ok(next);
-    next.onload(); await tick();
+    const nextRequest=requests.find(r=>r.url.includes('/file/1/'));
+    assert.ok(nextRequest);
+    nextRequest.resolve(); await tick();
+    assert.equal(images.length,1, 'prefetch must not create decoded images');
+    const count=requests.length;
     get('zip-gallery-next').onclick(); await tick();
-    assert.equal(get('zip-gallery-stage').children[0],next);
-    assert.equal(next.assignments,1);
+    assert.equal(images.length,2);
     get('zip-gallery-prev').onclick(); await tick();
-    assert.equal(get('zip-gallery-stage').children[0],first);
-    assert.equal(first.assignments,1);
-    get('zip-gallery-close').onclick();
-    await tick();
+    assert.equal(requests.length,count, 'back navigation reuses encoded blob');
+    get('zip-gallery-close').onclick(); await tick();
+    assert.ok(revoked.length >= 2);
 });

@@ -153,24 +153,19 @@
                 const legacyDirect = Boolean(directUrl && !item.dataset.directUrl);
                 const localUrl = item.dataset.directUrl ? source(item) : (legacyDirect ? proxySource(source(item)) : source(item));
                 const useDirect = Boolean(directUrl && (!priority || legacyDirect));
+                const headers = priority ? {} : {'X-Priority': 'background'};
+                let response;
                 if (useDirect) {
-                    let url = directUrl, loadedImage;
                     try {
-                        loadedImage = await preloadImage(url, task.controller.signal);
+                        response = await fetch(directUrl, {signal: task.controller.signal, cache: 'force-cache'});
+                        if (!response.ok) throw new Error('直链读取失败');
                     } catch (error) {
                         if (error.name === 'AbortError') throw error;
-                        // A signed URL can expire between metadata rendering and
-                        // the browser request. Retry through the local proxy,
-                        // which can refresh the link and preserve access.
-                        url = localUrl || proxySource(url);
-                        loadedImage = await preloadImage(url, task.controller.signal);
+                        response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
                     }
-                    touchCache(index, url, loadedImage.naturalWidth * loadedImage.naturalHeight * 4, loadedImage);
-                    stats.durations.push((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started); if (stats.durations.length > 100) stats.durations.shift();
-                    return url;
+                } else {
+                    response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
                 }
-                const headers = priority ? {} : {'X-Priority': 'background'};
-                const response = await fetch(localUrl, {signal: task.controller.signal, headers});
                 if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
                 if (!response.ok || !response.headers.get('Content-Type')?.startsWith('image/')) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
                 const timing = response.headers.get('Server-Timing') || '';

@@ -145,6 +145,7 @@
 <script src="/static/js/browser_position.js" defer></script>
 <script src="/static/js/file_pagination.js" defer></script>
 <script src="/static/js/keyboard_navigation.js" defer></script>
+<script src="/static/js/viewport_images.js"></script>
 <script>
 function switchView(view) {
     const iconBtn = document.getElementById('iconViewBtn');
@@ -283,165 +284,11 @@ document.addEventListener('DOMContentLoaded', function () {
         return 'file';
     };
 
-    // The inline preview has a separate lifecycle from the gallery dialog.
-    // Keep the same bounded neighboring-image prefetch here so moving through
-    // Finder preview does not make every image a cold request.
-    const previewCache = new Map();
-    const previewPending = new Map();
-    const previewFailed = new Map();
-    const previewAttempted = new Set();
-    let previewEvictions = 0;
     const previewDebugToggle = document.getElementById('preview-debug-toggle');
     const previewDebugOutput = document.getElementById('preview-debug-output');
-    const PREVIEW_PREFETCH_COUNT = 9;
-    const PREVIEW_CACHE_LIMIT = (() => {
-        try {
-            const value = JSON.parse(localStorage.getItem('imageGallerySettings') || '{}').budget;
-            return Number.isFinite(Number(value)) ? Math.min(200, Math.max(1, Math.round(Number(value)))) : 30;
-        } catch { return 30; }
-    })();
-    let previewCacheBytes = 0;
-    let previewSelectedId = '';
-    let previewDirection = 1;
-    const previewItemsById = key => [...document.querySelectorAll('.file-item')].filter(item => previewIdentity(item) === key);
-    const updatePreviewThumbnail = (key, url) => {
-        for (const item of previewItemsById(key)) {
-            const icon = item.querySelector('.file-grid-icon, .file-list-icon');
-            if (!icon) continue;
-            const old = icon.querySelector('.preview-prefetch-thumb');
-            if (old) old.remove();
-            const image = document.createElement('img');
-            image.className = 'preview-prefetch-thumb'; image.alt = ''; image.loading = 'lazy'; image.src = url;
-            icon.querySelector('i')?.setAttribute('aria-hidden', 'true');
-            icon.querySelector('i')?.classList.add('preview-prefetch-icon-hidden');
-            icon.append(image);
-        }
-    };
-    const removePreviewThumbnail = key => {
-        for (const item of previewItemsById(key)) {
-            const icon = item.querySelector('.file-grid-icon, .file-list-icon');
-            icon?.querySelector('.preview-prefetch-thumb')?.remove();
-            icon?.querySelector('i')?.classList.remove('preview-prefetch-icon-hidden');
-        }
-    };
-    const renderPreviewDebug = () => {
-        if (!previewDebugOutput) return;
-        const list = visiblePreviewItems();
-        const current = list.findIndex(item => previewIdentity(item) === previewSelectedId);
-        const neighbors = [];
-        if (current >= 0) {
-            for (let step = 1; step <= PREVIEW_PREFETCH_COUNT && neighbors.length < PREVIEW_PREFETCH_COUNT; step++) {
-                const index = current + step * previewDirection;
-                if (index >= 0 && index < list.length && previewIsImage(list[index])) neighbors.push(list[index]);
-            }
-        }
-        const state = item => {
-            const key = previewIdentity(item);
-            if (previewCache.has(key)) return '缓存';
-            if (previewPending.has(key)) return '请求中';
-            if (previewFailed.has(key)) return `失败(${previewFailed.get(key)})`;
-            if (previewAttempted.has(key)) return '已发起';
-            return '待调度';
-        };
-        const mode = item => item?.dataset.directUrl ? '直链' : '代理';
-        const lines = [
-            `当前: ${current >= 0 ? `${current + 1}/${list.length}` : '—'} ${previewSelectedId || '—'}`,
-            `方向: ${previewDirection > 0 ? '向后' : '向前'} · 缓存 ${previewCache.size} · 请求中 ${previewPending.size} · 淘汰 ${previewEvictions} · 窗口 ${PREVIEW_PREFETCH_COUNT}`,
-        ];
-        if (!neighbors.length) lines.push('邻近预取: —');
-        else neighbors.forEach((item, index) => lines.push(`${index + 1}. ${state(item)} · ${mode(item)} · ${item.dataset.favoriteName || item.dataset.fileId}`));
-        previewDebugOutput.textContent = lines.join('\n');
-    };
-    const visiblePreviewItems = () => {
-        const list = document.getElementById('fileListView');
-        const grid = document.getElementById('fileContainer');
-        const active = list && getComputedStyle(list).display !== 'none' ? list : grid;
-        return [...(active?.querySelectorAll('.file-item') || [])];
-    };
-    const previewIdentity = item => item?.dataset.fileId || item?.dataset.favoriteName || '';
-    const previewIsImage = item => item && item.dataset.fileType !== 'folder' && mediaType(item.dataset.favoriteName || '') === 'image';
-    const trimPreviewCache = () => {
-        const protectedKeys = new Set([previewSelectedId]);
-        const list = visiblePreviewItems();
-        const current = list.findIndex(item => previewIdentity(item) === previewSelectedId);
-        if (current >= 0) {
-            for (let step = 1; step <= PREVIEW_PREFETCH_COUNT; step++) {
-                const index = current + step * previewDirection;
-                if (index < 0 || index >= list.length) break;
-                if (previewIsImage(list[index])) protectedKeys.add(previewIdentity(list[index]));
-            }
-        }
-        while (previewCache.size > PREVIEW_CACHE_LIMIT) {
-            const key = [...previewCache.keys()].find(candidate => !protectedKeys.has(candidate));
-            if (!key) break;
-            const old = previewCache.get(key);
-            previewCacheBytes -= old?.bytes || 0;
-            if (old?.url?.startsWith('blob:')) URL.revokeObjectURL(old.url);
-            previewCache.delete(key);
-            removePreviewThumbnail(key);
-            previewEvictions++;
-        }
-    };
-    const fetchPreviewThumbnail = async (url, priority) => {
-        const response = await fetch(url, {cache: 'force-cache', priority: priority ? 'high' : 'low'});
-        if (!response.ok) throw new Error(`缩略图读取失败（HTTP ${response.status}）`);
-        const blob = await response.blob();
-        if (typeof createImageBitmap !== 'function') return {url, bytes: blob.size || 1};
-        const bitmap = await createImageBitmap(blob, {resizeWidth: 180, resizeHeight: 180, resizeQuality: 'high'});
-        const canvas = document.createElement('canvas');
-        canvas.width = bitmap.width; canvas.height = bitmap.height;
-        canvas.getContext('2d').drawImage(bitmap, 0, 0);
-        bitmap.close?.();
-        const thumb = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(new Error('缩略图编码失败')), 'image/jpeg', 0.78));
-        const thumbUrl = URL.createObjectURL(thumb);
-        return {url: thumbUrl, bytes: thumb.size || 1};
-    };
-    const prefetchPreviewImage = (item, priority = false) => {
-        if (!previewIsImage(item)) return;
-        const key = previewIdentity(item);
-        if (!key || previewCache.has(key) || previewFailed.has(key)) return;
-        if (previewPending.has(key)) {
-            return;
-        }
-        const direct = item.dataset.directUrl || '';
-        const fallback = item.dataset.url || '';
-        const request = {url: direct || fallback};
-        previewAttempted.add(key);
-        previewPending.set(key, request);
-        const finish = ({url, bytes}) => {
-            const old = previewCache.get(key);
-            if (old) previewCacheBytes -= old.bytes || 0;
-            request.url = url;
-            previewCache.set(key, {url, bytes});
-            previewCacheBytes += bytes;
-            previewPending.delete(key);
-            updatePreviewThumbnail(key, url);
-            trimPreviewCache();
-            renderPreviewDebug();
-        };
-        fetchPreviewThumbnail(request.url, priority).then(finish).catch(async error => {
-            if (request.url !== fallback && fallback) {
-                request.url = fallback;
-                try { finish(await fetchPreviewThumbnail(fallback, priority)); return; }
-                catch { /* Report the combined direct and proxy failure below. */ }
-            }
-            previewPending.delete(key);
-            previewFailed.set(key, error.message || '缩略图读取失败');
-            renderPreviewDebug();
-        });
-    };
-    const prefetchPreviewNeighbors = item => {
-        if (!previewIsImage(item)) return;
-        const list = visiblePreviewItems();
-        const current = list.indexOf(item);
-        if (current < 0) return;
-        const candidates = [];
-        for (let step = 1; step <= PREVIEW_PREFETCH_COUNT && candidates.length < PREVIEW_PREFETCH_COUNT; step++) {
-            const index = current + step * previewDirection;
-            if (index >= 0 && index < list.length && previewIsImage(list[index])) candidates.push(list[index]);
-        }
-        candidates.forEach((candidate, index) => prefetchPreviewImage(candidate, index === 0));
-    };
+    const viewportImages = new CloudViewportImages(document.querySelector('.browse-files'), previewDebugOutput);
+    const renderPreviewDebug = () => viewportImages.render();
+    let previewGeneration = 0;
 
     function showPreview(item) {
         const id = item.dataset.fileId;
@@ -452,16 +299,10 @@ document.addEventListener('DOMContentLoaded', function () {
         const updated = item.dataset.updated || '—';
         const kindLabel = item.dataset.kind || (isDir ? '文件夹' : '文件');
         const previewUrl = item.dataset.url || `/file/${id}/preview`;
-        const list = visiblePreviewItems();
-        const current = list.indexOf(item);
-        const previous = previewSelectedId && list.findIndex(candidate => previewIdentity(candidate) === previewSelectedId);
-        if (current >= 0 && previous >= 0 && current !== previous) previewDirection = Math.sign(current - previous) || previewDirection;
-        previewSelectedId = previewIdentity(item);
-        // Selecting a failed item explicitly gives it one fresh attempt.
-        previewFailed.delete(previewSelectedId);
-        previewAttempted.delete(previewSelectedId);
+        const token = ++previewGeneration;
         let resolution = '';
         const renderMeta = () => {
+            if (token !== previewGeneration) return;
             metaEl.hidden = false;
             const lines = [
                 `<div>类型：${kindLabel}</div>`,
@@ -513,7 +354,7 @@ document.addEventListener('DOMContentLoaded', function () {
         renderMeta();
         actions.hidden = false;
         openLink.href = isDir ? `/browse?parent_id=${id}` : `/file/${id}`;
-        prefetchPreviewNeighbors(item);
+
         renderPreviewDebug();
     }
 
