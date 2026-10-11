@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path"
+	"strings"
 	"syscall"
 	"time"
 
@@ -199,6 +201,9 @@ func (s *Service) DetectedArchives(ctx context.Context, parentID int64) (map[int
 // (empty path is the archive root). The archive format is derived from the
 // cloud filename; split 7z is entered through its .001 volume.
 func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath string) ([]ArchiveEntry, error) {
+	if file, fileErr := s.File(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
+		return s.ListISO(ctx, fileID, memberPath)
+	}
 	idx, archive, source, password, err := s.outerArchiveIndex(ctx, fileID)
 	defer clear(password)
 	if err != nil {
@@ -226,6 +231,9 @@ func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath stri
 // stream through the shared growing cache;
 // plain ZIP Store members map directly onto the remote file instead.
 func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPath string) (io.ReaderAt, int64, error) {
+	if file, fileErr := s.File(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
+		return s.OpenISOMember(ctx, fileID, memberPath)
+	}
 	idx, archive, source, password, err := s.outerArchiveIndex(ctx, fileID)
 	defer clear(password)
 	if err != nil {
