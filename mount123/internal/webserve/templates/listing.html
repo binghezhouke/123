@@ -288,6 +288,7 @@ document.addEventListener('DOMContentLoaded', function () {
     // Finder preview does not make every image a cold request.
     const previewCache = new Map();
     const previewPending = new Map();
+    const previewFailed = new Map();
     const previewDebugToggle = document.getElementById('preview-debug-toggle');
     const previewDebugOutput = document.getElementById('preview-debug-output');
     const PREVIEW_PREFETCH_COUNT = 9;
@@ -314,6 +315,7 @@ document.addEventListener('DOMContentLoaded', function () {
             const key = previewIdentity(item);
             if (previewCache.has(key)) return '缓存';
             if (previewPending.has(key)) return '请求中';
+            if (previewFailed.has(key)) return `失败(${previewFailed.get(key)})`;
             return '待调度';
         };
         const mode = item => item?.dataset.directUrl ? '直链' : '代理';
@@ -344,7 +346,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const prefetchPreviewImage = item => {
         if (!previewIsImage(item)) return;
         const key = previewIdentity(item);
-        if (!key || previewCache.has(key) || previewPending.has(key)) return;
+        if (!key || previewCache.has(key) || previewPending.has(key) || previewFailed.has(key)) return;
         const direct = item.dataset.directUrl || '';
         const fallback = item.dataset.url || '';
         const image = new Image();
@@ -369,6 +371,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 return;
             }
             previewPending.delete(key);
+            previewFailed.set(key, '直链/代理均失败');
             renderPreviewDebug();
         };
         image.src = request.url;
@@ -403,6 +406,8 @@ document.addEventListener('DOMContentLoaded', function () {
         const previous = previewSelectedId && list.findIndex(candidate => previewIdentity(candidate) === previewSelectedId);
         if (current >= 0 && previous >= 0 && current !== previous) previewDirection = Math.sign(current - previous) || previewDirection;
         previewSelectedId = previewIdentity(item);
+        // Selecting a failed item explicitly gives it one fresh attempt.
+        previewFailed.delete(previewSelectedId);
         let resolution = '';
         const renderMeta = () => {
             metaEl.hidden = false;
