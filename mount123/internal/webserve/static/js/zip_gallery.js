@@ -36,7 +36,10 @@
         });
     }
     function source(item) { return item.dataset.url || ''; }
-    function isDirectSource(item) { try { return new URL(source(item), location.href).searchParams.get('direct') === '1'; } catch { return false; } }
+    function directSource(item) {
+        if (item.dataset.directUrl) return item.dataset.directUrl;
+        try { return new URL(source(item), location.href).searchParams.get('direct') === '1' ? source(item) : ''; } catch { return ''; }
+    }
     function proxySource(url) { try { const target = new URL(url, location.href); target.searchParams.delete('direct'); return target.pathname + target.search; } catch { return url; } }
     function preloadImage(url, signal) {
         return new Promise((resolve, reject) => {
@@ -128,16 +131,23 @@
         task.promise = (async () => {
         const started = typeof performance !== 'undefined' ? performance.now() : Date.now(); stats.misses++;
             try {
-                if (isDirectSource(item)) {
-                    let url = source(item), loadedImage;
+                const directUrl = directSource(item);
+                // New listings carry separate local/direct URLs. Keep legacy
+                // pages whose only URL already has ?direct=1 working as
+                // direct-first until they are refreshed.
+                const legacyDirect = Boolean(directUrl && !item.dataset.directUrl);
+                const localUrl = item.dataset.directUrl ? source(item) : (legacyDirect ? proxySource(source(item)) : source(item));
+                const useDirect = Boolean(directUrl && (!priority || legacyDirect));
+                if (useDirect) {
+                    let url = directUrl, loadedImage;
                     try {
                         loadedImage = await preloadImage(url, task.controller.signal);
                     } catch (error) {
                         if (error.name === 'AbortError') throw error;
                         // A signed URL can expire between metadata rendering and
-                        // the browser request. Retry through the same-origin
-                        // proxy, which can refresh the link and preserve access.
-                        url = proxySource(url);
+                        // the browser request. Retry through the local proxy,
+                        // which can refresh the link and preserve access.
+                        url = localUrl || proxySource(url);
                         loadedImage = await preloadImage(url, task.controller.signal);
                     }
                     touchCache(index, url, loadedImage.naturalWidth * loadedImage.naturalHeight * 4, loadedImage);
@@ -145,7 +155,7 @@
                     return url;
                 }
                 const headers = priority ? {} : {'X-Priority': 'background'};
-                const response = await fetch(source(item), {signal: task.controller.signal, headers});
+                const response = await fetch(localUrl, {signal: task.controller.signal, headers});
                 if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
                 if (!response.ok || !response.headers.get('Content-Type')?.startsWith('image/')) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
                 const timing = response.headers.get('Server-Timing') || '';

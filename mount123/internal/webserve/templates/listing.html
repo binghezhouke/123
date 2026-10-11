@@ -1,5 +1,5 @@
 {{define "grid-item"}}
-<div class="file-grid-item file-item" data-file-id="{{.ID}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="{{.Updated}}"{{if .IsImage}} data-gallery-image data-name="{{.Name}}"{{end}}{{if .Preview}} data-url="{{.Preview}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
+<div class="file-grid-item file-item" data-file-id="{{.ID}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="{{.Updated}}"{{if .IsImage}} data-gallery-image data-name="{{.Name}}"{{end}}{{if .Preview}} data-url="{{.Preview}}"{{end}}{{if .DirectPreview}} data-direct-url="{{.DirectPreview}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
     <a class="favorite-file-link" href="{{.Href}}">
         <div class="file-grid-icon {{if .IsDir}}folder{{else}}{{.Icon}}{{end}}"><i class="{{.FAIcon}}" aria-hidden="true"></i></div>
         <div class="file-grid-name">{{.Name}}</div>
@@ -7,7 +7,7 @@
     </a>
 </div>{{end}}
 {{define "list-item"}}
-<div class="file-list-row file-item" data-file-id="{{.ID}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="{{.Updated}}"{{if .IsImage}} data-gallery-image data-name="{{.Name}}"{{end}}{{if .Preview}} data-url="{{.Preview}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
+<div class="file-list-row file-item" data-file-id="{{.ID}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="{{.Updated}}"{{if .IsImage}} data-gallery-image data-name="{{.Name}}"{{end}}{{if .Preview}} data-url="{{.Preview}}"{{end}}{{if .DirectPreview}} data-direct-url="{{.DirectPreview}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
     <a class="file-list-name favorite-file-link" href="{{.Href}}"><span class="file-list-icon"><i class="{{.FAIcon}}" aria-hidden="true"></i></span>{{.Name}}</a>
     <div class="file-list-date">{{.Updated}}</div>
     <div class="file-list-meta">{{if .IsDir}}—{{else}}{{.Size}}{{end}}</div>

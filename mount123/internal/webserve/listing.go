@@ -243,18 +243,19 @@ func parseFileID(value string) (int64, error) {
 
 // listingRow is one rendered directory entry.
 type listingRow struct {
-	ID      int64
-	Name    string
-	Href    string
-	Size    string
-	IsDir   bool
-	Updated string
-	Kind    string
-	Icon    string
-	Badge   string
-	FAIcon  string
-	IsImage bool
-	Preview string
+	ID            int64
+	Name          string
+	Href          string
+	Size          string
+	IsDir         bool
+	Updated       string
+	Kind          string
+	Icon          string
+	Badge         string
+	FAIcon        string
+	IsImage       bool
+	Preview       string
+	DirectPreview string
 }
 
 type listingPageData struct {
@@ -670,9 +671,11 @@ func newListingRow(entry mountfs.FileEntry) listingRow {
 	row.Size = humanBytes(entry.Size)
 	if kind.class == "image" {
 		row.IsImage = true
-		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview?direct=1"
+		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview"
+		row.DirectPreview = row.Preview + "?direct=1"
 	} else if kind.class == "video" {
-		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview?direct=1"
+		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview"
+		row.DirectPreview = row.Preview + "?direct=1"
 	}
 	return row
 }
