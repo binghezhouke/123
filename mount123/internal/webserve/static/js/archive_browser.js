@@ -9,7 +9,10 @@
     const empty = pane.querySelector('.preview-empty');
     const open = document.getElementById('preview-open');
     const download = document.getElementById('preview-download');
-    const selected = () => document.querySelector('.file-item.is-selected');
+    // The archive page renders each member twice (icon and list views). Keep
+    // both copies in sync, while using the same class as the regular Finder
+    // keyboard navigator so the visible icon gets the established highlight.
+    const memberKey = item => item?.dataset.memberId || item?.dataset.favoriteUrl || '';
     const typeOf = name => {
         const ext = (name.split('.').pop() || '').toLowerCase();
         if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext)) return 'image';
@@ -21,6 +24,7 @@
         const view = item.closest('#fileContainer, #fileListView');
         return !view || getComputedStyle(view).display !== 'none';
     });
+    const selected = () => items().find(item => item.classList.contains('keyboard-selected') || item.classList.contains('is-selected'));
     const icon = (name, color) => {
         const node = document.createElement('i');
         node.className = name;
@@ -29,8 +33,18 @@
     };
     function show(item) {
         if (!item) return;
-        document.querySelectorAll('.file-item.is-selected').forEach(node => node.classList.remove('is-selected'));
-        item.classList.add('is-selected');
+        const key = memberKey(item);
+        document.querySelectorAll('.file-item.is-selected, .file-item.keyboard-selected').forEach(node => {
+            node.classList.remove('is-selected', 'keyboard-selected');
+            node.removeAttribute('aria-selected');
+        });
+        // Grid and list contain separate DOM nodes for the same member. Mark
+        // both so switching views does not make the selection appear to move.
+        const matching = [...document.querySelectorAll('.file-item')].filter(node => memberKey(node) === key);
+        (matching.length ? matching : [item]).forEach(node => {
+            node.classList.add('is-selected', 'keyboard-selected');
+            node.setAttribute('aria-selected', 'true');
+        });
         const name = item.dataset.favoriteName || '';
         const kind = typeOf(name);
         const isFolder = item.dataset.fileType === 'folder';
