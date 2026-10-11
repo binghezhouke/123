@@ -24,8 +24,6 @@ const (
 	SharedPasswordFileName = ".mount123.pwd"
 )
 
-var SharedPasswordFileNames = [...]string{".mount123.pwd", ".123mount.pwd"}
-
 // ReadSmallFile downloads a file only when its complete content fits maxBytes.
 // It is intended for small sidecar files; the returned bytes are never logged.
 func (c *Client) ReadSmallFile(ctx context.Context, id, maxBytes int64) ([]byte, error) {

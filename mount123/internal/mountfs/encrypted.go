@@ -21,7 +21,6 @@ import (
 	"syscall"
 	"unicode/utf8"
 
-	"github.com/binghezhouke/123/mount123/internal/panapi"
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	yzip "github.com/yeka/zip"
 	"golang.org/x/crypto/pbkdf2"
@@ -214,7 +213,7 @@ func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescript
 				}
 				own = &archivePasswordFile{f.ID, f.Size, f.Version}
 			}
-			if isSharedPasswordName(f.Name) {
+			if f.Name == ".mount123.pwd" {
 				if shared != nil {
 					return nil, "", syscall.EACCES
 				}
@@ -242,15 +241,6 @@ func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescript
 	}
 	key := fmt.Sprintf("password:%d:%s:%d:missing", archive.id, archive.version, archive.size)
 	return nil, key, nil
-}
-
-func isSharedPasswordName(name string) bool {
-	for _, candidate := range panapi.SharedPasswordFileNames {
-		if name == candidate {
-			return true
-		}
-	}
-	return false
 }
 
 func (t *Tree) diskCacheScope() string {
