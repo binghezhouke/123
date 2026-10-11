@@ -107,7 +107,7 @@ func TestArchiveListRendersMembers(t *testing.T) {
 		t.Fatalf("archive page does not list the folder:\n%s", body)
 	}
 	imagePage := authenticatedGET(t, server.Handler(), "/archive/1?path=pics", nil)
-	if imagePage.Code != http.StatusOK || !strings.Contains(imagePage.Body.String(), `data-gallery-open`) || !strings.Contains(imagePage.Body.String(), `data-gallery-image`) {
+	if imagePage.Code != http.StatusOK || !strings.Contains(imagePage.Body.String(), `class="browse-layout"`) || !strings.Contains(imagePage.Body.String(), `data-gallery-image`) || !strings.Contains(imagePage.Body.String(), `id="preview-pane"`) {
 		t.Fatalf("archive image browser controls are missing:\n%s", imagePage.Body.String())
 	}
 }

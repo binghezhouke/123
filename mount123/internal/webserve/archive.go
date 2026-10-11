@@ -45,6 +45,8 @@ type archivePageData struct {
 }
 
 type archiveRow struct {
+	FileID    int64
+	Prefix    string
 	Name      string
 	Size      string
 	IsDir     bool
@@ -52,6 +54,7 @@ type archiveRow struct {
 	IsImage   bool
 	Nested    bool
 	Kind      string
+	Icon      string
 	FAIcon    string
 	Href      string
 	Download  string
@@ -130,11 +133,14 @@ func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []
 	for _, member := range members {
 		kind := classifyEntry(member.Name, member.IsDir)
 		row := archiveRow{
+			FileID:    fileID,
+			Prefix:    prefix,
 			Name:      member.Name,
 			IsDir:     member.IsDir,
 			Encrypted: member.Encrypted,
 			IsImage:   kind.class == "image",
 			Kind:      kind.label,
+			Icon:      kind.class,
 			FAIcon:    faIconFor(kind),
 		}
 		memberPath := member.Name
