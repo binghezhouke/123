@@ -305,11 +305,8 @@ document.addEventListener('DOMContentLoaded', function () {
         const neighbors = [];
         if (current >= 0) {
             for (let step = 1; step <= PREVIEW_PREFETCH_COUNT && neighbors.length < PREVIEW_PREFETCH_COUNT; step++) {
-                for (const sign of [previewDirection, -previewDirection]) {
-                    const index = current + step * sign;
-                    if (index >= 0 && index < list.length && previewIsImage(list[index])) neighbors.push(list[index]);
-                    if (neighbors.length >= PREVIEW_PREFETCH_COUNT) break;
-                }
+                const index = current + step * previewDirection;
+                if (index >= 0 && index < list.length && previewIsImage(list[index])) neighbors.push(list[index]);
             }
         }
         const state = item => {
@@ -396,11 +393,8 @@ document.addEventListener('DOMContentLoaded', function () {
         if (current < 0) return;
         const candidates = [];
         for (let step = 1; step <= PREVIEW_PREFETCH_COUNT && candidates.length < PREVIEW_PREFETCH_COUNT; step++) {
-            for (const sign of [previewDirection, -previewDirection]) {
-                const index = current + step * sign;
-                if (index >= 0 && index < list.length && previewIsImage(list[index])) candidates.push(list[index]);
-                if (candidates.length >= PREVIEW_PREFETCH_COUNT) break;
-            }
+            const index = current + step * previewDirection;
+            if (index >= 0 && index < list.length && previewIsImage(list[index])) candidates.push(list[index]);
         }
         candidates.forEach((candidate, index) => prefetchPreviewImage(candidate, index === 0));
     };

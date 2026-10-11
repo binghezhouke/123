@@ -180,11 +180,8 @@
         const max = settings.concurrency;
         const indexes = [];
         for (let step = 1; step <= settings.count && indexes.length < settings.count; step++) {
-            for (const sign of [direction, -direction]) {
-                if (indexes.length >= settings.count) break;
-                const index = selected + step * sign;
-                if (index >= 0 && index < items().length) indexes.push(index);
-            }
+            const index = selected + step * direction;
+            if (index >= 0 && index < items().length) indexes.push(index);
         }
         for (const index of indexes) {
             if (backgroundTasks().length >= max) break;
@@ -253,7 +250,7 @@
         const extract = stats.extracts.length ? `${Math.round(stats.extracts.reduce((a,b)=>a+b,0)/stats.extracts.length)} ms` : '未知';
         const list=items(); let queued=0;
         const diagnosticsIndexes=[];
-        for(let step=1;step<=settings.count&&diagnosticsIndexes.length<settings.count;step++){for(const sign of [direction,-direction]){if(diagnosticsIndexes.length>=settings.count)break;const index=selected+step*sign;if(index>=0&&index<list.length)diagnosticsIndexes.push(index);}}
+        for(let step=1;step<=settings.count&&diagnosticsIndexes.length<settings.count;step++){const index=selected+step*direction;if(index>=0&&index<list.length)diagnosticsIndexes.push(index);}
         for(const index of diagnosticsIndexes){if(!cache.has(index)&&!pending.has(index)&&!attempted.has(index))queued++;}
         const background=[...pending.values()].filter(task=>!task.priority).length;
         box.textContent = `预取队列 ${queued} · 缩略图队列 ${thumbQueue.length} · 活跃请求 ${pending.size} · 后台并发 ${background}/${settings.concurrency} · 缓存 ${(stats.cacheBytes/1048576).toFixed(1)} MiB · 命中 ${stats.hits} · 未命中 ${stats.misses} · 失败 ${stats.failures} · 请求平均 ${avg} · 服务器解压平均 ${extract}`;
@@ -264,11 +261,8 @@
         const current = list[selected];
         const indexes = [];
         for (let step = 1; step <= settings.count && indexes.length < settings.count; step++) {
-            for (const sign of [direction, -direction]) {
-                if (indexes.length >= settings.count) break;
-                const index = selected + step * sign;
-                if (index >= 0 && index < list.length) indexes.push(index);
-            }
+            const index = selected + step * direction;
+            if (index >= 0 && index < list.length) indexes.push(index);
         }
         const state = index => {
             if (cache.has(index)) return '缓存';
