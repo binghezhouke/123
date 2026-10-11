@@ -25,6 +25,9 @@
 #zip-gallery-settings form { display:flex; flex-wrap:wrap; align-items:center; gap:10px; padding:8px 0; }
 #zip-gallery-settings input { width:7ch; }
 #zip-gallery-diagnostics-output { margin:8px 0; color:#c1c7d0; }
+.gallery-debug-toggle { position:fixed; right:14px; bottom:14px; z-index:4; border:1px solid #ffffff2b; border-radius:7px; padding:5px 9px; color:#d9e1ed; background:#18202bcc; font-size:11px; cursor:pointer; }
+.gallery-debug-output { position:fixed; right:14px; bottom:48px; z-index:4; width:min(560px,calc(100vw - 28px)); max-height:min(46vh,360px); overflow:auto; margin:0; padding:10px 12px; border:1px solid #ffffff2b; border-radius:8px; color:#d9e1ed; background:#111923e8; box-shadow:0 10px 30px #0008; font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; white-space:pre-wrap; }
+.gallery-debug-output[hidden], .gallery-debug-toggle[hidden] { display:none; }
 @media(max-width:600px) { #zip-gallery { width:100vw; height:100dvh; max-height:100dvh; border:0; border-radius:0; } .zip-gallery-toolbar { gap:6px; padding:8px; } #zip-gallery-title { flex-basis:50%; white-space:normal; } #zip-gallery-stage { min-height:0; } }
 
 #zip-gallery-thumbs[hidden] { display: none; }

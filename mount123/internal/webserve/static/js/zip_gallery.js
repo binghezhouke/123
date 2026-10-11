@@ -167,7 +167,7 @@
                 stats.durations.push((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started); if (stats.durations.length > 100) stats.durations.shift();
                 return url;
             } catch (error) { if (error.name !== 'AbortError') { stats.failures++; task.failed=true; if (!task.priority) attempted.delete(index); } throw error; }
-        })().finally(() => { if (pending.get(index) === task) pending.delete(index); renderDiagnostics(); if (!task.failed) pumpPrefetch(); pumpThumbQueue(); });
+        })().finally(() => { if (pending.get(index) === task) pending.delete(index); renderDiagnostics(); renderDebugOverlay(); if (!task.failed) pumpPrefetch(); pumpThumbQueue(); });
         pending.set(index, task); return task.promise;
     }
     function pumpPrefetch() {
@@ -245,7 +245,7 @@
             el('stage').replaceChildren(image);
             if (retained) image.onload();
         } catch (error) { if (token !== generation || error.name === 'AbortError') return; el('status').textContent = error.message; el('retry').hidden = false; }
-        renderDiagnostics();
+        renderDiagnostics(); renderDebugOverlay();
     }
     function renderDiagnostics() {
         const box = el('diagnostics-output'); if (!box || !el('diagnostics').open) return;
@@ -257,6 +257,34 @@
         for(const index of diagnosticsIndexes){if(!cache.has(index)&&!pending.has(index)&&!attempted.has(index))queued++;}
         const background=[...pending.values()].filter(task=>!task.priority).length;
         box.textContent = `预取队列 ${queued} · 缩略图队列 ${thumbQueue.length} · 活跃请求 ${pending.size} · 后台并发 ${background}/${settings.concurrency} · 缓存 ${(stats.cacheBytes/1048576).toFixed(1)} MiB · 命中 ${stats.hits} · 未命中 ${stats.misses} · 失败 ${stats.failures} · 请求平均 ${avg} · 服务器解压平均 ${extract}`;
+    }
+    function renderDebugOverlay() {
+        const box = el('debug-output'); if (!box) return;
+        const list = items();
+        const current = list[selected];
+        const indexes = [];
+        for (let step = 1; step <= settings.count && indexes.length < settings.count; step++) {
+            for (const sign of [direction, -direction]) {
+                if (indexes.length >= settings.count) break;
+                const index = selected + step * sign;
+                if (index >= 0 && index < list.length) indexes.push(index);
+            }
+        }
+        const state = index => {
+            if (cache.has(index)) return '缓存';
+            if (pending.has(index)) return pending.get(index)?.priority ? '当前请求' : '请求中';
+            if (attempted.has(index)) return '已尝试';
+            return '待调度';
+        };
+        const sourceMode = item => directSource(item) ? '直链' : '代理';
+        const lines = [`当前: ${selected + 1}/${list.length} ${current ? title(current) : '—'} [${current ? sourceMode(current) : '—'}]`,
+            `方向: ${direction > 0 ? '向后' : '向前'} · 窗口: ${settings.count} · 并发: ${settings.concurrency}`];
+        if (!indexes.length) lines.push('邻近预取: 无');
+        else for (const index of indexes) {
+            const item = list[index];
+            lines.push(`${index + 1}. ${state(index)} · ${sourceMode(item)} · ${title(item)}`);
+        }
+        box.textContent = lines.join('\n');
     }
     document.addEventListener('click', event => {
         const button = event.target.closest('[data-gallery-image], .zip-image');
@@ -305,6 +333,14 @@
     el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,9), budget: clamp(el('setting-budget').value,16,2048,256)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('settings-reset')?.addEventListener('click', () => { settings = {...DEFAULTS}; try { localStorage.removeItem(SETTINGS_KEY); } catch {} el('setting-count').value = settings.count; el('setting-concurrency').value = settings.concurrency; el('setting-budget').value = settings.budget; cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('diagnostics')?.addEventListener('toggle', renderDiagnostics);
+    el('debug-toggle')?.addEventListener('click', () => {
+        const box = el('debug-output');
+        const open = box?.hidden;
+        if (!box) return;
+        box.hidden = !open;
+        el('debug-toggle')?.setAttribute?.('aria-expanded', String(open));
+        if (open) renderDebugOverlay();
+    });
     el('diagnostics-reset')?.addEventListener('click', () => { stats.hits=stats.misses=stats.failures=0; stats.durations=[]; stats.extracts=[]; renderDiagnostics(); });
     if (el('setting-count')) el('setting-count').value = settings.count;
     if (el('setting-concurrency')) el('setting-concurrency').value = settings.concurrency;
@@ -318,6 +354,6 @@
     el('stage').addEventListener('touchstart', event => { touchStart = !viewport?.isZoomed() && event.touches.length === 1 ? event.touches[0].clientX : undefined; }, {passive:true});
     el('stage').addEventListener('touchend', event => { if (viewport?.isZoomed()) {touchStart=undefined; return;} if (touchStart === undefined) return; const dx=event.changedTouches[0].clientX-touchStart; touchStart=undefined; if (Math.abs(dx)>60) show(selected+(dx<0?1:-1)); }, {passive:true});
     el('stage').addEventListener('touchcancel',()=>{touchStart=undefined;},{passive:true});
-    dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; el('stage').replaceChildren(); });
+    dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; el('stage').replaceChildren(); const debug=el('debug-output'); if(debug) debug.hidden=true; const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false'); });
     // Restore exact progress by stable identity when the dialog opens with an explicit resume action.
 })();
