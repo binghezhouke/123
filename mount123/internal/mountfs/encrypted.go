@@ -229,11 +229,10 @@ func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescript
 		if dirID == 0 {
 			break
 		}
-		meta, ok := t.api.(MetadataAPI)
-		if !ok {
+		parent, err := t.detailCached(ctx, dirID)
+		if errors.Is(err, syscall.EOPNOTSUPP) {
 			break
 		}
-		parent, err := meta.Detail(ctx, dirID)
 		if err != nil || parent.ParentID == dirID {
 			break
 		}

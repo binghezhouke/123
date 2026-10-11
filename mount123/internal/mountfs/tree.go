@@ -635,6 +635,27 @@ func cloudKey(f *panapi.File) string { return fmt.Sprintf("cloud:%d:%s:%d", f.ID
 func (t *Tree) cloudCacheKey(f *panapi.File) string {
 	return t.diskCacheScope() + ":" + cloudKey(f)
 }
+
+// detailCached returns one cloud file's metadata through the shared metadata
+// cache, so password discovery and breadcrumbs do not re-issue Detail calls.
+func (t *Tree) detailCached(ctx context.Context, id int64) (panapi.File, error) {
+	meta, ok := t.api.(MetadataAPI)
+	if !ok {
+		return panapi.File{}, syscall.EOPNOTSUPP
+	}
+	key := fmt.Sprintf("detail:%d", id)
+	value, err := t.loadMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
+		file, detailErr := meta.Detail(ctx, id)
+		if detailErr != nil {
+			return nil, 0, detailErr
+		}
+		return file, int64(512 + len(file.Name) + len(file.Version)), nil
+	})
+	if err != nil {
+		return panapi.File{}, err
+	}
+	return value.(panapi.File), nil
+}
 func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 	started := time.Now()
 	defer n.observeStage(iostats.StageSourcePrepare, started)

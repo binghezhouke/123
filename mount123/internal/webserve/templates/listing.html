@@ -1,5 +1,5 @@
 {{define "grid-item"}}
-<div class="file-grid-item file-item" data-file-id="{{.ID}}"{{if .IsImage}} data-gallery-image data-url="{{.Preview}}" data-name="{{.Name}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
+<div class="file-grid-item file-item" data-file-id="{{.ID}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="{{.Updated}}"{{if .IsImage}} data-gallery-image data-url="{{.Preview}}" data-name="{{.Name}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
     <a class="favorite-file-link" href="{{.Href}}">
         <div class="file-grid-icon {{if .IsDir}}folder{{else}}{{.Icon}}{{end}}"><i class="{{.FAIcon}}" aria-hidden="true"></i></div>
         <div class="file-grid-name">{{.Name}}</div>
@@ -7,7 +7,7 @@
     </a>
 </div>{{end}}
 {{define "list-item"}}
-<div class="file-list-row file-item" data-file-id="{{.ID}}"{{if .IsImage}} data-gallery-image data-url="{{.Preview}}" data-name="{{.Name}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
+<div class="file-list-row file-item" data-file-id="{{.ID}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="{{.Updated}}"{{if .IsImage}} data-gallery-image data-url="{{.Preview}}" data-name="{{.Name}}"{{end}} data-favorite-key="file:{{.ID}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-file-type="{{if .IsDir}}folder{{else}}file{{end}}">
     <a class="file-list-name favorite-file-link" href="{{.Href}}"><span class="file-list-icon"><i class="{{.FAIcon}}" aria-hidden="true"></i></span>{{.Name}}</a>
     <div class="file-list-date">{{.Updated}}</div>
     <div class="file-list-meta">{{if .IsDir}}—{{else}}{{.Size}}{{end}}</div>
@@ -25,13 +25,14 @@
     <div><p class="eyebrow">资料库</p><h1>{{.CurrentName}}</h1></div>
     <div class="directory-heading-actions">
         <span class="item-count" data-file-count>{{.Count}} 个项目{{if .Hidden}} · 已按筛选隐藏 {{.Hidden}} 项{{end}}</span>
-        <button class="btn btn-secondary" type="button" id="probe-archive-btn" data-parent-id="{{.ParentID}}">探测压缩格式</button>
         <span id="probe-archive-status" role="status" aria-live="polite"></span>
     </div>
 </header>
 
 {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
 
+<div class="browse-layout">
+<div class="browse-files">
 <div class="file-grid" id="fileContainer">
     {{if .Groups}}
         {{range .Groups}}<div class="file-grid-group">{{.Title}}</div>{{range .Rows}}{{template "grid-item" .}}{{end}}{{end}}
@@ -63,6 +64,19 @@
     <div class="empty-state-subtitle">这个文件夹中还没有任何文件或子文件夹</div>
 </div>
 {{end}}
+</div>
+<div class="preview-resizer" id="preview-resizer"></div>
+<aside class="preview-pane" id="preview-pane">
+    <div class="preview-empty">选择一个文件以预览</div>
+    <div class="preview-stage" id="preview-stage" hidden></div>
+    <div class="preview-title" id="preview-title" hidden></div>
+    <div class="preview-meta" id="preview-meta" hidden></div>
+    <div class="preview-actions" id="preview-actions" hidden>
+        <button id="preview-fullscreen" class="btn btn-secondary" type="button">全屏</button>
+        <a id="preview-open" class="btn btn-primary" href="#">打开</a>
+    </div>
+</aside>
+</div>
 
 <button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
 <dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="directory:{{.ParentID}}">
@@ -109,6 +123,7 @@
     <button type="button" data-cm-view="icons">图标视图</button>
     <button type="button" data-cm-view="list">列表视图</button>
     <hr>
+    <button type="button" data-cm-action="probe">探测压缩格式</button>
     <button type="button" data-cm-action="refresh">刷新</button>
 </div>
 
@@ -141,13 +156,9 @@ document.addEventListener('DOMContentLoaded', function () {
 });
 
 (() => {
-    const button = document.getElementById('probe-archive-btn');
     const status = document.getElementById('probe-archive-status');
-    if (!button || !status) return;
-    button.addEventListener('click', async () => {
-        if (button.disabled) return;
-        const parentId = button.dataset.parentId;
-        button.disabled = true;
+    async function runProbe(parentId) {
+        if (!status) return;
         status.textContent = '探测中…';
         try {
             const start = await fetch(`/browse/probe?parent_id=${encodeURIComponent(parentId)}`, {method: 'POST'});
@@ -164,18 +175,14 @@ document.addEventListener('DOMContentLoaded', function () {
                 status.textContent = state.state === 'complete'
                     ? `完成：发现 ${state.detected || 0} 个压缩包，正在刷新…`
                     : `探测${state.state === 'failed' ? '失败' : '已取消'}`;
-                if (state.state === 'complete') {
-                    window.location.reload();
-                } else {
-                    button.disabled = false;
-                }
+                if (state.state === 'complete') window.location.reload();
             };
             await poll();
         } catch (error) {
             status.textContent = '探测失败：' + (error.message || '未知错误');
-            button.disabled = false;
         }
-    });
+    }
+    window.runProbe = runProbe;
 })();
 
 (() => {
@@ -237,6 +244,141 @@ document.addEventListener('DOMContentLoaded', function () {
         menu.hidden = true;
         refreshFiles();
     });
+    menu.querySelector('[data-cm-action="probe"]').addEventListener('click', () => {
+        menu.hidden = true;
+        const parentId = new URLSearchParams(window.location.search).get('parent_id') || '0';
+        window.runProbe?.(parentId);
+    });
+})();
+
+(() => {
+    const pane = document.getElementById('preview-pane');
+    const stage = document.getElementById('preview-stage');
+    const titleEl = document.getElementById('preview-title');
+    const metaEl = document.getElementById('preview-meta');
+    const actions = document.getElementById('preview-actions');
+    const empty = pane?.querySelector('.preview-empty');
+    const fullscreen = document.getElementById('preview-fullscreen');
+    const openLink = document.getElementById('preview-open');
+    if (!pane || !stage || !titleEl || !metaEl || !actions || !empty) return;
+
+    const mediaType = name => {
+        const ext = (name.split('.').pop() || '').toLowerCase();
+        if (['jpg','jpeg','png','gif','webp','bmp'].includes(ext)) return 'image';
+        if (['mp4','m4v','webm','mov'].includes(ext)) return 'video';
+        if (['txt','md','log','json'].includes(ext)) return 'text';
+        return 'file';
+    };
+
+    function showPreview(item) {
+        const id = item.dataset.fileId;
+        const name = item.dataset.favoriteName || '';
+        const isDir = item.dataset.fileType === 'folder';
+        const kind = mediaType(name);
+        const size = item.dataset.size || '—';
+        const updated = item.dataset.updated || '—';
+        const kindLabel = item.dataset.kind || (isDir ? '文件夹' : '文件');
+        const previewUrl = item.dataset.url || `/file/${id}/preview`;
+        let resolution = '';
+        const renderMeta = () => {
+            metaEl.hidden = false;
+            const lines = [
+                `<div>类型：${kindLabel}</div>`,
+                `<div>大小：${isDir ? '—' : size}</div>`,
+            ];
+            if (resolution) lines.push(`<div>分辨率：${resolution}</div>`);
+            lines.push(`<div>修改时间：${updated}</div>`, `<div>文件 ID：${id}</div>`);
+            metaEl.innerHTML = lines.join('');
+        };
+        empty.hidden = true;
+        titleEl.hidden = false;
+        titleEl.textContent = name;
+        stage.hidden = false;
+        stage.replaceChildren();
+        if (isDir) {
+            const icon = document.createElement('i');
+            icon.className = 'fas fa-folder';
+            icon.style.cssText = 'font-size:64px;color:#76a9e6;';
+            stage.append(icon);
+        } else if (kind === 'image') {
+            const img = document.createElement('img');
+            img.src = previewUrl;
+            img.alt = name;
+            img.onload = () => {
+                if (img.naturalWidth && img.naturalHeight) {
+                    resolution = `${img.naturalWidth} × ${img.naturalHeight}`;
+                    renderMeta();
+                }
+            };
+            stage.append(img);
+        } else if (kind === 'video') {
+            const video = document.createElement('video');
+            video.src = previewUrl;
+            video.controls = true;
+            stage.append(video);
+        } else if (kind === 'text') {
+            const pre = document.createElement('pre');
+            pre.style.cssText = 'white-space:pre-wrap;font-size:12px;color:#4a5560;max-height:100%;overflow:auto;';
+            fetch(previewUrl).then(r => r.text()).then(t => { pre.textContent = t.slice(0, 20000); }).catch(() => {});
+            stage.append(pre);
+        } else {
+            const icon = document.createElement('i');
+            icon.className = 'fas fa-file';
+            icon.style.cssText = 'font-size:64px;color:#8a93a1;';
+            stage.append(icon);
+        }
+        renderMeta();
+        actions.hidden = false;
+        openLink.href = isDir ? `/browse?parent_id=${id}` : `/file/${id}`;
+    }
+
+    document.addEventListener('click', event => {
+        const item = event.target.closest('.file-item');
+        if (!item) return;
+        if (event.target.closest('.favorite-marker')) return;
+        showPreview(item);
+        // Files preview in place on single click; folders still navigate.
+        if (item.dataset.fileType !== 'folder' && item.dataset.kind !== '压缩包') {
+            event.preventDefault();
+        }
+    }, true);
+
+    document.addEventListener('dblclick', event => {
+        const item = event.target.closest('.file-item');
+        if (!item || item.dataset.fileType === 'folder') return;
+        if (event.target.closest('.favorite-marker')) return;
+        const id = item.dataset.fileId;
+        window.location.href = `/file/${id}`;
+    });
+
+    fullscreen.addEventListener('click', () => {
+        if (document.fullscreenElement) {
+            document.exitFullscreen();
+        } else {
+            pane.requestFullscreen?.();
+        }
+    });
+
+    const resizer = document.getElementById('preview-resizer');
+    if (resizer && pane.parentElement) {
+        let dragging = false;
+        resizer.addEventListener('mousedown', event => {
+            dragging = true;
+            resizer.classList.add('dragging');
+            event.preventDefault();
+        });
+        document.addEventListener('mousemove', event => {
+            if (!dragging) return;
+            const right = pane.parentElement.getBoundingClientRect().right;
+            const width = Math.max(200, Math.min(640, right - event.clientX));
+            pane.style.flex = `0 0 ${width}px`;
+            pane.style.maxWidth = 'none';
+        });
+        document.addEventListener('mouseup', () => {
+            dragging = false;
+            resizer.classList.remove('dragging');
+        });
+    }
 })();
 </script>
 {{end}}

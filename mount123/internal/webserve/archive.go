@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 const archivePageName = "archive.html"
@@ -156,8 +157,12 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	memberPath := strings.Trim(r.URL.Query().Get("path"), "/")
+	ctx := r.Context()
+	if r.Header.Get("X-Priority") == "background" {
+		ctx = workqueue.Background(ctx)
+	}
 	started := time.Now()
-	reader, size, err := s.service.OpenArchiveMember(r.Context(), fileID, memberPath)
+	reader, size, err := s.service.OpenArchiveMember(ctx, fileID, memberPath)
 	extractMillis := float64(time.Since(started).Microseconds()) / 1000.0
 	w.Header().Set("Server-Timing", fmt.Sprintf("extract;dur=%.1f", extractMillis))
 	if err != nil {

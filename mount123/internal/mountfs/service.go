@@ -77,22 +77,10 @@ func (s *Service) ListDirectory(ctx context.Context, parentID int64) ([]FileEntr
 
 // File returns the cloud metadata for one file ID.
 func (s *Service) File(ctx context.Context, fileID int64) (*panapi.File, error) {
-	meta, ok := s.tree.api.(MetadataAPI)
-	if !ok {
-		return nil, syscall.EOPNOTSUPP
-	}
-	key := fmt.Sprintf("detail:%d", fileID)
-	value, err := s.tree.loadMeta(ctx, key, s.tree.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
-		file, detailErr := meta.Detail(ctx, fileID)
-		if detailErr != nil {
-			return nil, 0, detailErr
-		}
-		return file, int64(512 + len(file.Name) + len(file.Version)), nil
-	})
+	file, err := s.tree.detailCached(ctx, fileID)
 	if err != nil {
 		return nil, err
 	}
-	file := value.(panapi.File)
 	return &file, nil
 }
 
@@ -193,7 +181,8 @@ func (s *Service) DetectedArchives(ctx context.Context, parentID int64) (map[int
 // (empty path is the archive root). The archive format is derived from the
 // cloud filename; split 7z is entered through its .001 volume.
 func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath string) ([]ArchiveEntry, error) {
-	idx, archive, source, err := s.outerArchiveIndex(ctx, fileID)
+	idx, archive, source, password, err := s.outerArchiveIndex(ctx, fileID)
+	defer clear(password)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +206,8 @@ func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath stri
 // its size. Members are materialized through the shared disk cache; large
 // plain ZIP Store members map directly onto the remote file instead.
 func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPath string) (io.ReaderAt, int64, error) {
-	idx, archive, source, err := s.outerArchiveIndex(ctx, fileID)
+	idx, archive, source, password, err := s.outerArchiveIndex(ctx, fileID)
+	defer clear(password)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -247,11 +237,6 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	if kind == ".zip" {
 		return s.openZIPMember(ctx, source, archive, memberPath)
 	}
-	password, err := s.tree.otherPassword(ctx, archive)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer clear(password)
 	idx.mu.RLock()
 	m := idx.members[memberPath]
 	idx.mu.RUnlock()
@@ -264,7 +249,8 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	}
 	key := s.tree.diskCacheScope() + ":" + identity + ":" + kind + ":archive-member:" + memberPath + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + s.tree.passwordTag(archive, password)
 	handle, err := s.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
-		return s.tree.extractOtherMember(fillCtx, source, archive, m, password, w)
+		fillErr := s.tree.extractOtherMember(fillCtx, source, archive, m, password, w)
+		return fillErr
 	})
 	if err != nil {
 		return nil, 0, err

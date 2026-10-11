@@ -23,6 +23,7 @@ import (
 
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
 	"github.com/binghezhouke/123/mount123/internal/panapi"
+	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
 // registerListingRoutes wires directory browsing, file download and preview.
@@ -326,16 +327,18 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 	if query.parentID == 0 {
 		query.parentID = s.info.RootID
 	}
-	data := listingPageData{
-		pageData:  s.basePage("网盘浏览"),
-		ParentID:  query.parentID,
-		Sort:      query.sort,
-		Direction: query.direction,
-		Kind:      query.kind,
-		Arrange:   query.arrange,
-	}
 	ctx := r.Context()
-	data.Breadcrumbs, data.CurrentName = s.folderNames(ctx, query.parentID)
+	breadcrumbs, currentName := s.folderNames(ctx, query.parentID)
+	data := listingPageData{
+		pageData:    s.basePage(currentName),
+		ParentID:    query.parentID,
+		Sort:        query.sort,
+		Direction:   query.direction,
+		Kind:        query.kind,
+		Arrange:     query.arrange,
+		Breadcrumbs: breadcrumbs,
+		CurrentName: currentName,
+	}
 	if s.service == nil {
 		data.pageData.Error = "网盘服务未配置。"
 		s.renderListingPage(w, http.StatusServiceUnavailable, listingPageName, data)
@@ -492,7 +495,14 @@ func (s *Server) lookupFile(w http.ResponseWriter, r *http.Request) (*panapi.Fil
 // Range negotiation (206 with Content-Range, 416 for an unsatisfiable range)
 // on top of the cached random-access reader.
 func (s *Server) serveFileContent(w http.ResponseWriter, r *http.Request, meta *panapi.File, inline bool) {
-	reader, size, err := s.service.OpenFile(r.Context(), meta.ID)
+	ctx := r.Context()
+	if r.Header.Get("X-Priority") == "background" {
+		ctx = workqueue.Background(ctx)
+	}
+	started := time.Now()
+	reader, size, err := s.service.OpenFile(ctx, meta.ID)
+	extractMillis := float64(time.Since(started).Microseconds()) / 1000.0
+	w.Header().Set("Server-Timing", fmt.Sprintf("extract;dur=%.1f", extractMillis))
 	if err != nil {
 		s.logger.Printf("webserve: open file %d: %v", meta.ID, err)
 		http.Error(w, "读取文件失败，请刷新重试。", httpStatusForError(err))
@@ -631,6 +641,9 @@ func newListingRow(entry mountfs.FileEntry) listingRow {
 		return row
 	}
 	row.Href = "/file/" + strconv.FormatInt(entry.ID, 10)
+	if kind.class == "archive" {
+		row.Href = "/archive/" + strconv.FormatInt(entry.ID, 10)
+	}
 	row.Size = humanBytes(entry.Size)
 	if kind.class == "image" {
 		row.IsImage = true

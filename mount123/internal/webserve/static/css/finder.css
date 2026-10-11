@@ -49,8 +49,8 @@
 }
 
 .file-grid-meta {
-    font-size: 10.5px;
-    color: #8a93a1;
+    font-size: 11.5px;
+    color: #7a8494;
 }
 
 .file-grid-item > .favorite-marker {
@@ -72,34 +72,42 @@
 .file-list-header,
 .file-list-row {
     grid-template-columns: minmax(0, 2.2fr) minmax(90px, 1fr) minmax(80px, 1fr) 110px;
-    gap: 12px;
-    padding-left: 12px;
-    padding-right: 12px;
+    gap: 14px;
+    padding-left: 14px;
+    padding-right: 14px;
 }
 
 .file-list-header {
-    min-height: 28px;
-    padding-top: 4px;
-    padding-bottom: 4px;
+    min-height: 34px;
+    padding-top: 6px;
+    padding-bottom: 6px;
 }
 
 .file-list-row {
-    min-height: 26px;
-    padding-top: 2px;
-    padding-bottom: 2px;
-    border-radius: 4px;
+    min-height: 38px;
+    padding-top: 7px;
+    padding-bottom: 7px;
+    border-radius: 6px;
 }
 
 .file-list-name {
-    gap: 8px;
-    font-size: 12.5px;
+    gap: 10px;
+    font-size: 13px;
+    font-weight: 450;
 }
 
 .file-list-icon {
-    width: 16px;
-    height: 16px;
-    font-size: 13px;
+    width: 20px;
+    height: 20px;
+    font-size: 16px;
     line-height: 1;
+    flex-shrink: 0;
+}
+
+.file-list-meta,
+.file-list-date {
+    font-size: 12.5px;
+    color: #5a6472;
 }
 
 .file-list-row > .favorite-marker {
@@ -174,6 +182,109 @@
     font-weight: 600;
     color: #8a93a1;
     padding: 8px 12px 2px;
+}
+
+/* macOS-style preview pane: files on the left, a live preview on the right. */
+.browse-layout {
+    display: flex;
+    gap: 0;
+    align-items: stretch;
+    min-height: 0;
+}
+
+.browse-files {
+    flex: 1;
+    min-width: 0;
+}
+
+.preview-pane {
+    flex: 0 0 300px;
+    max-width: 340px;
+    border-left: 1px solid rgba(0, 0, 0, 0.06);
+    background: rgba(250, 250, 252, 0.6);
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    overflow: auto;
+}
+
+.preview-pane:fullscreen {
+    flex: none;
+    max-width: none;
+    width: 100vw;
+    height: 100vh;
+    background: #1c1c1e;
+    border: 0;
+    padding: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.preview-pane .preview-stage {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 120px;
+}
+
+.preview-pane .preview-stage img,
+.preview-pane .preview-stage video {
+    max-width: 100%;
+    max-height: 100%;
+    border-radius: 6px;
+    object-fit: contain;
+}
+
+.preview-pane .preview-title {
+    font-size: 13px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.preview-pane .preview-meta {
+    font-size: 12px;
+    color: #5a6472;
+    line-height: 1.6;
+}
+
+.preview-pane .preview-empty {
+    color: #8a93a1;
+    font-size: 13px;
+    margin: auto;
+}
+
+.preview-pane .preview-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* Draggable divider between the file list and the preview pane. */
+.preview-resizer {
+    flex: 0 0 5px;
+    cursor: col-resize;
+    background: transparent;
+    border-left: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.preview-resizer:hover,
+.preview-resizer.dragging {
+    background: #dbe3ef;
+}
+
+/* Collapsible sidebar. */
+.finder-sidebar {
+    transition: width 0.18s ease, padding 0.18s ease;
+}
+
+.finder-sidebar.collapsed {
+    width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-right: none;
+    overflow: hidden;
 }
 
 /* Row numbers stay out of the way until a row is hovered, keeping the

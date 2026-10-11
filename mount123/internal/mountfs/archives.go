@@ -95,6 +95,19 @@ func archiveReadError(ctx context.Context, err error, password []byte) error {
 	return syscall.EIO
 }
 
+// needsPassword reports whether an archive index/read failure means the
+// archive requires a password rather than being corrupt or unsupported.
+func needsPassword(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *sevenzip.ReadError
+	return (errors.As(err, &se) && se.Encrypted) ||
+		errors.Is(err, rardecode.ErrBadPassword) ||
+		errors.Is(err, rardecode.ErrArchiveEncrypted) ||
+		errors.Is(err, rardecode.ErrArchivedFileEncrypted)
+}
+
 func (t *Tree) otherPassword(ctx context.Context, a *archiveDescriptor) ([]byte, error) {
 	if _, ok := t.api.(PasswordAPI); !ok {
 		return nil, nil

@@ -109,7 +109,8 @@
         task.promise = (async () => {
         const started = typeof performance !== 'undefined' ? performance.now() : Date.now(); stats.misses++;
             try {
-                const response = await fetch(source(item), {signal: task.controller.signal});
+                const headers = priority ? {} : {'X-Priority': 'background'};
+                const response = await fetch(source(item), {signal: task.controller.signal, headers});
                 if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
                 if (!response.ok || !response.headers.get('Content-Type')?.startsWith('image/')) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
                 const timing = response.headers.get('Server-Timing') || '';
@@ -177,7 +178,7 @@
         el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…'; saveProgress(list[index]);
         try {
             const objectUrl = await load(index, true); if (token !== generation || !dialog.open) return;
-            const image = new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; prefetchReady = true; renderThumbs(); pumpPrefetch(); };
+            const image = new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { el('counter').textContent = `${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`; } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
             image.onerror = () => { if (token !== generation) return; el('status').textContent = '浏览器无法显示此图片，可下载原图查看'; el('retry').hidden = false; };
             image.src = objectUrl; el('stage').replaceChildren(image);
         } catch (error) { if (token !== generation || error.name === 'AbortError') return; el('status').textContent = error.message; el('retry').hidden = false; }

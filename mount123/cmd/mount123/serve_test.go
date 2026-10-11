@@ -147,20 +147,12 @@ func TestRunServeStartsAuthenticatesAndShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer index.Body.Close()
-	if index.StatusCode != http.StatusOK {
-		t.Fatalf("index status = %d, want 200", index.StatusCode)
+	index.Body.Close()
+	if index.StatusCode != http.StatusSeeOther {
+		t.Fatalf("index status = %d, want 303 redirect to the listing", index.StatusCode)
 	}
-	page, err := io.ReadAll(index.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolvedCache, err := filepath.EvalSymlinks(cacheDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(page), resolvedCache) {
-		t.Fatalf("index page does not report the shared cache dir %q: %s", resolvedCache, page)
+	if location := index.Header.Get("Location"); !strings.HasPrefix(location, "/browse") {
+		t.Fatalf("index redirect = %q, want /browse", location)
 	}
 
 	cancel()

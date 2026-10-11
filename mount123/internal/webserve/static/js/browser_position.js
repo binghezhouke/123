@@ -94,12 +94,9 @@
     function markSelection(id) {
         clearSelectionMark();
         selected = id;
-        if (!id) return;
-        const rows = [...document.querySelectorAll('.file-item')].filter(item => item.dataset.fileId === id);
-        for (const row of rows) {
-            row.classList.add('browser-restored-selection');
-            row.setAttribute('aria-current', 'true');
-        }
+        // No visual selection ring: there is no keyboard navigation to move
+        // it, and an unmovable highlight reads as broken. Scroll position is
+        // still restored below.
     }
     async function restore() {
         if (restorePromise) return restorePromise;

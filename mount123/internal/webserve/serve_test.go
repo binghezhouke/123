@@ -137,14 +137,11 @@ func TestLoginGrantsSessionAndRendersIndex(t *testing.T) {
 	request.AddCookie(cookie)
 	page := httptest.NewRecorder()
 	handler.ServeHTTP(page, request)
-	if page.Code != http.StatusOK {
-		t.Fatalf("index status = %d, want 200", page.Code)
+	if page.Code != http.StatusSeeOther {
+		t.Fatalf("index status = %d, want 303", page.Code)
 	}
-	body := page.Body.String()
-	for _, want := range []string{"网盘浏览", "/tmp/cache", "CloudArchive"} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("index page is missing %q: %s", want, body)
-		}
+	if location := page.Header().Get("Location"); !strings.HasPrefix(location, "/browse?") {
+		t.Fatalf("index redirected to %q, want /browse", location)
 	}
 }
 
@@ -261,9 +258,10 @@ func TestEmptyPasswordDisablesAuth(t *testing.T) {
 	if ok || generated != "" {
 		t.Fatalf("no-password server reported generated password = %q (ok=%v)", generated, ok)
 	}
-	// Without a configured password every route is open, including the index.
-	if recorder := get(t, server.Handler(), "/", map[string]string{"Accept": "text/html"}); recorder.Code != http.StatusOK {
-		t.Fatalf("unauthenticated root status = %d, want 200", recorder.Code)
+	// Without a configured password every route is open; the root redirects
+	// to the directory listing.
+	if recorder := get(t, server.Handler(), "/", map[string]string{"Accept": "text/html"}); recorder.Code != http.StatusSeeOther {
+		t.Fatalf("unauthenticated root status = %d, want 303", recorder.Code)
 	}
 }
 

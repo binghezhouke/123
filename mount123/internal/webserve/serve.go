@@ -264,13 +264,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "index.html", pageData{
-		Info:          s.info,
-		Title:         "网盘浏览",
-		Authenticated: s.authEnabled,
-		CacheCapacity: humanBytes(s.info.CacheCapacityBytes),
-		IndexBudget:   humanBytes(s.info.IndexBudgetBytes),
-	})
+	http.Redirect(w, r, browseHref(s.info.RootID, browseQuery{}), http.StatusSeeOther)
 }
 
 func (s *Server) handleFavorites(w http.ResponseWriter, r *http.Request) {

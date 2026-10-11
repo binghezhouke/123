@@ -2,6 +2,7 @@ package mountfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -50,13 +51,13 @@ func archiveEntriesFromIndex(idx *zipIndex, memberPath string) ([]ArchiveEntry, 
 }
 
 // outerArchiveIndex resolves one cloud archive into its parsed index.
-func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipIndex, *archiveDescriptor, *storage.Remote, error) {
+func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipIndex, *archiveDescriptor, *storage.Remote, []byte, error) {
 	file, err := s.File(ctx, fileID)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	if file.IsDir {
-		return nil, nil, nil, syscall.EISDIR
+		return nil, nil, nil, nil, syscall.EISDIR
 	}
 	archive := &archiveDescriptor{id: file.ID, parentID: file.ParentID, name: file.Name, version: file.Version, size: file.Size}
 	kind := archive.kind()
@@ -73,27 +74,34 @@ func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipInde
 		}
 	}
 	if kind == "" {
-		return nil, nil, nil, syscall.ENOTSUP
+		return nil, nil, nil, nil, syscall.ENOTSUP
 	}
 	source, err := s.tree.cloudFileSource(ctx, file, s.tree.opts.SourceTTL)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	var idx *zipIndex
+	var password []byte
 	if kind == ".zip" {
 		idx, err = s.tree.getZIP(ctx, source, archive.size, archive)
 	} else {
-		password, passwordErr := s.tree.otherPassword(ctx, archive)
-		if passwordErr != nil {
-			return nil, nil, nil, passwordErr
+		// Try without a password first so unencrypted archives skip password
+		// discovery entirely. Only fetch a password when the decoder says one
+		// is required.
+		idx, err = s.tree.otherIndex(ctx, source, archive, nil)
+		if err != nil && (needsPassword(err) || errors.Is(err, syscall.EACCES)) {
+			password, err = s.tree.otherPassword(ctx, archive)
+			if err != nil {
+				return nil, nil, nil, nil, err
+			}
+			idx, err = s.tree.otherIndex(ctx, source, archive, password)
 		}
-		idx, err = s.tree.otherIndex(ctx, source, archive, password)
-		clear(password)
 	}
 	if err != nil {
-		return nil, nil, nil, err
+		clear(password)
+		return nil, nil, nil, nil, err
 	}
-	return idx, archive, source, nil
+	return idx, archive, source, password, nil
 }
 
 // nestedArchiveFrom opens an archive member as a nested 7z (including split

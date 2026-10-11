@@ -31,6 +31,7 @@
     <div class="finder-content">
         <div class="finder-toolbar">
             <div class="toolbar-left">
+                <button type="button" class="toolbar-btn" id="sidebar-toggle" title="显示/隐藏侧边栏" aria-label="显示/隐藏侧边栏"><i class="fas fa-bars" aria-hidden="true"></i></button>
                 <button type="button" class="toolbar-btn" onclick="history.back()" title="后退" aria-label="后退"><i class="fas fa-chevron-left" aria-hidden="true"></i></button>
                 <button type="button" class="toolbar-btn" onclick="history.forward()" title="前进" aria-label="前进"><i class="fas fa-chevron-right" aria-hidden="true"></i></button>
                 <div class="toolbar-separator"></div>
@@ -77,25 +78,21 @@
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
 <script src="/static/js/app.js"></script>
 <script>
-function switchView(view) {
-    const iconBtn = document.getElementById('iconViewBtn');
-    const listBtn = document.getElementById('listViewBtn');
-    const container = document.getElementById('fileContainer');
-    if (!iconBtn || !listBtn) return;
-    if (view === 'icons') {
-        iconBtn.classList.add('active'); listBtn.classList.remove('active');
-        if (container) { container.classList.remove('file-list-view'); container.classList.add('file-grid'); }
-    } else {
-        listBtn.classList.add('active'); iconBtn.classList.remove('active');
-        if (container) { container.classList.remove('file-grid'); container.classList.add('file-list-view'); }
-    }
-    localStorage.setItem('finderViewMode', view);
-}
 document.addEventListener('DOMContentLoaded', function () {
     const savedView = localStorage.getItem('finderViewMode');
-    if (savedView) switchView(savedView);
+    if (savedView && typeof switchView === 'function') switchView(savedView);
     updateStatusBar();
 });
+(() => {
+    const toggle = document.getElementById('sidebar-toggle');
+    const sidebar = document.querySelector('.finder-sidebar');
+    if (!toggle || !sidebar) return;
+    if (localStorage.getItem('sidebarCollapsed') === '1') sidebar.classList.add('collapsed');
+    toggle.addEventListener('click', () => {
+        sidebar.classList.toggle('collapsed');
+        localStorage.setItem('sidebarCollapsed', sidebar.classList.contains('collapsed') ? '1' : '0');
+    });
+})();
 function updateStatusBar() {
     const items = document.querySelectorAll('.file-item');
     const count = items.length;
