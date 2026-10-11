@@ -29,3 +29,26 @@
 
 #zip-gallery-thumbs[hidden] { display: none; }
 .browser-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 12px 0; }
+
+/* Fullscreen: drop all chrome and give the image the entire viewport. */
+#zip-gallery.gallery-expanded > :not(#zip-gallery-stage):not(.gallery-fs-bar) { display: none; }
+.gallery-fs-bar {
+    position: absolute;
+    left: 50%;
+    bottom: 22px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 14px;
+    background: #17181bd9;
+    border: 1px solid #ffffff18;
+    border-radius: 999px;
+    box-shadow: 0 12px 40px #000a;
+    z-index: 10;
+    transition: opacity .25s ease;
+}
+.gallery-fs-bar[hidden] { display: none; }
+.gallery-fs-bar.gallery-fs-hidden { opacity: 0; pointer-events: none; }
+#zip-gallery-fs-counter { color: #eceef2; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; padding: 0 4px; }
+.gallery-fs-divider { width: 1px; height: 18px; background: #ffffff18; }

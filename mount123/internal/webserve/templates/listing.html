@@ -80,6 +80,14 @@
 
 <button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
 <dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="directory:{{.ParentID}}">
+    <div id="zip-gallery-fs-bar" class="gallery-fs-bar" hidden>
+        <button id="zip-gallery-fs-prev" class="btn" type="button" aria-label="上一张">←</button>
+        <span id="zip-gallery-fs-counter">1 / 1</span>
+        <button id="zip-gallery-fs-next" class="btn" type="button" aria-label="下一张">→</button>
+        <span class="gallery-fs-divider" aria-hidden="true"></span>
+        <button id="zip-gallery-fs-exit" class="btn" type="button">退出全屏</button>
+        <button id="zip-gallery-fs-close" class="btn" type="button">关闭</button>
+    </div>
     <div class="zip-gallery-toolbar">
         <h2 id="zip-gallery-title">图片预览</h2><span id="zip-gallery-counter"></span>
         <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>

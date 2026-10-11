@@ -33,6 +33,7 @@
     function source(item) { return item.dataset.url || ''; }
     function identity(item) { return item.dataset.fileId || item.dataset.memberId || source(item); }
     function title(item) { return item.dataset.name || item.getAttribute('aria-label') || item.textContent.trim(); }
+    function setCounter(text) { el('counter').textContent = text; const fsCounter = document.getElementById('zip-gallery-fs-counter'); if (fsCounter) fsCounter.textContent = text; }
     function pageKey() { return dialog.dataset.galleryScope || location.pathname + location.search.replace(/([?&])(last_file_id|limit)=.*?(&|$)/g, '$1'); }
     function savedProgress() { try { return JSON.parse(localStorage.getItem(`galleryProgress:${pageKey()}`) || 'null'); } catch { return null; } }
     function saveProgress(item) { try { localStorage.setItem(`galleryProgress:${pageKey()}`, JSON.stringify({identity: identity(item), name: title(item)})); const button=document.querySelector('[data-gallery-resume]'); if(button) button.hidden=false; } catch {} }
@@ -173,12 +174,12 @@
         if (index !== selected) { direction = Math.sign(index - selected) || direction; attempted.clear(); }
         selected = index; prefetchReady = false; const token = ++generation; cancelOutside(); viewport?.detach();
         pumpPrefetch();
-        el('stage').replaceChildren(); el('title').textContent = title(list[index]); el('counter').textContent = `${index + 1} / ${list.length}`;
+        el('stage').replaceChildren(); el('title').textContent = title(list[index]); setCounter(`${index + 1} / ${list.length}`);
         const url = source(list[index]); el('download').href = `${url}${url.includes('?') ? '&' : '?'}download=1`;
         el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…'; saveProgress(list[index]);
         try {
             const objectUrl = await load(index, true); if (token !== generation || !dialog.open) return;
-            const image = new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { el('counter').textContent = `${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`; } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
+            const image = new Image(); image.alt = title(list[index]); image.onload = () => { if (token !== generation) return; viewport?.attach(image); el('status').textContent = '滚轮或双指缩放 · 放大后拖动 · ← → 切换图片'; if (image.naturalWidth && image.naturalHeight) { setCounter(`${index + 1} / ${list.length} · ${image.naturalWidth} × ${image.naturalHeight}`); } prefetchReady = true; renderThumbs(); pumpPrefetch(); };
             image.onerror = () => { if (token !== generation) return; el('status').textContent = '浏览器无法显示此图片，可下载原图查看'; el('retry').hidden = false; };
             image.src = objectUrl; el('stage').replaceChildren(image);
         } catch (error) { if (token !== generation || error.name === 'AbortError') return; el('status').textContent = error.message; el('retry').hidden = false; }
