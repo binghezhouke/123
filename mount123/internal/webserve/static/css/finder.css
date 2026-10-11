@@ -330,6 +330,16 @@
     overflow: hidden;
 }
 
+/* The html marker is installed in the document head before the first paint;
+   it keeps navigation from showing the default sidebar for one frame. */
+html.sidebar-collapsed .finder-sidebar {
+    width: 0;
+    padding-left: 0;
+    padding-right: 0;
+    border-right: none;
+    overflow: hidden;
+}
+
 /* Breadcrumbs live in the toolbar to avoid spending a separate row above the
    directory heading. */
 .toolbar-breadcrumbs {
