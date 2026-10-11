@@ -190,11 +190,15 @@
     gap: 0;
     align-items: stretch;
     min-height: 0;
+    flex: 1 1 auto;
 }
 
 .browse-files {
     flex: 1;
     min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    overscroll-behavior: contain;
 }
 
 .preview-pane {
@@ -272,6 +276,31 @@
 .preview-resizer:hover,
 .preview-resizer.dragging {
     background: #dbe3ef;
+}
+
+/* Keep Finder chrome fixed while a large directory scrolls inside its file
+   pane. The scope avoids changing archive/detail pages that use document
+   scrolling. */
+@media (min-width: 601px) {
+    body:has(.browse-layout) { overflow: hidden; }
+    body:has(.browse-layout) .finder-window { height: 100dvh; min-height: 0; }
+    body:has(.browse-layout) .finder-content { height: 100%; min-height: 0; }
+    body:has(.browse-layout) .finder-main {
+        display: flex;
+        flex-direction: column;
+        min-height: 0;
+        overflow: hidden;
+    }
+    body:has(.browse-layout) .browse-layout { min-height: 0; }
+}
+
+@media (max-width: 600px) {
+    /* Narrow screens keep normal page scrolling instead of trapping a small
+       touch viewport inside the file pane. */
+    body:has(.browse-layout) .finder-window,
+    body:has(.browse-layout) .finder-content,
+    body:has(.browse-layout) .finder-main { height: auto; min-height: 0; overflow: visible; }
+    body:has(.browse-layout) .browse-files { overflow: visible; }
 }
 
 /* Collapsible sidebar. */
