@@ -799,7 +799,7 @@ class FileService:
             if len(matches) > 1:
                 raise ValidationError("同目录存在多个共享密码文件，拒绝读取")
             if matches:
-                return self._read_shared_password_file(matches[0].file_id)
+                return self._read_password_sidecar(matches[0].file_id)
             if current_id == 0:
                 return None
             directory = self.get_file_detail(current_id)
@@ -808,7 +808,50 @@ class FileService:
             current_id = directory.parent_file_id
         raise ValidationError("目录层级超过 128，拒绝继续查找共享密码")
 
-    def _read_shared_password_file(self, file_id: int) -> str:
+    def resolve_archive_password(self, archive) -> Optional[str]:
+        """Read the archive's own ``<name>.pwd``, else the nearest shared password.
+
+        The web browser resolves the same password chain as the mount: the
+        archive's sibling sidecar wins, then the nearest ``.mount123.pwd`` in
+        the archive's directory or any ancestor directory.
+        """
+        if archive is None or getattr(archive, "is_folder", False):
+            return None
+        from .split_archive import SPLIT_7Z
+        split = SPLIT_7Z.fullmatch(archive.filename) if archive.filename else None
+        sidecar_name = (split[1] if split else archive.filename) + ".pwd"
+        parent_id = archive.parent_file_id
+        if not isinstance(parent_id, int) or isinstance(parent_id, bool) or parent_id < 0:
+            parent_id = 0
+        seen = set()
+        current_id = parent_id
+        for _ in range(128):
+            if current_id in seen:
+                raise ValidationError("目录父级关系存在循环")
+            seen.add(current_id)
+            siblings, _ = self.list_files(parent_id=current_id, auto_fetch_all=True, use_cache=False)
+            if current_id == parent_id:
+                own = [item for item in siblings
+                       if item.filename == sidecar_name and not item.is_folder]
+                if len(own) > 1:
+                    raise ValidationError("同目录存在多个同名密码文件，拒绝读取")
+                if own:
+                    return self._read_password_sidecar(own[0].file_id)
+            shared = [item for item in siblings
+                      if item.filename == ".mount123.pwd" and not item.is_folder]
+            if len(shared) > 1:
+                raise ValidationError("同目录存在多个共享密码文件，拒绝读取")
+            if shared:
+                return self._read_password_sidecar(shared[0].file_id)
+            if current_id == 0:
+                return None
+            directory = self.get_file_detail(current_id)
+            if directory is None or directory.parent_file_id in (None, current_id):
+                return None
+            current_id = directory.parent_file_id
+        raise ValidationError("目录层级超过 128，拒绝继续查找密码")
+
+    def _read_password_sidecar(self, file_id: int) -> str:
         link = self.get_final_download_url(file_id, prefer_webdav=False, use_cache=False)
         if not link:
             raise FileUploadError("无法获取共享密码文件下载地址")

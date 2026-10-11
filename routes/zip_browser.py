@@ -316,6 +316,16 @@ def browse(file_id, member_id=None):
                 )
             return no_store(redirect(url_for("zip.browse", file_id=file_id, path=target_path)))
         password = password_vault.get(browser_token, key)
+        resolve_password = getattr(client, "resolve_archive_password", None)
+        if not password and callable(resolve_password):
+            try:
+                resolved = resolve_password(file)
+            except (Pan123APIError, requests.RequestException, OSError):
+                current_app.logger.warning("读取压缩包密码侧车失败，文件 ID: %s", file_id, exc_info=True)
+                resolved = None
+            if resolved:
+                password = resolved
+                password_vault.set(browser_token, key, password)
         response = current_app.extensions["archive_cache"].run(
             key,
             kind,

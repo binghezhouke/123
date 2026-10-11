@@ -154,6 +154,10 @@ class Pan123Client:
     def get_shared_password(self, parent_id: int):
         return self.file_service.get_shared_password(parent_id)
 
+    def resolve_archive_password(self, archive):
+        """读取压缩包自己的 .pwd 或最近一级父目录的共享密码。"""
+        return self.file_service.resolve_archive_password(archive)
+
     def get_file_path(self, file_id: int, use_cache: bool = True):
         """获取文件完整路径"""
         return self.file_service.get_file_path(file_id, use_cache)

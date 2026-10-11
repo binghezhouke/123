@@ -156,6 +156,48 @@ def test_shared_password_walks_to_nearest_parent(service, monkeypatch):
     assert calls == ["closed"]
 
 
+def _password_response(collector, value):
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size): return [value]
+        def close(self): collector.append("closed")
+    return Response()
+
+
+def test_archive_password_prefers_own_sidecar_over_shared(service, monkeypatch):
+    archive = File({"fileId": 41, "parentFileId": 8, "filename": "archive.zip", "type": 0})
+    own = make_file(90, "archive.zip.pwd", parent_id=8)
+    shared = make_file(91, ".mount123.pwd", parent_id=8)
+    calls = []
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: (FileList([own, shared]), -1))
+    monkeypatch.setattr(service, "get_final_download_url", lambda *args, **kwargs: "https://example.test/pwd")
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: _password_response(calls, b"own-password"))
+    assert service.resolve_archive_password(archive) == "own-password"
+    assert calls == ["closed"]
+
+
+def test_archive_password_walks_to_parent_shared(service, monkeypatch):
+    archive = File({"fileId": 41, "parentFileId": 8, "filename": "archive.7z", "type": 0})
+    parent = File({"fileId": 3, "parentFileId": 0, "filename": "parent", "type": 1})
+    current = File({"fileId": 8, "parentFileId": 3, "filename": "child", "type": 1})
+    shared = make_file(91, ".mount123.pwd", parent_id=3)
+    calls = []
+
+    def list_files(**kwargs):
+        if kwargs["parent_id"] == 8:
+            return FileList([]), -1
+        return FileList([shared]), -1
+
+    monkeypatch.setattr(service, "list_files", list_files)
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: current if file_id == 8 else parent)
+    monkeypatch.setattr(service, "get_final_download_url", lambda *args, **kwargs: "https://example.test/pwd")
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: _password_response(calls, b"shared-password"))
+    assert service.resolve_archive_password(archive) == "shared-password"
+    assert calls == ["closed"]
+
+
 @pytest.mark.parametrize("name,sidecar", [("archive.zip", "archive.zip.pwd"),
     ("archive.7z", "archive.7z.pwd"), ("archive.rar", "archive.rar.pwd"),
     ("archive.7z.001", "archive.7z.pwd"), ("archive.7z.002", "archive.7z.pwd")])
