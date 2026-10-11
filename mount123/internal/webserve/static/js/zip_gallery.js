@@ -11,7 +11,7 @@
     // Download requests use cached short-lived URLs and are separate from
     // platform API calls. Keep a generous client-side window for direct-link
     // reads while the API scheduler continues to protect metadata requests.
-    const DEFAULTS = {count: 9, concurrency: 9, budget: 256};
+    const DEFAULTS = {count: 9, concurrency: 9, budget: 30};
     const SETTINGS_KEY = 'imageGallerySettings';
     let settings = readSettings();
     let selected = 0, direction = 1, generation = 0, prefetchReady = false, touchStart;
@@ -22,7 +22,7 @@
             const value = JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}');
             const legacyDefault = Number(value.concurrency) === 6 && Number(value.count) === 9 && Number(value.budget) === 256;
             const concurrency = legacyDefault ? DEFAULTS.concurrency : clamp(value.concurrency, 1, 12, DEFAULTS.concurrency);
-            return {count: clamp(value.count, 0, 50, DEFAULTS.count), concurrency, budget: clamp(value.budget, 16, 2048, DEFAULTS.budget)};
+            return {count: clamp(value.count, 0, 50, DEFAULTS.count), concurrency, budget: legacyDefault ? DEFAULTS.budget : clamp(value.budget, 1, 200, DEFAULTS.budget)};
         } catch { return {...DEFAULTS}; }
     }
     function clamp(value, min, max, fallback) { const n = Number(value); return Number.isFinite(n) ? Math.min(max, Math.max(min, Math.round(n))) : fallback; }
@@ -102,9 +102,24 @@
         trimCache();
     }
     function trimCache() {
-        const maxBytes = settings.budget * 1024 * 1024;
-        while (cache.size > Math.max(30, settings.count + 1) || stats.cacheBytes > maxBytes) {
-            const key = [...cache.keys()].find(k => k !== selected);
+        const cacheLimit = Math.max(1, settings.budget);
+        const protectedKeys = new Set([selected]);
+        for (let step = 1; step <= settings.count; step++) {
+            const index = selected + step * direction;
+            if (index < 0 || index >= items().length) break;
+            protectedKeys.add(index);
+        }
+        while (cache.size > cacheLimit) {
+            const candidates = [...cache.keys()].filter(key => !protectedKeys.has(key));
+            if (!candidates.length) break;
+            const victim = candidates.reduce((best, key) => {
+                const bestAhead = direction * (best - selected);
+                const keyAhead = direction * (key - selected);
+                const bestScore = (bestAhead < 0 ? 1000000 : 0) + Math.abs(bestAhead);
+                const keyScore = (keyAhead < 0 ? 1000000 : 0) + Math.abs(keyAhead);
+                return keyScore > bestScore ? key : best;
+            }, candidates[0]);
+            const key = victim;
             if (key === undefined) break;
             const old = cache.get(key); URL.revokeObjectURL(old.url); stats.cacheBytes -= old.size; cache.delete(key);
         }
@@ -253,7 +268,7 @@
         for(let step=1;step<=settings.count&&diagnosticsIndexes.length<settings.count;step++){const index=selected+step*direction;if(index>=0&&index<list.length)diagnosticsIndexes.push(index);}
         for(const index of diagnosticsIndexes){if(!cache.has(index)&&!pending.has(index)&&!attempted.has(index))queued++;}
         const background=[...pending.values()].filter(task=>!task.priority).length;
-        box.textContent = `预取队列 ${queued} · 缩略图队列 ${thumbQueue.length} · 活跃请求 ${pending.size} · 后台并发 ${background}/${settings.concurrency} · 缓存 ${(stats.cacheBytes/1048576).toFixed(1)} MiB · 命中 ${stats.hits} · 未命中 ${stats.misses} · 失败 ${stats.failures} · 请求平均 ${avg} · 服务器解压平均 ${extract}`;
+        box.textContent = `预取队列 ${queued} · 缩略图队列 ${thumbQueue.length} · 活跃请求 ${pending.size} · 后台并发 ${background}/${settings.concurrency} · 缓存 ${cache.size}/${settings.budget} 张（约 ${(stats.cacheBytes/1048576).toFixed(1)} MiB） · 命中 ${stats.hits} · 未命中 ${stats.misses} · 失败 ${stats.failures} · 请求平均 ${avg} · 服务器解压平均 ${extract}`;
     }
     function renderDebugOverlay() {
         const box = el('debug-output'); if (!box) return;
@@ -324,7 +339,7 @@
         if (!Number.isInteger(value) || value < 1 || value > count) { el('jump-message').textContent = `请输入 1 到 ${count} 之间的序号`; return; }
         el('jump-message').textContent = ''; show(value - 1);
     });
-    el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,9), budget: clamp(el('setting-budget').value,16,2048,256)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
+    el('settings-form')?.addEventListener('submit', event => { event.preventDefault(); settings = {count: clamp(el('setting-count').value,0,50,9), concurrency: clamp(el('setting-concurrency').value,1,12,9), budget: clamp(el('setting-budget').value,1,200,30)}; try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch {} cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('settings-reset')?.addEventListener('click', () => { settings = {...DEFAULTS}; try { localStorage.removeItem(SETTINGS_KEY); } catch {} el('setting-count').value = settings.count; el('setting-concurrency').value = settings.concurrency; el('setting-budget').value = settings.budget; cancelOutside(); enforceConcurrency(); trimCache(); pumpPrefetch(); });
     el('diagnostics')?.addEventListener('toggle', renderDiagnostics);
     el('debug-toggle')?.addEventListener('click', () => {

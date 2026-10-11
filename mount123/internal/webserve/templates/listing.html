@@ -116,7 +116,7 @@
     <details id="zip-gallery-settings"><summary>预取设置</summary><form id="zip-gallery-settings-form">
         <label>预取数量 <input id="zip-gallery-setting-count" type="number" min="0" max="50" value="9"> 张</label>
         <label>后台并发 <input id="zip-gallery-setting-concurrency" type="number" min="1" max="12" value="9"> 个</label>
-        <label>缓存预算 <input id="zip-gallery-setting-budget" type="number" min="16" max="2048" value="256"> MiB</label>
+        <label>缓存数量 <input id="zip-gallery-setting-budget" type="number" min="1" max="200" value="30"> 张</label>
         <button class="btn btn-secondary" type="submit">保存</button><button id="zip-gallery-settings-reset" class="btn btn-secondary" type="button">恢复默认</button>
     </form></details>
     <details id="zip-gallery-diagnostics"><summary>预取与缓存诊断</summary><p id="zip-gallery-diagnostics-output"></p><button id="zip-gallery-diagnostics-reset" class="btn btn-secondary" type="button">重置统计</button></details>
@@ -294,11 +294,36 @@ document.addEventListener('DOMContentLoaded', function () {
     const previewDebugToggle = document.getElementById('preview-debug-toggle');
     const previewDebugOutput = document.getElementById('preview-debug-output');
     const PREVIEW_PREFETCH_COUNT = 9;
-    const PREVIEW_CACHE_LIMIT = 30;
-    const PREVIEW_CACHE_BYTES = 256 * 1024 * 1024;
+    const PREVIEW_CACHE_LIMIT = (() => {
+        try {
+            const value = JSON.parse(localStorage.getItem('imageGallerySettings') || '{}').budget;
+            return Number.isFinite(Number(value)) ? Math.min(200, Math.max(1, Math.round(Number(value)))) : 30;
+        } catch { return 30; }
+    })();
     let previewCacheBytes = 0;
     let previewSelectedId = '';
     let previewDirection = 1;
+    const previewItemsById = key => [...document.querySelectorAll('.file-item')].filter(item => previewIdentity(item) === key);
+    const updatePreviewThumbnail = (key, url) => {
+        for (const item of previewItemsById(key)) {
+            const icon = item.querySelector('.file-grid-icon, .file-list-icon');
+            if (!icon) continue;
+            const old = icon.querySelector('.preview-prefetch-thumb');
+            if (old) old.remove();
+            const image = document.createElement('img');
+            image.className = 'preview-prefetch-thumb'; image.alt = ''; image.loading = 'lazy'; image.src = url;
+            icon.querySelector('i')?.setAttribute('aria-hidden', 'true');
+            icon.querySelector('i')?.classList.add('preview-prefetch-icon-hidden');
+            icon.append(image);
+        }
+    };
+    const removePreviewThumbnail = key => {
+        for (const item of previewItemsById(key)) {
+            const icon = item.querySelector('.file-grid-icon, .file-list-icon');
+            icon?.querySelector('.preview-prefetch-thumb')?.remove();
+            icon?.querySelector('i')?.classList.remove('preview-prefetch-icon-hidden');
+        }
+    };
     const renderPreviewDebug = () => {
         if (!previewDebugOutput) return;
         const list = visiblePreviewItems();
@@ -346,11 +371,12 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (previewIsImage(list[index])) protectedKeys.add(previewIdentity(list[index]));
             }
         }
-        while (previewCache.size > PREVIEW_CACHE_LIMIT || previewCacheBytes > PREVIEW_CACHE_BYTES) {
+        while (previewCache.size > PREVIEW_CACHE_LIMIT) {
             const key = [...previewCache.keys()].find(candidate => !protectedKeys.has(candidate));
             if (!key) break;
             previewCacheBytes -= previewCache.get(key)?.bytes || 0;
             previewCache.delete(key);
+            removePreviewThumbnail(key);
             previewEvictions++;
         }
     };
@@ -382,6 +408,7 @@ document.addEventListener('DOMContentLoaded', function () {
             previewCache.set(key, {url, image, bytes});
             previewCacheBytes += bytes;
             previewPending.delete(key);
+            updatePreviewThumbnail(key, url);
             trimPreviewCache();
             renderPreviewDebug();
         };

@@ -43,6 +43,14 @@
     line-height: 1;
 }
 
+.preview-prefetch-thumb {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 4px;
+}
+.preview-prefetch-icon-hidden { display: none !important; }
+
 .file-grid-name {
     width: 100%;
     font-size: 12px;
