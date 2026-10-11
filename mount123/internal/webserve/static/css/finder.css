@@ -330,3 +330,27 @@
 .archive-browser tbody tr:hover td:first-child:not([colspan])::before {
     opacity: 1;
 }
+
+/* Pagination is an invisible sentinel; the list loads the next page as the
+   user approaches its end. Keep a visible retry affordance only on failure. */
+.load-more-sentinel {
+    min-height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-tertiary);
+    font-size: 12px;
+}
+.load-more-sentinel > [data-load-more] {
+    border: 0;
+    background: transparent;
+    color: inherit;
+    padding: 2px 8px;
+    opacity: 0;
+    pointer-events: none;
+}
+.load-more-sentinel.retry > [data-load-more] {
+    opacity: 1;
+    pointer-events: auto;
+    color: var(--accent-blue);
+}

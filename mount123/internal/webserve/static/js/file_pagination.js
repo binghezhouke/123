@@ -9,8 +9,7 @@
     let busy = false;
     const completed = new Set();
 
-    button.addEventListener('click', async event => {
-        event.preventDefault();
+    async function loadNext() {
         if (busy || !button.hasAttribute('href')) return;
         const url = button.href;
         busy = true;
@@ -27,7 +26,7 @@
             const next = page.querySelector('[data-load-more]')?.href;
             if (next && (next === url || completed.has(next))) throw new Error('分页游标未更新');
 
-            const scrollPositions = [document.scrollingElement, document.querySelector('.finder-main')]
+            const scrollPositions = [document.scrollingElement, document.querySelector('.finder-main'), document.querySelector('.browse-files')]
                 .filter(Boolean).map(element => [element, element.scrollTop, element.scrollLeft]);
             for (const id of ['fileContainer', 'fileListView']) {
                 const container = document.getElementById(id);
@@ -49,31 +48,46 @@
             if (heading) heading.textContent = heading.classList.contains('badge') ? String(count) : `${count} 个项目`;
             const footer = document.getElementById('statusCount');
             if (footer) footer.textContent = `${count} 个项目`;
-            status.textContent = next ? `已加载 ${count} 个项目` : '';
+            status.textContent = next ? '' : '';
             if (next) {
                 button.href = next;
-                button.textContent = '加载更多';
+                button.innerHTML = '<i class="fas fa-chevron-right" aria-hidden="true"></i><span>加载更多</span>';
             } else {
                 button.removeAttribute('href');
                 button.hidden = true;
                 status.hidden = true;
+                observer?.disconnect();
             }
-            // Keep the viewport stable even when the focused load button moves down.
             for (const [element, top, left] of scrollPositions) {
                 element.scrollTop = top;
                 element.scrollLeft = left;
             }
             document.dispatchEvent(new CustomEvent('files:appended', {detail: {url}}));
         } catch {
-            status.textContent = '加载失败，当前列表已保留，请重试。';
-            button.textContent = '重试加载';
+            status.textContent = '加载失败，点击此处重试。';
+            button.innerHTML = '<i class="fas fa-rotate-right" aria-hidden="true"></i><span>重试加载</span>';
+            button.closest('[data-load-sentinel]')?.classList.add('retry');
         } finally {
             busy = false;
             document.dispatchEvent(new CustomEvent('files:load-complete', {detail: {ok: succeeded}}));
             button.removeAttribute('aria-busy');
             if (button.hasAttribute('href')) button.removeAttribute('aria-disabled');
         }
+    }
+
+    button.addEventListener('click', event => {
+        event.preventDefault();
+        loadNext();
     });
+
+    const sentinel = button.closest('[data-load-sentinel]') || button.parentElement;
+    let observer = null;
+    if ('IntersectionObserver' in window && sentinel) {
+        observer = new IntersectionObserver(entries => {
+            if (entries.some(entry => entry.isIntersecting)) loadNext();
+        }, {root: document.querySelector('.browse-files') || null, rootMargin: '600px 0px', threshold: 0});
+        observer.observe(sentinel);
+    }
 
     // Delegation also covers entries appended after the first page.
     document.addEventListener('mouseover', event => {
