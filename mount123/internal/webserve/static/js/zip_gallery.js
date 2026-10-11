@@ -130,14 +130,14 @@
     }
     function cancelOutside() {
         for (const [idx, task] of pending) {
-            if (Math.abs(idx - selected) > settings.count) { task.controller.abort(); pending.delete(idx); }
+            if (Math.abs(idx - selected) > settings.count) { task.controller.abort(); pending.delete(idx); attempted.delete(idx); }
         }
     }
     function enforceConcurrency() {
         while (backgroundTasks().length > settings.concurrency) {
             const expendable = [...pending.entries()].reverse().find(([key, task]) => key !== selected && !task.priority);
             if (!expendable) break;
-            expendable[1].controller.abort(); pending.delete(expendable[0]);
+            expendable[1].controller.abort(); pending.delete(expendable[0]); attempted.delete(expendable[0]);
         }
     }
     function load(index, priority = false, ownerSignal = null) {
@@ -158,11 +158,12 @@
                 const localUrl = item.dataset.directUrl ? source(item) : (legacyDirect ? proxySource(source(item)) : source(item));
                 const useDirect = Boolean(directUrl && (!priority || legacyDirect));
                 const headers = priority ? {} : {'X-Priority': 'background'};
-                let response;
+                let response, responseWasDirect = false;
                 if (useDirect) {
                     try {
                         response = await fetch(directUrl, {signal: task.controller.signal, cache: 'force-cache'});
                         if (!response.ok) throw new Error('直链读取失败');
+                        responseWasDirect = true;
                     } catch (error) {
                         if (error.name === 'AbortError') throw error;
                         response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
@@ -171,7 +172,12 @@
                     response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
                 }
                 if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
-                if (!response.ok || !response.headers.get('Content-Type')?.startsWith('image/')) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
+                const contentType = response.headers.get('Content-Type') || '';
+                // CDN direct links sometimes use application/octet-stream or
+                // omit Content-Type. The browser can still decode the blob;
+                // only reject a non-image response from our archive proxy,
+                // where an HTML/error body must not enter the image cache.
+                if (!response.ok || (!responseWasDirect && !contentType.startsWith('image/'))) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
                 const timing = response.headers.get('Server-Timing') || '';
                 const extract = timing.match(/(?:^|,)\s*extract;dur=([\d.]+)/i);
                 if (extract) { stats.extracts.push(Number(extract[1])); if (stats.extracts.length > 100) stats.extracts.shift(); }
