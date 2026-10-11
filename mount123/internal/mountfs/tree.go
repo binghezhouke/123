@@ -182,6 +182,7 @@ type entry struct {
 	archiveSize int64
 	archive     *archiveDescriptor
 	directory   bool
+	nested      *nestedArchive
 }
 type member struct {
 	sevenStream      *sevenStreamLocation
@@ -675,6 +676,9 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 	if !n.item.directory {
 		return nil, syscall.ENOTDIR
 	}
+	if n.item.nested != nil {
+		return nestedChildrenAt(n.item.nested, n.item.zipPath), nil
+	}
 	if n.isDisc() {
 		return n.listDisc(ctx)
 	}
@@ -712,6 +716,30 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 		return idx.children(n.item.zipPath, source, size, archive), nil
 	}
 	return n.listCloud(ctx)
+}
+
+func nestedChildrenAt(nested *nestedArchive, path string) map[string]*entry {
+	if nested == nil || nested.index == nil {
+		return map[string]*entry{}
+	}
+	nested.index.mu.RLock()
+	defer nested.index.mu.RUnlock()
+	d := nested.index.dirLocked(path)
+	if d == nil {
+		return map[string]*entry{}
+	}
+	out := make(map[string]*entry, len(d.dirs)+len(d.files))
+	for name := range d.dirs {
+		if child := indexEntryNested(d, path, name, nested); child != nil {
+			out[name] = child
+		}
+	}
+	for name := range d.files {
+		if child := indexEntryNested(d, path, name, nested); child != nil {
+			out[name] = child
+		}
+	}
+	return out
 }
 
 func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor) (*zipIndex, error) {
@@ -803,7 +831,7 @@ func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int
 		copy := *m
 		copy.file = nil
 		copy.reader = nil
-		out[k] = &entry{name: k, member: &copy, source: source, archiveSize: archiveSize, archive: archive}
+		out[k] = &entry{name: k, directory: isSplit7zEntry(k), member: &copy, source: source, archiveSize: archiveSize, archive: archive}
 	}
 	return out
 }
@@ -1210,6 +1238,9 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 	}
 	if n.item.directory {
 		return nil, 0, syscall.EISDIR
+	}
+	if n.item.nested != nil {
+		return n.openNestedMember(ctx)
 	}
 	if n.item.disc != nil {
 		return n.openDisc(ctx)

@@ -65,13 +65,85 @@ func indexEntry(d *zipDir, path, name string, source *storage.Remote, a *archive
 		copied := *m
 		copied.file = nil
 		copied.reader = nil
-		return &entry{name: name, member: &copied, source: source, archiveSize: a.size, archive: a}
+		// A split 7z archive is entered through its .001 volume.  Mark that
+		// volume as a directory in the listing so a prior readdir/getattr does
+		// not cache it as a regular file before Lookup can expand it.
+		return &entry{name: name, directory: isSplit7zEntry(name), member: &copied, source: source, archiveSize: a.size, archive: a}
 	}
 	return nil
+}
+
+func isSplit7zEntry(name string) bool {
+	name = strings.ToLower(name)
+	return strings.HasSuffix(name, ".7z.001")
+}
+
+func indexEntryNested(d *zipDir, path, name string, nested *nestedArchive) *entry {
+	if d == nil || nested == nil {
+		return nil
+	}
+	if repeatedSplitVolume(path, name) {
+		return nil
+	}
+	if d.dirs[name] != nil {
+		childPath := nestedSplitLeafPath(d, path, name)
+		return &entry{name: name, directory: true, zipPath: childPath, nested: nested, archiveSize: nested.size}
+	}
+	if m := d.files[name]; m != nil {
+		copy := *m
+		return &entry{name: name, member: &copy, nested: nested, archiveSize: nested.size}
+	}
+	return nil
+}
+
+func nestedSplitLeafPath(d *zipDir, path, name string) string {
+	childPath := name
+	if path != "" {
+		childPath = path + "/" + name
+	}
+	current := d.dirs[name]
+	for current != nil && len(current.dirs) == 1 {
+		var nextName string
+		var next *zipDir
+		for candidate, candidateDir := range current.dirs {
+			nextName, next = candidate, candidateDir
+		}
+		if !isSplit7zEntry(nextName) {
+			break
+		}
+		childPath += "/" + nextName
+		current = next
+	}
+	return childPath
+}
+
+// Some uploaded split archives contain another copy of their own .001/.002
+// set. Do not expose a same-named .001 directory below an existing .001 path;
+// otherwise shell navigation appears to recurse forever.
+func repeatedSplitVolume(path, name string) bool {
+	if !isSplit7zEntry(name) || path == "" {
+		return false
+	}
+	for _, part := range strings.Split(path, "/") {
+		if strings.EqualFold(part, name) {
+			return true
+		}
+	}
+	return false
 }
 func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entry, bool, error) {
 	if !n.item.directory {
 		return nil, false, syscall.ENOTDIR
+	}
+	if n.item.nested != nil {
+		idx := n.item.nested.index
+		idx.mu.RLock()
+		e := indexEntryNested(idx.dirLocked(n.item.zipPath), n.item.zipPath, name, n.item.nested)
+		idx.mu.RUnlock()
+		if e == nil {
+			return nil, false, nil
+		}
+		return map[string]*entry{name: e}, false, nil
 	}
 	if n.isDisc() {
 		entries, err := n.lookupDisc(ctx, name)
@@ -154,6 +226,12 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 	if e == nil {
 		return nil, false, nil
 	}
+	if e.member != nil {
+		e, err = n.expandNested(ctx, e)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	return map[string]*entry{name: e}, false, nil
 }
 
@@ -163,6 +241,15 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
 	if n.isDisc() {
 		return n.opendirDisc(ctx)
+	}
+	if n.item.nested != nil {
+		entries := nestedChildrenAt(n.item.nested, n.item.zipPath)
+		names := make([]string, 0, len(entries))
+		for name := range entries {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		return newDirectoryHandle(n, entries, names, nil), 0, 0
 	}
 	idx, source, archive, handled, err := n.progressiveRAR(ctx)
 	if !handled {
