@@ -1,0 +1,16 @@
+{{define "content"}}
+<section class="card">
+    <h1>网盘浏览</h1>
+    <p class="muted">后端服务已启动。目录浏览、文件下载与预览将在后续版本接入。</p>
+    <dl class="facts">
+        <dt>根目录 ID</dt><dd>{{.RootID}}</dd>
+        <dt>监听地址</dt><dd>{{.Address}}</dd>
+        <dt>缓存目录</dt><dd>{{.CacheDir}}</dd>
+        <dt>缓存容量</dt><dd>{{.CacheCapacity}}</dd>
+        <dt>归档索引预算</dt><dd>{{.IndexBudget}}</dd>
+        <dt>缓存模式</dt><dd>{{.CacheDurability}}</dd>
+        <dt>目录快照有效期</dt><dd>{{.DirectoryTTL}}</dd>
+        <dt>远程读取复用期</dt><dd>{{.SourceTTL}}</dd>
+    </dl>
+</section>
+{{end}}

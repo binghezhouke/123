@@ -1,0 +1,52 @@
+{{define "content"}}
+<link rel="stylesheet" href="/static/css/listing.css">
+<section class="card">
+    <nav class="crumbs" aria-label="面包屑"><a href="/browse">根目录</a>{{range .Breadcrumbs}}<span class="sep">/</span><a href="{{.Href}}">{{.Name}}</a>{{end}}</nav>
+    <header class="listing-head">
+        <h1>{{.CurrentName}}</h1>
+        <span class="muted">{{.Count}} 个项目{{if .Hidden}} · 已按筛选隐藏 {{.Hidden}} 项{{end}}</span>
+    </header>
+    <form method="get" action="/browse" class="listing-filters">
+        <input type="hidden" name="parent_id" value="{{.ParentID}}">
+        <label>排序
+            <select name="sort">
+                <option value="original"{{if eq .Sort "original"}} selected{{end}}>原始顺序</option>
+                <option value="name"{{if eq .Sort "name"}} selected{{end}}>自然名称</option>
+                <option value="size"{{if eq .Sort "size"}} selected{{end}}>大小</option>
+            </select>
+        </label>
+        <label>方向
+            <select name="direction">
+                <option value="asc"{{if eq .Direction "asc"}} selected{{end}}>升序</option>
+                <option value="desc"{{if eq .Direction "desc"}} selected{{end}}>降序</option>
+            </select>
+        </label>
+        <label>类型
+            <select name="kind">
+                <option value="all"{{if eq .Kind "all"}} selected{{end}}>全部</option>
+                <option value="image"{{if eq .Kind "image"}} selected{{end}}>图片</option>
+                <option value="video"{{if eq .Kind "video"}} selected{{end}}>视频</option>
+            </select>
+        </label>
+        <button type="submit">应用</button>
+    </form>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    {{if .Rows}}
+    <table class="entries">
+        <thead>
+            <tr><th>名称</th><th class="col-size">大小</th><th class="col-kind">类型</th><th class="col-date">修改时间</th></tr>
+        </thead>
+        <tbody>
+            {{range .Rows}}
+            <tr>
+                <td class="col-name"><span class="badge {{.Icon}}">{{.Badge}}</span><a href="{{.Href}}">{{.Name}}</a></td>
+                <td class="col-size">{{.Size}}</td>
+                <td class="col-kind">{{.Kind}}</td>
+                <td class="col-date">{{.Updated}}</td>
+            </tr>
+            {{end}}
+        </tbody>
+    </table>
+    {{else}}<p class="empty">这个文件夹里还没有内容。</p>{{end}}
+</section>
+{{end}}

@@ -1,0 +1,13 @@
+{{define "content"}}
+<section class="card">
+    <h1>登录</h1>
+    <p class="muted">该服务只监听本机地址，需要密码才能访问网盘内容。</p>
+    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
+    <form method="post" action="/login">
+        <input type="hidden" name="next" value="{{.Next}}">
+        <label for="password">访问密码</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
+        <button type="submit">进入</button>
+    </form>
+</section>
+{{end}}

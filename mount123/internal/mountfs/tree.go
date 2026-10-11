@@ -632,12 +632,18 @@ func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 	started := time.Now()
 	defer n.observeStage(iostats.StageSourcePrepare, started)
 	f := n.item.cloud
-	t := n.tree
-	key := t.cloudCacheKey(f)
-	ttl := t.opts.SourceTTL
-	if f.Version != "" && ((t.zipDirs && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z")) || n.isDisc()) {
+	ttl := n.tree.opts.SourceTTL
+	if f.Version != "" && ((n.tree.zipDirs && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z")) || n.isDisc()) {
 		ttl = max(ttl, 6*24*time.Hour)
 	}
+	return n.tree.cloudFileSource(ctx, f, ttl)
+}
+
+// cloudFileSource resolves one cloud file into a cached random-access reader,
+// independent of FUSE. Node.source and the web service share this path so the
+// mounted tree and the HTTP front end reuse the same disk cache and direct link.
+func (t *Tree) cloudFileSource(ctx context.Context, f *panapi.File, ttl time.Duration) (*storage.Remote, error) {
+	key := t.cloudCacheKey(f)
 	value, err := t.loadMeta(ctx, "source:"+key, ttl, func(ctx context.Context) (any, int64, error) {
 		resolve := func(ctx context.Context) (string, error) { return t.api.DownloadURL(ctx, f.ID) }
 		var r *storage.Remote

@@ -1,0 +1,24 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{.Title}} · CloudArchive</title>
+    <link rel="stylesheet" href="/static/css/serve.css">
+</head>
+<body>
+    <header class="topbar">
+        <a class="brand" href="/">CloudArchive</a>
+        <span class="backend">mount123 serve</span>
+        {{if .Authenticated}}
+        <form class="logout" method="post" action="/logout">
+            <button type="submit">退出登录</button>
+        </form>
+        {{end}}
+    </header>
+    <main class="shell">
+        {{template "content" .}}
+    </main>
+    <footer class="foot">版本 {{.Version}} · 构建 {{.BuildTime}}{{if .Commit}} · {{.Commit}}{{end}}</footer>
+</body>
+</html>{{end}}

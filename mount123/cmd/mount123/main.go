@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,6 +24,7 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
 	"github.com/binghezhouke/123/mount123/internal/panapi"
 	"github.com/binghezhouke/123/mount123/internal/storage"
+	"github.com/binghezhouke/123/mount123/internal/webserve"
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
@@ -54,6 +57,16 @@ func openCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, durabilit
 }
 
 func openCacheWithIndexBudgetAndMinFree(dir string, maxBytes, indexBudget, minFreeBytes int64, durability string, download storage.DownloadConfig) (*storage.Cache, error) {
+	return openCacheSharedWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, durability, download, false)
+}
+
+// openCacheWithIndexBudgetAndMinFreeShared opens the cache without the
+// exclusive directory lock so mount and serve can share one cache directory.
+func openCacheWithIndexBudgetAndMinFreeShared(dir string, maxBytes, indexBudget, minFreeBytes int64, durability string, download storage.DownloadConfig) (*storage.Cache, error) {
+	return openCacheSharedWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, durability, download, true)
+}
+
+func openCacheSharedWithIndexBudgetAndMinFree(dir string, maxBytes, indexBudget, minFreeBytes int64, durability string, download storage.DownloadConfig, shared bool) (*storage.Cache, error) {
 	if indexBudget <= 0 {
 		indexBudget = maxBytes / 8
 	}
@@ -62,6 +75,9 @@ func openCacheWithIndexBudgetAndMinFree(dir string, maxBytes, indexBudget, minFr
 	}
 	switch durability {
 	case "durable":
+		if shared {
+			return storage.NewCacheWithIndexBudgetAndMinFreeShared(dir, maxBytes, indexBudget, minFreeBytes, download)
+		}
 		return storage.NewCacheWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, download)
 	case "ephemeral":
 		return storage.NewEphemeralCacheWithIndexBudgetAndMinFree(dir, maxBytes, indexBudget, minFreeBytes, download)
@@ -89,6 +105,11 @@ func run() error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runUnlock(ctx, os.Args[2:], os.Stdin, os.Stderr, os.Stdout)
+	}
+	if len(os.Args) > 1 && os.Args[1] == "serve" {
+		ctx, stop := notifyContext()
+		defer stop()
+		return runServe(ctx, os.Args[2:], os.Stderr, os.Stdout)
 	}
 	if len(os.Args) > 1 && (os.Args[1] == "status" || os.Args[1] == "wait-index" || os.Args[1] == "io-stats" || os.Args[1] == "refresh" || os.Args[1] == "doctor") {
 		ctx, stop := notifyContext()
@@ -125,6 +146,8 @@ func run() error {
 	streamMembers := flag.Bool("stream-members", true, "stream large compressed archive members while they are being verified")
 	zipDirs := flag.Bool("zip-dirs", true, "expose ZIP, 7z and RAR archives as directories")
 	isoDirs := flag.Bool("iso-dirs", true, "expose ISO9660 and UDF optical images as read-only directories")
+	webAddr := flag.String("web-addr", "", "also serve the web interface on this address (empty disables)")
+	webPassword := flag.String("web-password", "", "web login password (default: MOUNT123_SERVE_PASSWORD, config SERVE_PASSWORD, or generated)")
 	prefetchFiles := flag.Int("prefetch-files", 9, "maximum adjacent images to prefetch (0 disables)")
 	prefetchWorkers := flag.Int("prefetch-workers", 2, "maximum background image reads")
 	prefetchMiB := flag.Int64("prefetch-mib", 256, "maximum target image bytes per prefetch window in MiB")
@@ -235,6 +258,50 @@ func run() error {
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)
 	}
+	var webListener net.Listener
+	var webHTTP *http.Server
+	if *webAddr != "" {
+		webConfig, configErr := readServeConfig(*configPath)
+		if configErr != nil {
+			return configErr
+		}
+		password := *webPassword
+		if password == "" {
+			password = resolveServePassword(serveSettings{password: ""}, webConfig)
+		}
+		webHandler, webErr := webserve.New(webserve.Options{
+			Password:   password,
+			SessionKey: serveSessionKey(webConfig.SecretKey),
+			Service:    mountfs.NewServiceFromNode(root),
+			Info: webserve.Info{
+				Version:            version,
+				Commit:             commit,
+				BuildTime:          buildTime,
+				RootID:             *rootID,
+				CacheDir:           cacheAbs,
+				CacheCapacityBytes: *cacheGiB << 30,
+				IndexBudgetBytes:   indexBudget << 20,
+				CacheDurability:    *cacheDurability,
+				DirectoryTTL:       *directoryTTL,
+				SourceTTL:          *sourceTTL,
+			},
+		})
+		if webErr != nil {
+			return webErr
+		}
+		defer webHandler.Close()
+		if generated, ok := webHandler.GeneratedPassword(); ok {
+			log.Printf("web: no password configured, generated access password: %s", generated)
+		}
+		webListener, err = net.Listen("tcp", *webAddr)
+		if err != nil {
+			return fmt.Errorf("web listen on %s: %w", *webAddr, err)
+		}
+		defer webListener.Close()
+		webHTTP = &http.Server{Handler: webHandler.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		go func() { _ = webHTTP.Serve(webListener) }()
+		log.Printf("web: listening on http://%s", webListener.Addr())
+	}
 	server, err := fs.Mount(mountAbs, root, &fs.Options{MountOptions: fuse.MountOptions{Options: []string{"ro", "nodev", "nosuid", "noexec"}, FsName: "123pan", Name: "mount123", DisableXAttrs: true}, EntryTimeout: entryTTL, NegativeTimeout: entryTTL, AttrTimeout: attrTTL})
 	if err != nil {
 		return fmt.Errorf("FUSE mount: %w", err)
@@ -281,6 +348,7 @@ func printUsage(w io.Writer) {
 	_, _ = fmt.Fprintln(w, "  doctor       diagnose a mounted path")
 	_, _ = fmt.Fprintln(w, "  io-stats     print I/O counters")
 	_, _ = fmt.Fprintln(w, "  unlock       set a ZIP/7z/RAR password from a mounted path")
+	_, _ = fmt.Fprintln(w, "  serve        serve the web interface without mounting FUSE")
 	_, _ = fmt.Fprintln(w)
 	_, _ = fmt.Fprintln(w, "Read-only directory controls (hidden from ls/find):")
 	_, _ = fmt.Fprintln(w, "  .mount123-refresh       read to refresh the current cloud directory")

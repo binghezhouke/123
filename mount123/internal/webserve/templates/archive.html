@@ -1,0 +1,32 @@
+{{define "content"}}
+<section class="card">
+    <h1>压缩包浏览</h1>
+    <p class="muted">{{if .FileName}}{{.FileName}}{{else}}归档{{end}}</p>
+    <nav class="archive-path">
+        <a href="/archive/{{.FileID}}">根目录</a>
+        {{if .Prefix}}{{if .Parent}}<span> / </span><a href="/archive/{{.FileID}}?path={{.Parent}}">上一级</a>{{end}}<span> / {{.Prefix}}</span>{{end}}
+    </nav>
+    <table>
+        <thead><tr><th>名称</th><th>大小</th><th>操作</th></tr></thead>
+        <tbody>
+        {{range .Members}}
+            <tr>
+                {{if .IsDir}}
+                    <td><a href="/archive/{{$.FileID}}?path={{$.Prefix}}/{{.Name}}">{{.Name}}/</a></td>
+                    <td>—</td>
+                    <td></td>
+                {{else}}
+                    <td>{{.Name}}{{if .Encrypted}} <span class="badge">加密</span>{{end}}</td>
+                    <td>{{.Size}}</td>
+                    <td>
+                        <a href="/archive/{{$.FileID}}/member?path={{$.Prefix}}/{{.Name}}">预览</a>
+                        <a href="/archive/{{$.FileID}}/member?path={{$.Prefix}}/{{.Name}}&download=1">下载</a>
+                    </td>
+                {{end}}
+            </tr>
+        {{end}}
+        {{if not .Members}}<tr><td colspan="3">此目录为空</td></tr>{{end}}
+        </tbody>
+    </table>
+</section>
+{{end}}

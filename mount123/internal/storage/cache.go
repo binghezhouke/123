@@ -90,20 +90,20 @@ func NewCache(dir string, maxBytes int64) (*Cache, error) {
 // NewCacheWithDownloadConfig opens a cache with a process-wide HTTP transfer
 // budget. The budget covers in-flight response bytes, not memory or disk use.
 func NewCacheWithDownloadConfig(dir string, maxBytes int64, download DownloadConfig) (*Cache, error) {
-	return NewCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), download)
+	return newCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), 0, download, false)
 }
 
 // NewCacheWithMinFree is a convenience constructor using the default index
 // budget.
 func NewCacheWithMinFree(dir string, maxBytes, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
-	return newCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), minFreeBytes, download)
+	return newCacheWithIndexBudget(dir, maxBytes, defaultIndexBudget(maxBytes), minFreeBytes, download, false)
 }
 
 // NewCacheWithIndexBudget opens a cache with an independent archive-index
 // budget. Index entries are admitted to their protected retention class only
 // within indexBudget; ordinary range data cannot consume that reservation.
 func NewCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, download DownloadConfig) (*Cache, error) {
-	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, 0, download)
+	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, 0, download, false)
 }
 
 // NewCacheWithIndexBudgetAndMinFree opens a cache while reserving a minimum
@@ -111,10 +111,18 @@ func NewCacheWithIndexBudget(dir string, maxBytes, indexBudget int64, download D
 // shed while the reserve is breached; foreground fills remain available when
 // the requested object fits in the currently free space.
 func NewCacheWithIndexBudgetAndMinFree(dir string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
-	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, minFreeBytes, download)
+	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, minFreeBytes, download, false)
 }
 
-func newCacheWithIndexBudget(dir string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
+// NewCacheWithIndexBudgetAndMinFreeShared opens a durable cache without the
+// exclusive directory lock so the mount and the web server can share one cache
+// directory. Writes stay atomic (temp file + rename); concurrent eviction may
+// at worst cause a cache miss, never corruption.
+func NewCacheWithIndexBudgetAndMinFreeShared(dir string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig) (*Cache, error) {
+	return newCacheWithIndexBudget(dir, maxBytes, indexBudget, minFreeBytes, download, true)
+}
+
+func newCacheWithIndexBudget(dir string, maxBytes, indexBudget, minFreeBytes int64, download DownloadConfig, shared bool) (*Cache, error) {
 	var err error
 	download, err = download.normalized()
 	if err != nil {
@@ -135,18 +143,21 @@ func newCacheWithIndexBudget(dir string, maxBytes, indexBudget, minFreeBytes int
 	if err := os.Chmod(dir, 0700); err != nil {
 		return nil, err
 	}
-	lock, err := os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0600)
-	if err != nil {
-		return nil, err
-	}
-	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		return nil, fmt.Errorf("cache directory is already in use: %w", err)
-	}
-	if err = lock.Chmod(0600); err != nil {
-		_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-		_ = lock.Close()
-		return nil, err
+	var lock *os.File
+	if !shared {
+		lock, err = os.OpenFile(filepath.Join(dir, ".lock"), os.O_CREATE|os.O_RDWR, 0600)
+		if err != nil {
+			return nil, err
+		}
+		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			lock.Close()
+			return nil, fmt.Errorf("cache directory is already in use: %w", err)
+		}
+		if err = lock.Chmod(0600); err != nil {
+			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			_ = lock.Close()
+			return nil, err
+		}
 	}
 	lifetimeCtx, cancel := context.WithCancel(context.Background())
 	c := &Cache{dir: dir, max: maxBytes, minFreeBytes: minFreeBytes, statfs: diskFreeBytes, indexBudget: indexBudget, entries: make(map[string]*cacheEntry), lru: newClassLRUs(), ranges: make(map[string][]*cacheRange), rangeFlights: make(map[string][]*rangeFlight), flights: make(map[string]*flight), growing: make(map[string]*growingFlight), lock: lock, durable: true, downloads: newDownloadScheduler(download), staging: newDownloadScheduler(download), stats: iostats.New(), lifetimeCtx: lifetimeCtx, cancel: cancel, ghost: make(map[string]*list.Element), ghostLRU: list.New()}
@@ -985,8 +996,11 @@ func (c *Cache) Close() error {
 	}
 	c.downloads.waitIdle()
 	c.staging.waitIdle()
-	e := syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN)
-	ce := c.lock.Close()
+	var e, ce error
+	if c.lock != nil {
+		e = syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN)
+		ce = c.lock.Close()
+	}
 	if c.ephemeral {
 		if removeErr := os.RemoveAll(c.dir); ce == nil {
 			ce = removeErr

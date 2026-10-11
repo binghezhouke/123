@@ -115,6 +115,26 @@ Range 请求遇到连接中断、429、502/503/504 会有限重试；每次探�
 
 路径可写相对挂载根的路径，也可写挂载点下的绝对路径。Go flag 规则要求选项写在路径之前。`status` 会在需要时启动索引并立即报告 `queued`、`scanning`、`complete` 或 `failed`；`wait-index` 持续等待直到完成，按 Ctrl+C 可取消。输出包含已发现成员数、扫描高水位和归档大小；无法精确统计时下载字节数显示为 `unknown`。退出码：`0` 表示查询成功或索引完成，`1` 表示用法、连接或路径错误，`2` 表示索引失败，`3` 表示等待超时，`130` 表示用户取消。
 
+## 网页后端（`mount123 serve`）
+
+`serve` 子命令在进程内构造与挂载相同的 panapi 客户端、磁盘缓存和 `mountfs` 目录树，然后启动一个只监听本机的 HTTP 服务，**不挂载 FUSE**。它面向后续的网页浏览、下载与预览功能，当前版本提供登录鉴权、健康检查和占位首页。
+
+```bash
+./mount123 serve \
+  -config ../config.json \
+  -addr 127.0.0.1:8081 \
+  -cache-dir "$HOME/.cache/mount123" \
+  -cache-gib 50 \
+  -cache-durability durable \
+  -root-id 0
+```
+
+缓存、目录快照、归档索引、密码侧车和 API 调度复用挂载的同一套实现。把 `-cache-dir` 指向挂载使用的目录即可让网页端与挂载共享磁盘缓存；两个进程共用同一目录时不要同时修改缓存配置。`-cache-gib`、`-cache-min-free-gib`、`-index-budget-mib`、`-metadata-mib`、`-directory-ttl`、`-source-ttl`、`-root-id`、`-zip-dirs`、`-iso-dirs`、`-archive-max-entries`、`-file-info`、`-stream-members`、`-archive-page-cache` 和三个 `-download-*` 参数与挂载含义一致。
+
+访问需要密码。密码按以下顺序解析：`-password`、环境变量 `MOUNT123_SERVE_PASSWORD`、配置文件里的 `SERVE_PASSWORD`，都没有时由服务在启动时随机生成并在日志中打印一次。登录状态保存在进程内存中，cookie 用配置文件的 `SECRET_KEY` 派生密钥签名，因此设置了 `SECRET_KEY` 时重启不会强制重新登录；未设置时使用进程内随机密钥。`-session-ttl` 控制登录有效期，默认 24 小时。
+
+未登录访问受保护页面时，浏览器请求会重定向到 `/login`，其他客户端返回 `401`。`/healthz` 和 `/static/` 无需登录。服务收到 SIGINT / SIGTERM 后先停止接受新连接，再关闭 HTTP 服务和缓存。
+
 ## 文件如何呈现
 
 ```text

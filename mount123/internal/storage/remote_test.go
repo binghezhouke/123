@@ -1057,12 +1057,15 @@ func TestRemoteReadDoesNotWaitForSlowCachePublicationAndSurvivesRestart(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	syncStarted, releaseSync := make(chan struct{}), make(chan struct{})
-	c.syncFile = func(f *os.File) error { close(syncStarted); <-releaseSync; return f.Sync() }
 	r, err := NewRemote(context.Background(), c, "slow-publication", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Install the publication gate only after NewRemote resolved its download
+	// link: the durable link cache shares the syncFile seam with range fills, so
+	// gating it earlier would stall NewRemote itself instead of the reader.
+	syncStarted, releaseSync := make(chan struct{}), make(chan struct{})
+	c.syncFile = func(f *os.File) error { close(syncStarted); <-releaseSync; return f.Sync() }
 	buf := make([]byte, 16)
 	readDone := make(chan error, 1)
 	go func() {
@@ -1140,12 +1143,14 @@ func TestCacheCloseWaitsForProgressPublicationAndReleasesResources(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	syncStarted, releaseSync := make(chan struct{}), make(chan struct{})
-	c.syncFile = func(f *os.File) error { close(syncStarted); <-releaseSync; return f.Sync() }
 	r, err := NewRemote(context.Background(), c, "close-progress", int64(len(data)), func(context.Context) (string, error) { return s.URL, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
+	// See TestRemoteReadDoesNotWaitForSlowCachePublicationAndSurvivesRestart:
+	// the gate must not cover the download-link write performed by NewRemote.
+	syncStarted, releaseSync := make(chan struct{}), make(chan struct{})
+	c.syncFile = func(f *os.File) error { close(syncStarted); <-releaseSync; return f.Sync() }
 	if n, err := r.ReadAt(make([]byte, 8), 0); err != nil || n != 8 {
 		t.Fatalf("progress read = %d, %v", n, err)
 	}
@@ -1302,10 +1307,17 @@ func TestRemoteLargeWindowUsesOneCacheExtent(t *testing.T) {
 	}
 	waitUntil(t, time.Second, func() bool { st := c.DownloadStats(); return st.ActiveRequests == 0 && st.StagingActiveBytes == 0 })
 	c.mu.Lock()
-	entries := len(c.entries)
+	// The durable download-link cache is an ordinary cache entry too, so count
+	// only byte-range extents here.
+	extents := 0
+	for _, entry := range c.entries {
+		if entry.rangeID != "" {
+			extents++
+		}
+	}
 	c.mu.Unlock()
-	if entries != 1 {
-		t.Fatalf("large window created %d cache files, want one extent", entries)
+	if extents != 1 {
+		t.Fatalf("large window created %d cache extents, want one", extents)
 	}
 }
 
