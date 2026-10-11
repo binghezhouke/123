@@ -3,6 +3,7 @@ package webserve
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -28,9 +29,36 @@ import (
 // Implemented by issue #72.
 func (s *Server) registerListingRoutes() {
 	s.mux.HandleFunc("GET /browse", s.requireAuth(s.handleBrowse))
+	s.mux.HandleFunc("POST /browse/probe", s.requireAuth(s.handleProbe))
+	s.mux.HandleFunc("GET /browse/probe-status", s.requireAuth(s.handleProbeStatus))
 	s.mux.HandleFunc("GET /file/{id}", s.requireAuth(s.handleFileDetail))
 	s.mux.HandleFunc("GET /file/{id}/preview", s.requireAuth(s.handlePreview))
 	s.mux.HandleFunc("GET /file/{id}/download", s.requireAuth(s.handleDownload))
+}
+
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if s.service == nil {
+		http.Error(w, "服务不可用", http.StatusServiceUnavailable)
+		return
+	}
+	parentID := queryInt64(r, "parent_id", s.info.RootID)
+	status, err := s.service.ProbeDirectory(r.Context(), parentID)
+	if err != nil {
+		http.Error(w, "无法启动探测："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(status)
+}
+
+func (s *Server) handleProbeStatus(w http.ResponseWriter, r *http.Request) {
+	if s.service == nil {
+		http.Error(w, "服务不可用", http.StatusServiceUnavailable)
+		return
+	}
+	parentID := queryInt64(r, "parent_id", s.info.RootID)
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(s.service.ProbeStatus(parentID))
 }
 
 const (
@@ -168,6 +196,9 @@ type browseQuery struct {
 	sort      string
 	direction string
 	kind      string
+	arrange   string
+	offset    int
+	limit     int
 }
 
 func parseBrowseQuery(values url.Values) (browseQuery, error) {
@@ -175,9 +206,9 @@ func parseBrowseQuery(values url.Values) (browseQuery, error) {
 	if err != nil {
 		return browseQuery{}, err
 	}
-	query := browseQuery{parentID: parentID, sort: "original", direction: "asc", kind: "all"}
+	query := browseQuery{parentID: parentID, sort: "original", direction: "asc", kind: "all", limit: 20}
 	switch values.Get("sort") {
-	case "name", "size":
+	case "name", "size", "date":
 		query.sort = values.Get("sort")
 	}
 	if values.Get("direction") == "desc" {
@@ -186,6 +217,12 @@ func parseBrowseQuery(values url.Values) (browseQuery, error) {
 	switch values.Get("kind") {
 	case "image", "video":
 		query.kind = values.Get("kind")
+	}
+	if values.Get("arrange") == "kind" {
+		query.arrange = "kind"
+	}
+	if offset, err := strconv.Atoi(values.Get("offset")); err == nil && offset >= 0 {
+		query.offset = offset
 	}
 	return query, nil
 }
@@ -214,6 +251,9 @@ type listingRow struct {
 	Kind    string
 	Icon    string
 	Badge   string
+	FAIcon  string
+	IsImage bool
+	Preview string
 }
 
 type listingPageData struct {
@@ -227,6 +267,15 @@ type listingPageData struct {
 	Sort        string
 	Direction   string
 	Kind        string
+	Arrange     string
+	Groups      []listingGroup
+	Offset      int
+	NextOffset  int
+}
+
+type listingGroup struct {
+	Title string
+	Rows  []listingRow
 }
 
 type fileView struct {
@@ -237,6 +286,7 @@ type fileView struct {
 	IsDir     bool
 	Kind      string
 	Icon      string
+	FAIcon    string
 	Badge     string
 	Updated   string
 	Created   string
@@ -251,6 +301,7 @@ type filePageData struct {
 	FolderHref   string
 	DownloadHref string
 	PreviewHref  string
+	ArchiveHref  string
 	PreviewKind  string
 }
 
@@ -260,7 +311,7 @@ func (s *Server) basePage(title string) pageData {
 	return pageData{
 		Info:          s.info,
 		Title:         title,
-		Authenticated: true,
+		Authenticated: s.authEnabled,
 		CacheCapacity: humanBytes(s.info.CacheCapacityBytes),
 		IndexBudget:   humanBytes(s.info.IndexBudgetBytes),
 	}
@@ -281,6 +332,7 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		Sort:      query.sort,
 		Direction: query.direction,
 		Kind:      query.kind,
+		Arrange:   query.arrange,
 	}
 	ctx := r.Context()
 	data.Breadcrumbs, data.CurrentName = s.folderNames(ctx, query.parentID)
@@ -296,8 +348,34 @@ func (s *Server) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		s.renderListingPage(w, httpStatusForError(err), listingPageName, data)
 		return
 	}
-	data.Rows, data.Hidden = buildRows(entries, query)
-	data.Count = len(data.Rows)
+	rows, hidden := buildRows(entries, query)
+	detected, _ := s.service.DetectedArchives(ctx, query.parentID)
+	for i := range rows {
+		if _, ok := detected[rows[i].ID]; ok && !rows[i].IsDir {
+			rows[i].Kind = "压缩包"
+			rows[i].Icon = "archive"
+			rows[i].Badge = "ARC"
+			rows[i].FAIcon = "fas fa-file-archive"
+			rows[i].Href = "/archive/" + strconv.FormatInt(rows[i].ID, 10)
+		}
+	}
+	data.Hidden = hidden
+	data.Count = len(rows)
+	start, end := query.offset, query.offset+query.limit
+	if start > len(rows) {
+		start = len(rows)
+	}
+	if end > len(rows) {
+		end = len(rows)
+	}
+	data.Rows = rows[start:end]
+	data.Offset = query.offset
+	if end < len(rows) {
+		data.NextOffset = end
+	}
+	if query.arrange == "kind" {
+		data.Groups = groupRows(data.Rows)
+	}
 	s.renderListingPage(w, http.StatusOK, listingPageName, data)
 }
 
@@ -320,8 +398,38 @@ func (s *Server) handleFileDetail(w http.ResponseWriter, r *http.Request) {
 		PreviewHref:  fileHref(meta.ID, "preview"),
 		PreviewKind:  previewKind(meta.Name),
 	}
+	if kind.class == "archive" {
+		data.ArchiveHref = "/archive/" + strconv.FormatInt(meta.ID, 10)
+	}
 	data.Breadcrumbs, _ = s.folderNames(ctx, meta.ParentID)
 	s.renderListingPage(w, http.StatusOK, filePageName, data)
+}
+
+func groupRows(rows []listingRow) []listingGroup {
+	order := []string{"文件夹", "图片", "视频", "音频", "压缩包", "文本", "PDF", "文件"}
+	byKind := make(map[string][]listingRow, len(order))
+	for _, row := range rows {
+		byKind[row.Kind] = append(byKind[row.Kind], row)
+	}
+	groups := make([]listingGroup, 0, len(order))
+	for _, kind := range order {
+		if grouped := byKind[kind]; len(grouped) > 0 {
+			groups = append(groups, listingGroup{Title: kind, Rows: grouped})
+		}
+	}
+	for kind, grouped := range byKind {
+		known := false
+		for _, name := range order {
+			if kind == name {
+				known = true
+				break
+			}
+		}
+		if !known {
+			groups = append(groups, listingGroup{Title: kind, Rows: grouped})
+		}
+	}
+	return groups
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
@@ -514,6 +622,7 @@ func newListingRow(entry mountfs.FileEntry) listingRow {
 		Kind:    kind.label,
 		Icon:    kind.class,
 		Badge:   kind.badge,
+		FAIcon:  faIconFor(kind),
 		Size:    "—",
 		Updated: formatTimestamp(entry.UpdatedAt),
 	}
@@ -523,7 +632,32 @@ func newListingRow(entry mountfs.FileEntry) listingRow {
 	}
 	row.Href = "/file/" + strconv.FormatInt(entry.ID, 10)
 	row.Size = humanBytes(entry.Size)
+	if kind.class == "image" {
+		row.IsImage = true
+		row.Preview = "/file/" + strconv.FormatInt(entry.ID, 10) + "/preview"
+	}
 	return row
+}
+
+func faIconFor(kind entryKindInfo) string {
+	switch kind.class {
+	case "dir":
+		return "fas fa-folder"
+	case "image":
+		return "fas fa-file-image"
+	case "video":
+		return "fas fa-file-video"
+	case "audio":
+		return "fas fa-file-audio"
+	case "archive":
+		return "fas fa-file-archive"
+	case "pdf":
+		return "fas fa-file-pdf"
+	case "text":
+		return "fas fa-file-alt"
+	default:
+		return "fas fa-file"
+	}
 }
 
 func newFileView(file *panapi.File, kind entryKindInfo) fileView {
@@ -533,6 +667,7 @@ func newFileView(file *panapi.File, kind entryKindInfo) fileView {
 		IsDir:    file.IsDir,
 		Kind:     kind.label,
 		Icon:     kind.class,
+		FAIcon:   faIconFor(kind),
 		Badge:    kind.badge,
 		Updated:  formatTimestamp(file.UpdatedAt),
 		Created:  formatTimestamp(file.CreatedAt),
@@ -574,6 +709,12 @@ func orderEntries(entries []mountfs.FileEntry, query browseQuery) []mountfs.File
 func compareEntries(a, b mountfs.FileEntry, sortKey string) int {
 	if sortKey == "size" && a.Size != b.Size {
 		if a.Size < b.Size {
+			return -1
+		}
+		return 1
+	}
+	if sortKey == "date" && !a.UpdatedAt.Equal(b.UpdatedAt) {
+		if a.UpdatedAt.Before(b.UpdatedAt) {
 			return -1
 		}
 		return 1

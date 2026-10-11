@@ -1,29 +1,66 @@
 {{define "content"}}
-<link rel="stylesheet" href="/static/css/listing.css">
-<section class="card">
-    <nav class="crumbs" aria-label="面包屑"><a href="/browse">根目录</a>{{range .Breadcrumbs}}<span class="sep">/</span><a href="{{.Href}}">{{.Name}}</a>{{end}}</nav>
-    {{if .Error}}<p class="error" role="alert">{{.Error}}</p>{{end}}
-    <header class="listing-head">
-        <h1><span class="badge {{.File.Icon}}">{{.File.Badge}}</span> {{.File.Name}}</h1>
-        <span class="muted">{{.File.Kind}}{{if not .File.IsDir}} · {{.File.Size}}{{end}}</span>
-    </header>
-    <div class="actions">
-        <a class="chip accent" href="{{.DownloadHref}}">下载</a>
-        {{if .PreviewKind}}<a class="chip" href="{{.PreviewHref}}">直接打开</a>{{end}}
-        <a class="chip" href="{{.ParentHref}}">返回上级文件夹</a>
+<nav class="browser-path" aria-label="文件路径">
+    <div class="path-bar" style="min-width: 0; overflow-x: auto; white-space: nowrap;">
+        <a href="/browse?parent_id={{.RootID}}" class="path-item"><i class="fas fa-hdd" style="margin-right: 4px;"></i> 123云盘</a>
+        {{range .Breadcrumbs}}<span class="path-separator"><i class="fas fa-chevron-right"></i></span><a class="path-item" href="{{.Href}}">{{.Name}}</a>{{end}}
     </div>
-    {{if eq .PreviewKind "image"}}<figure class="stage"><img src="{{.PreviewHref}}" alt="{{.File.Name}}"></figure>
-    {{else if eq .PreviewKind "video"}}<figure class="stage"><video src="{{.PreviewHref}}" controls preload="metadata"></video></figure>
-    {{else if eq .PreviewKind "audio"}}<figure class="stage"><audio src="{{.PreviewHref}}" controls preload="metadata"></audio></figure>
-    {{else if eq .PreviewKind "text"}}<figure class="stage"><iframe src="{{.PreviewHref}}" title="{{.File.Name}}" sandbox></iframe></figure>
-    {{else if eq .PreviewKind "pdf"}}<figure class="stage"><iframe src="{{.PreviewHref}}" title="{{.File.Name}}"></iframe></figure>{{end}}
-    <dl class="facts">
-        <dt>文件 ID</dt><dd>{{.File.ID}}</dd>
-        <dt>类型</dt><dd>{{.File.Kind}}</dd>
-        {{if not .File.IsDir}}<dt>大小</dt><dd>{{.File.Size}}（{{.File.SizeBytes}} 字节）</dd>{{end}}
-        <dt>修改时间</dt><dd>{{.File.Updated}}</dd>
-        <dt>创建时间</dt><dd>{{.File.Created}}</dd>
-        <dt>上级目录</dt><dd><a href="{{.ParentHref}}">{{.File.ParentID}}</a></dd>
-    </dl>
-</section>
+</nav>
+
+<div class="card mb-4">
+    <div class="card-header" style="display: flex; align-items: center; gap: 16px;">
+        <div class="file-grid-icon {{if .File.IsDir}}folder{{else}}{{.File.Icon}}{{end}}" style="width: 48px; height: 48px; font-size: 24px;">
+            <i class="{{.File.FAIcon}}"></i>
+        </div>
+        <div>
+            <h4 style="margin: 0; font-weight: 600; font-size: 18px;">{{.File.Name}}</h4>
+            <div style="font-size: 13px; color: var(--text-secondary); margin-top: 2px;">
+                {{.File.Kind}}{{if not .File.IsDir}} · {{.File.Size}}{{end}}
+            </div>
+        </div>
+    </div>
+    <div class="card-body">
+        <div class="row">
+            <div class="col-md-8">
+                <h6 style="font-weight: 600; margin-bottom: 16px; font-size: 14px;"><i class="fas fa-info-circle" style="margin-right: 8px; color: var(--accent-blue);"></i>文件信息</h6>
+                <table class="table" style="font-size: 13px;">
+                    <tbody>
+                        <tr><td style="width: 30%; color: var(--text-secondary);">文件名</td><td>{{.File.Name}}</td></tr>
+                        <tr><td style="color: var(--text-secondary);">文件ID</td><td><code style="background: rgba(0,0,0,0.04); padding: 2px 6px; border-radius: 4px; font-size: 12px;">{{.File.ID}}</code></td></tr>
+                        <tr><td style="color: var(--text-secondary);">类型</td><td>{{if .File.IsDir}}<span class="badge bg-primary">文件夹</span>{{else}}<span class="badge bg-success">文件</span>{{end}}</td></tr>
+                        <tr><td style="color: var(--text-secondary);">分类</td><td><span class="badge bg-info">{{.File.Kind}}</span></td></tr>
+                        {{if not .File.IsDir}}<tr><td style="color: var(--text-secondary);">文件大小</td><td>{{.File.Size}}（{{.File.SizeBytes}} 字节）</td></tr>{{end}}
+                        <tr><td style="color: var(--text-secondary);">修改时间</td><td>{{.File.Updated}}</td></tr>
+                        <tr><td style="color: var(--text-secondary);">创建时间</td><td>{{.File.Created}}</td></tr>
+                        <tr><td style="color: var(--text-secondary);">上级目录</td><td><a href="{{.ParentHref}}" style="color: var(--accent-blue); text-decoration: none;">{{.File.ParentID}}</a></td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="col-md-4">
+                <h6 style="font-weight: 600; margin-bottom: 16px; font-size: 14px;"><i class="fas fa-tools" style="margin-right: 8px; color: var(--accent-green);"></i>操作</h6>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    {{if .File.IsDir}}
+                    <a href="{{.FolderHref}}" class="btn btn-primary"><i class="fas fa-folder-open" style="margin-right: 6px;"></i> 打开文件夹</a>
+                    {{else}}
+                    {{if .ArchiveHref}}<a href="{{.ArchiveHref}}" class="btn btn-primary"><i class="fas fa-file-archive" style="margin-right: 6px;"></i> 浏览压缩包内容</a>{{end}}
+                    <a href="{{.DownloadHref}}" class="btn btn-primary"><i class="fas fa-download" style="margin-right: 6px;"></i> 下载</a>
+                    {{if .PreviewKind}}<a href="{{.PreviewHref}}" class="btn btn-secondary"><i class="fas fa-eye" style="margin-right: 6px;"></i> 直接打开</a>{{end}}
+                    {{end}}
+                    <a href="{{.ParentHref}}" class="btn btn-ghost"><i class="fas fa-arrow-left" style="margin-right: 6px;"></i> 返回上级</a>
+                </div>
+                {{if not .File.IsDir}}
+                <div style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--border-light);">
+                    <h6 style="font-weight: 600; margin-bottom: 16px; font-size: 14px;"><i class="fas fa-eye" style="margin-right: 8px; color: var(--accent-teal);"></i>预览</h6>
+                    <div style="text-align: center; padding: 24px; background: rgba(0,0,0,0.02); border-radius: var(--radius-md);">
+                        {{if eq .PreviewKind "image"}}<img src="{{.PreviewHref}}" alt="{{.File.Name}}" style="max-width: 100%; border-radius: 8px;">{{end}}
+                        {{if eq .PreviewKind "video"}}<video src="{{.PreviewHref}}" controls preload="metadata" style="max-width: 100%;"></video>{{end}}
+                        {{if eq .PreviewKind "audio"}}<audio src="{{.PreviewHref}}" controls preload="metadata" style="width: 100%;"></audio>{{end}}
+                        {{if eq .PreviewKind "text"}}<iframe src="{{.PreviewHref}}" title="{{.File.Name}}" sandbox style="width: 100%; height: 320px; border: 0;"></iframe>{{end}}
+                        {{if eq .PreviewKind "pdf"}}<iframe src="{{.PreviewHref}}" title="{{.File.Name}}" style="width: 100%; height: 480px; border: 0;"></iframe>{{end}}
+                    </div>
+                </div>
+                {{end}}
+            </div>
+        </div>
+    </div>
+</div>
 {{end}}

@@ -121,7 +121,7 @@ func defaults(o Options) Options {
 		o.MaxNameBytes = 16 << 20
 	}
 	if o.MaxConcurrentBuilds <= 0 {
-		o.MaxConcurrentBuilds = 4
+		o.MaxConcurrentBuilds = 8
 	}
 	return o
 }
@@ -132,6 +132,7 @@ type Tree struct {
 	probeMu           sync.Mutex
 	probeRecordMu     sync.Mutex
 	probeJobs         map[int64]*archiveProbeJob
+	probeDone         func(parentID int64)
 	probeActive       int
 	probeGate         chan struct{}
 	prefetch          *imagePrefetch
@@ -324,7 +325,13 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 	if opts.PrefetchFiles > 0 {
 		t.prefetch = newImagePrefetch(t)
 	}
-	return &Node{tree: t, item: &entry{directory: true, cloud: &panapi.File{ID: rootID, IsDir: true}}, root: true}
+	root := &Node{tree: t, item: &entry{directory: true, cloud: &panapi.File{ID: rootID, IsDir: true}}, root: true}
+	t.probeDone = func(parentID int64) {
+		if fresh, err := t.cloudDirectory(context.Background(), parentID); err == nil {
+			root.notifyCloudDirectoryChange(".", &metaItem{value: fresh}, fresh)
+		}
+	}
+	return root
 }
 
 // Prepare validates a nonzero root and caches its listing before mounting.

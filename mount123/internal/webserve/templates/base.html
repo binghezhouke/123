@@ -4,21 +4,121 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>{{.Title}} · CloudArchive</title>
-    <link rel="stylesheet" href="/static/css/serve.css">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/browser.css">
+    <link rel="stylesheet" href="/static/css/gallery.css">
+    <link rel="stylesheet" href="/static/css/browser_position.css">
+    <link rel="stylesheet" href="/static/css/polish.css">
+    <link rel="stylesheet" href="/static/css/finder.css">
 </head>
 <body>
-    <header class="topbar">
-        <a class="brand" href="/">CloudArchive</a>
-        <span class="backend">mount123 serve</span>
-        {{if .Authenticated}}
-        <form class="logout" method="post" action="/logout">
-            <button type="submit">退出登录</button>
-        </form>
-        {{end}}
-    </header>
-    <main class="shell">
-        {{template "content" .}}
-    </main>
-    <footer class="foot">版本 {{.Version}} · 构建 {{.BuildTime}}{{if .Commit}} · {{.Commit}}{{end}}</footer>
+<div class="finder-window">
+    <aside class="finder-sidebar">
+        <a class="browser-brand" href="/browse?parent_id={{.RootID}}"><span class="brand-mark"><i class="fas fa-layer-group" aria-hidden="true"></i></span>CloudArchive</a>
+        <div class="sidebar-section">
+            <div class="sidebar-header">资料库</div>
+            <a href="/browse?parent_id={{.RootID}}" class="sidebar-item active"><span class="sidebar-icon"><i class="fas fa-hdd" aria-hidden="true"></i></span><span>我的文件</span></a>
+        </div>
+        <div class="sidebar-section">
+            <div class="sidebar-header">收藏</div>
+            <a href="/favorites" class="sidebar-item"><span class="sidebar-icon" aria-hidden="true">☆</span><span>所有收藏</span></a>
+        </div>
+        <div class="sidebar-footer"><span class="connection-dot"></span>123 云盘</div>
+    </aside>
+
+    <div class="finder-content">
+        <div class="finder-toolbar">
+            <div class="toolbar-left">
+                <button type="button" class="toolbar-btn" onclick="history.back()" title="后退" aria-label="后退"><i class="fas fa-chevron-left" aria-hidden="true"></i></button>
+                <button type="button" class="toolbar-btn" onclick="history.forward()" title="前进" aria-label="前进"><i class="fas fa-chevron-right" aria-hidden="true"></i></button>
+                <div class="toolbar-separator"></div>
+                <span class="toolbar-location">{{.Title}}</span>
+            </div>
+            <div class="toolbar-right">
+                <div class="view-toggle">
+                    <button type="button" class="view-toggle-btn active" id="iconViewBtn" title="图标视图" aria-label="图标视图" onclick="switchView('icons')"><i class="fas fa-th-large"></i></button>
+                    <button type="button" class="view-toggle-btn" id="listViewBtn" title="列表视图" aria-label="列表视图" onclick="switchView('list')"><i class="fas fa-list"></i></button>
+                </div>
+                <div class="toolbar-separator"></div>
+                <a class="toolbar-btn" href="/favorites" title="收藏" aria-label="打开收藏">☆</a>
+                <button type="button" class="toolbar-btn" onclick="refreshFiles()" title="刷新" aria-label="刷新文件"><i class="fas fa-sync-alt"></i></button>
+                {{if .Authenticated}}
+                <div class="toolbar-separator"></div>
+                <form class="logout" method="post" action="/logout"><button type="button" class="toolbar-btn" onclick="this.closest('form').submit()" title="退出登录">退出</button></form>
+                {{end}}
+            </div>
+        </div>
+
+        {{if .Error}}<div class="alert alert-danger alert-dismissible fade show" role="alert">{{.Error}}</div>{{end}}
+
+        <main class="finder-main page-content">
+            {{template "content" .}}
+        </main>
+
+        <div class="status-bar">
+            <span id="statusText">就绪</span>
+            <span id="statusCount"></span>
+        </div>
+    </div>
+</div>
+
+<div class="toast-container position-fixed bottom-0 end-0 p-3" id="toastContainer"></div>
+
+<dialog id="favorite-picker" aria-labelledby="favorite-picker-title">
+    <form method="dialog"><button class="favorite-close" aria-label="关闭">×</button></form>
+    <p class="eyebrow">收藏标记</p><h2 id="favorite-picker-title"></h2>
+    <div id="favorite-colors" aria-label="选择收藏颜色"></div>
+    <button type="button" id="favorite-remove" class="btn btn-secondary">取消收藏</button>
+    <p id="favorite-message" role="status" aria-live="polite"></p>
+</dialog>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/js/app.js"></script>
+<script>
+function switchView(view) {
+    const iconBtn = document.getElementById('iconViewBtn');
+    const listBtn = document.getElementById('listViewBtn');
+    const container = document.getElementById('fileContainer');
+    if (!iconBtn || !listBtn) return;
+    if (view === 'icons') {
+        iconBtn.classList.add('active'); listBtn.classList.remove('active');
+        if (container) { container.classList.remove('file-list-view'); container.classList.add('file-grid'); }
+    } else {
+        listBtn.classList.add('active'); iconBtn.classList.remove('active');
+        if (container) { container.classList.remove('file-grid'); container.classList.add('file-list-view'); }
+    }
+    localStorage.setItem('finderViewMode', view);
+}
+document.addEventListener('DOMContentLoaded', function () {
+    const savedView = localStorage.getItem('finderViewMode');
+    if (savedView) switchView(savedView);
+    updateStatusBar();
+});
+function updateStatusBar() {
+    const items = document.querySelectorAll('.file-item');
+    const count = items.length;
+    const statusCount = document.getElementById('statusCount');
+    const statusText = document.getElementById('statusText');
+    if (count > 0 && statusCount) statusCount.textContent = count + ' 个项目';
+    items.forEach(function (item) {
+        item.addEventListener('mouseenter', function () {
+            const name = item.querySelector('h6')?.textContent?.trim() || '项目';
+            if (statusText) statusText.textContent = name;
+        });
+        item.addEventListener('mouseleave', function () { if (statusText) statusText.textContent = '就绪'; });
+    });
+}
+function refreshFiles() {
+    const btn = document.querySelector('.toolbar-btn[onclick="refreshFiles()"] i');
+    if (btn) { btn.classList.add('fa-spin'); setTimeout(() => btn.classList.remove('fa-spin'), 500); }
+    const url = new URL(window.location.href);
+    url.searchParams.set('refresh', '1');
+    window.location.href = url.toString();
+}
+</script>
+<script src="/static/js/favorites.js" defer></script>
+<script src="/static/js/column_resize.js" defer></script>
 </body>
 </html>{{end}}

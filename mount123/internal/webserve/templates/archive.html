@@ -1,32 +1,83 @@
 {{define "content"}}
-<section class="card">
-    <h1>压缩包浏览</h1>
-    <p class="muted">{{if .FileName}}{{.FileName}}{{else}}归档{{end}}</p>
-    <nav class="archive-path">
-        <a href="/archive/{{.FileID}}">根目录</a>
-        {{if .Prefix}}{{if .Parent}}<span> / </span><a href="/archive/{{.FileID}}?path={{.Parent}}">上一级</a>{{end}}<span> / {{.Prefix}}</span>{{end}}
-    </nav>
-    <table>
-        <thead><tr><th>名称</th><th>大小</th><th>操作</th></tr></thead>
-        <tbody>
-        {{range .Members}}
-            <tr>
-                {{if .IsDir}}
-                    <td><a href="/archive/{{$.FileID}}?path={{$.Prefix}}/{{.Name}}">{{.Name}}/</a></td>
-                    <td>—</td>
-                    <td></td>
-                {{else}}
-                    <td>{{.Name}}{{if .Encrypted}} <span class="badge">加密</span>{{end}}</td>
-                    <td>{{.Size}}</td>
-                    <td>
-                        <a href="/archive/{{$.FileID}}/member?path={{$.Prefix}}/{{.Name}}">预览</a>
-                        <a href="/archive/{{$.FileID}}/member?path={{$.Prefix}}/{{.Name}}&download=1">下载</a>
-                    </td>
+<div class="card archive-browser">
+    <div class="card-header browser-heading">
+        <div><p class="eyebrow">压缩包</p><h1>{{.FileName}}</h1></div>
+        <span class="item-count">{{len .Rows}} 个条目</span>
+    </div>
+    <div class="card-body">
+        <nav aria-label="压缩包目录" class="archive-path">
+            <a href="/file/{{.FileID}}">文件详情</a>
+            <a href="/archive/{{.FileID}}">压缩包根目录</a>
+            {{if .Prefix}}{{if .Parent}}<a href="/archive/{{.FileID}}?path={{.Parent}}">上一级</a>{{end}}<span> / {{.Prefix}}</span>{{end}}
+        </nav>
+        <div class="table-responsive">
+            <table class="table" data-column-layout="archive">
+                <thead><tr><th>名称</th><th>解压后大小</th><th>操作</th></tr></thead>
+                <tbody>
+                {{range .Rows}}
+                    {{if .IsDir}}
+                    <tr>
+                        <td style="overflow-wrap: anywhere;"><a href="{{.Href}}"><i class="fas fa-folder" aria-hidden="true"></i> {{.Name}}/</a></td>
+                        <td>—</td><td></td>
+                    </tr>
+                    {{else if .Nested}}
+                    <tr>
+                        <td style="overflow-wrap: anywhere;"><a href="{{.Href}}"><i class="fas fa-file-archive" aria-hidden="true"></i> {{.Name}}/</a></td>
+                        <td>{{.Size}}</td><td><a class="btn btn-sm btn-primary" href="{{.Href}}">进入</a></td>
+                    </tr>
+                    {{else}}
+                    <tr data-favorite-key="zip:{{$.FileID}}:{{$.Prefix}}:{{.Name}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}" data-name="{{.Name}}"{{end}}>
+                        <td style="overflow-wrap: anywhere;"><i class="{{.FAIcon}}" aria-hidden="true"></i> {{.Name}}{{if .Encrypted}} <span class="badge bg-secondary">加密</span>{{end}}</td>
+                        <td>{{.Size}}</td>
+                        <td>
+                            <a class="btn btn-sm btn-primary" href="{{.Href}}">打开</a>
+                            <a class="btn btn-sm btn-secondary" href="{{.Download}}">下载</a>
+                        </td>
+                    </tr>
+                    {{end}}
                 {{end}}
-            </tr>
-        {{end}}
-        {{if not .Members}}<tr><td colspan="3">此目录为空</td></tr>{{end}}
-        </tbody>
-    </table>
-</section>
+                {{if not .Rows}}<tr><td colspan="3">此目录为空</td></tr>{{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
+<dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="archive:{{.FileID}}:{{.Prefix}}">
+    <div class="zip-gallery-toolbar">
+        <h2 id="zip-gallery-title">图片预览</h2><span id="zip-gallery-counter"></span>
+        <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
+        <button id="zip-gallery-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">全屏</button>
+        <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
+    </div>
+    <div class="zip-gallery-zoom" role="group" aria-label="图片缩放">
+        <button id="zip-gallery-zoom-out" class="btn btn-secondary" type="button" aria-label="缩小图片" disabled>−</button><span id="zip-gallery-zoom-level">100%</span>
+        <button id="zip-gallery-zoom-in" class="btn btn-secondary" type="button" aria-label="放大图片" disabled>＋</button>
+        <button id="zip-gallery-zoom-reset" class="btn btn-secondary" type="button" disabled>适应窗口</button>
+        <button id="zip-gallery-original" class="btn btn-secondary" type="button">原始尺寸 1:1</button>
+        <button id="zip-gallery-rotate" class="btn btn-secondary" type="button">旋转 90°</button>
+    </div>
+    <div id="zip-gallery-stage"></div>
+    <p id="zip-gallery-status" role="status" aria-live="polite"></p>
+    <div class="zip-gallery-toolbar gallery-controls">
+        <button id="zip-gallery-prev" class="btn btn-secondary" type="button">← 上一张</button><button id="zip-gallery-retry" class="btn btn-secondary" type="button" hidden>重试</button><button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
+        <button id="zip-gallery-thumb-toggle" class="btn btn-secondary" type="button" aria-expanded="false">缩略图</button>
+        <form id="zip-gallery-jump-form"><label for="zip-gallery-jump-input">序号</label><input id="zip-gallery-jump-input" type="number" min="1" step="1" required><button class="btn btn-secondary" type="submit">跳转</button></form>
+    </div>
+    <p id="zip-gallery-jump-message" role="status"></p>
+    <div id="zip-gallery-thumbs" class="gallery-thumbs" hidden></div>
+    <div id="zip-gallery-index" hidden></div>
+    <details id="zip-gallery-settings"><summary>预取设置</summary><form id="zip-gallery-settings-form">
+        <label>预取数量 <input id="zip-gallery-setting-count" type="number" min="0" max="50" value="9"> 张</label>
+        <label>后台并发 <input id="zip-gallery-setting-concurrency" type="number" min="1" max="12" value="6"> 个</label>
+        <label>缓存预算 <input id="zip-gallery-setting-budget" type="number" min="16" max="2048" value="256"> MiB</label>
+        <button class="btn btn-secondary" type="submit">保存</button><button id="zip-gallery-settings-reset" class="btn btn-secondary" type="button">恢复默认</button>
+    </form></details>
+    <details id="zip-gallery-diagnostics"><summary>预取与缓存诊断</summary><p id="zip-gallery-diagnostics-output"></p><button id="zip-gallery-diagnostics-reset" class="btn btn-secondary" type="button">重置统计</button></details>
+</dialog>
+<script src="/static/js/vendor/panzoom/panzoom.min.js" defer></script>
+<script src="/static/js/image_viewport.js" defer></script>
+<script src="/static/js/zip_gallery.js" defer></script>
+
 {{end}}

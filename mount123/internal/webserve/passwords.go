@@ -75,7 +75,7 @@ func (s *Server) handlePasswords(w http.ResponseWriter, r *http.Request) {
 	}
 	shared, _ := s.service.SharedPassword(r.Context(), parentID)
 	s.renderPasswords(w, passwordPageData{
-		pageData: pageData{Info: s.info, Title: "密码管理", Authenticated: true},
+		pageData: pageData{Info: s.info, Title: "密码管理", Authenticated: s.authEnabled},
 		ParentID: parentID, Archives: archives, SharedCurrent: shared,
 	})
 }
@@ -166,7 +166,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) renderPasswordError(w http.ResponseWriter, r *http.Request, parentID int64, message string) {
 	s.renderPasswords(w, passwordPageData{
-		pageData: pageData{Info: s.info, Title: "密码管理", Authenticated: true, Error: message},
+		pageData: pageData{Info: s.info, Title: "密码管理", Authenticated: s.authEnabled, Error: message},
 		ParentID: parentID,
 	})
 }

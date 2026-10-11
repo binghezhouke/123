@@ -1,0 +1,13 @@
+{{define "content"}}
+<header class="browser-heading"><div><p class="eyebrow">资料库</p><h1>收藏</h1></div><span class="item-count" id="favorite-count"></span></header>
+<p class="favorite-note">用颜色整理常用文件。收藏保存在当前浏览器中。</p>
+<section class="favorite-transfer" aria-label="收藏备份">
+    <button type="button" class="btn btn-secondary" id="favorite-export">导出收藏 JSON</button>
+    <label class="btn btn-secondary" for="favorite-import-file">导入收藏 JSON</label>
+    <input id="favorite-import-file" type="file" accept="application/json,.json" hidden>
+    <p id="favorite-transfer-message" role="status" aria-live="polite"></p>
+</section>
+<nav id="favorite-filters" aria-label="按颜色筛选收藏"></nav>
+<div id="favorite-results" class="file-grid"></div>
+<p id="favorite-empty" class="empty-state" hidden>还没有收藏。在文件旁点击 ☆，选择一种颜色即可收藏。</p>
+{{end}}

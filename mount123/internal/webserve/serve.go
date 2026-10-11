@@ -28,7 +28,7 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/mountfs"
 )
 
-//go:embed templates/*.html static/css/*.css
+//go:embed templates/*.html static/css/*.css static/js/*.js static/js/vendor/*.js static/js/vendor/mp4box/*.mjs static/js/vendor/panzoom/*.js
 var assets embed.FS
 
 const (
@@ -101,6 +101,7 @@ type Server struct {
 	pages             map[string]*template.Template
 	static            http.Handler
 	service           *mountfs.Service
+	authEnabled       bool
 }
 
 // New validates opts and returns a server that is ready to serve. The caller
@@ -125,26 +126,23 @@ func New(opts Options) (*Server, error) {
 		ttl = DefaultSessionTTL
 	}
 	s := &Server{
-		password: []byte(opts.Password),
-		key:      append([]byte(nil), opts.SessionKey...),
-		ttl:      ttl,
-		info:     opts.Info,
-		logger:   logger,
-		now:      now,
-		sessions: newSessionStore(),
-		mux:      http.NewServeMux(),
-		pages:    map[string]*template.Template{},
-		service:  opts.Service,
+		password:    []byte(opts.Password),
+		key:         append([]byte(nil), opts.SessionKey...),
+		ttl:         ttl,
+		info:        opts.Info,
+		logger:      logger,
+		now:         now,
+		sessions:    newSessionStore(),
+		mux:         http.NewServeMux(),
+		pages:       map[string]*template.Template{},
+		service:     opts.Service,
+		authEnabled: opts.Password != "",
 	}
 	if opts.Password == "" {
-		password, err := randomToken(generatedPasswordBytes)
-		if err != nil {
-			return nil, fmt.Errorf("webserve: generate access password: %w", err)
-		}
-		s.generatedPassword = password
-		s.password = []byte(password)
+		// Single-user mode: no login gate. A password may still be supplied
+		// explicitly to protect the interface on a shared network.
 	}
-	for _, name := range []string{"login.html", "index.html"} {
+	for _, name := range []string{"login.html", "index.html", "favorites.html"} {
 		page, err := template.ParseFS(assets, "templates/base.html", "templates/"+name)
 		if err != nil {
 			return nil, fmt.Errorf("webserve: parse %s: %w", name, err)
@@ -185,6 +183,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /login", s.handleLogin)
 	s.mux.HandleFunc("POST /logout", s.requireAuth(s.handleLogout))
 	s.mux.HandleFunc("GET /{$}", s.requireAuth(s.handleIndex))
+	s.mux.HandleFunc("GET /favorites", s.requireAuth(s.handleFavorites))
 	s.registerListingRoutes()
 	s.registerPasswordRoutes()
 	s.registerArchiveRoutes()
@@ -197,7 +196,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		header.Set("X-Content-Type-Options", "nosniff")
 		header.Set("X-Frame-Options", "DENY")
 		header.Set("Referrer-Policy", "no-referrer")
-		header.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		header.Set("Content-Security-Policy", "default-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://cdnjs.cloudflare.com; img-src 'self' data: blob:; font-src 'self' data: https://cdnjs.cloudflare.com; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }
@@ -208,6 +207,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if !s.authEnabled {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	if _, ok := s.currentSession(r); ok {
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 		return
@@ -220,6 +223,10 @@ func (s *Server) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.authEnabled {
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodyBytes)
 	if err := r.ParseForm(); err != nil {
 		s.renderLogin(w, r, http.StatusBadRequest, "登录请求无法解析，请重试。")
@@ -260,9 +267,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	s.render(w, http.StatusOK, "index.html", pageData{
 		Info:          s.info,
 		Title:         "网盘浏览",
-		Authenticated: true,
+		Authenticated: s.authEnabled,
 		CacheCapacity: humanBytes(s.info.CacheCapacityBytes),
 		IndexBudget:   humanBytes(s.info.IndexBudgetBytes),
+	})
+}
+
+func (s *Server) handleFavorites(w http.ResponseWriter, r *http.Request) {
+	s.render(w, http.StatusOK, "favorites.html", pageData{
+		Info:          s.info,
+		Title:         "收藏",
+		Authenticated: s.authEnabled,
 	})
 }
 
@@ -298,6 +313,10 @@ func (s *Server) render(w http.ResponseWriter, status int, name string, data pag
 // 401, so API and download routes can share one gate.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !s.authEnabled {
+			next(w, r)
+			return
+		}
 		if _, ok := s.currentSession(r); ok {
 			next(w, r)
 			return
@@ -394,6 +413,7 @@ type pageData struct {
 	Next          string
 	CacheCapacity string
 	IndexBudget   string
+	AuthEnabled   bool
 }
 
 // sessionStore keeps live sessions in process memory, which matches the

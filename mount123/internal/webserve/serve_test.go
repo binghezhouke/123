@@ -141,7 +141,7 @@ func TestLoginGrantsSessionAndRendersIndex(t *testing.T) {
 		t.Fatalf("index status = %d, want 200", page.Code)
 	}
 	body := page.Body.String()
-	for _, want := range []string{"网盘浏览", "/tmp/cache", "mount123 serve"} {
+	for _, want := range []string{"网盘浏览", "/tmp/cache", "CloudArchive"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("index page is missing %q: %s", want, body)
 		}
@@ -255,17 +255,15 @@ func TestForgedSessionCookieIsRejected(t *testing.T) {
 	}
 }
 
-func TestGeneratedPasswordIsReported(t *testing.T) {
+func TestEmptyPasswordDisablesAuth(t *testing.T) {
 	server := newTestServer(t, func(opts *Options) { opts.Password = "" })
 	generated, ok := server.GeneratedPassword()
-	if !ok || len(generated) < 12 {
-		t.Fatalf("generated password = %q (ok=%v)", generated, ok)
+	if ok || generated != "" {
+		t.Fatalf("no-password server reported generated password = %q (ok=%v)", generated, ok)
 	}
-	if recorder := login(t, server.Handler(), generated); recorder.Code != http.StatusSeeOther {
-		t.Fatalf("generated password did not log in: %d", recorder.Code)
-	}
-	if recorder := login(t, server.Handler(), testPassword); recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("a generated server accepted an unrelated password: %d", recorder.Code)
+	// Without a configured password every route is open, including the index.
+	if recorder := get(t, server.Handler(), "/", map[string]string{"Accept": "text/html"}); recorder.Code != http.StatusOK {
+		t.Fatalf("unauthenticated root status = %d, want 200", recorder.Code)
 	}
 }
 

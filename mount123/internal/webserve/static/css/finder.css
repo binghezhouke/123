@@ -1,0 +1,192 @@
+/* A cleaner, self-consistent Finder-style grid and list. Loaded last so it
+   wins over the migrated styles. */
+
+/* Icon view */
+.file-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
+    gap: 12px;
+    padding: 8px;
+}
+
+.file-grid-item {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 4px;
+    padding: 14px 6px 12px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.file-grid-item:hover {
+    background: rgba(0, 0, 0, 0.045);
+}
+
+.file-grid-icon {
+    width: 52px;
+    height: 52px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 2px;
+    font-size: 30px;
+    line-height: 1;
+}
+
+.file-grid-name {
+    width: 100%;
+    font-size: 12px;
+    line-height: 1.3;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.file-grid-meta {
+    font-size: 10.5px;
+    color: #8a93a1;
+}
+
+.file-grid-item > .favorite-marker {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    width: 22px;
+    height: 22px;
+    font-size: 13px;
+    line-height: 1;
+    border-radius: 6px;
+}
+
+/* List view */
+.file-list {
+    display: block;
+}
+
+.file-list-header,
+.file-list-row {
+    grid-template-columns: minmax(0, 2.2fr) minmax(90px, 1fr) minmax(80px, 1fr) 110px;
+    gap: 12px;
+    padding-left: 12px;
+    padding-right: 12px;
+}
+
+.file-list-header {
+    min-height: 28px;
+    padding-top: 4px;
+    padding-bottom: 4px;
+}
+
+.file-list-row {
+    min-height: 26px;
+    padding-top: 2px;
+    padding-bottom: 2px;
+    border-radius: 4px;
+}
+
+.file-list-name {
+    gap: 8px;
+    font-size: 12.5px;
+}
+
+.file-list-icon {
+    width: 16px;
+    height: 16px;
+    font-size: 13px;
+    line-height: 1;
+}
+
+.file-list-row > .favorite-marker {
+    width: 22px;
+    height: 22px;
+    font-size: 13px;
+    top: 2px;
+    right: 2px;
+}
+
+/* Sortable column headers and the right-click menu. */
+.file-list-header .sortable {
+    cursor: pointer;
+    user-select: none;
+}
+
+.file-list-header .sortable:hover {
+    color: #252c37;
+}
+
+.context-menu {
+    position: fixed;
+    z-index: 1000;
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+    padding: 4px;
+    min-width: 180px;
+}
+
+.context-menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 6px 10px;
+    border: none;
+    background: none;
+    font-size: 13px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.context-menu button:hover {
+    background: #f0f2f5;
+}
+
+.context-menu hr {
+    margin: 4px 0;
+    border: 0;
+    border-top: 1px solid #eceef1;
+}
+
+/* Group titles when the arrange-by-kind view is active. */
+.file-grid-group {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    font-weight: 600;
+    color: #8a93a1;
+    padding: 12px 4px 4px;
+    margin-top: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.file-grid-group:first-child {
+    margin-top: 0;
+}
+
+.file-list-group {
+    grid-column: 1 / -1;
+    font-size: 12px;
+    font-weight: 600;
+    color: #8a93a1;
+    padding: 8px 12px 2px;
+}
+
+/* Row numbers stay out of the way until a row is hovered, keeping the
+   layout quiet while still showing position on demand. */
+.file-grid > .file-grid-item::before,
+.file-list-name::before,
+.archive-browser tbody td:first-child:not([colspan])::before {
+    opacity: 0;
+    transition: opacity 120ms ease;
+}
+
+.file-grid > .file-grid-item:hover::before,
+.file-list-row:hover .file-list-name::before,
+.archive-browser tbody tr:hover td:first-child:not([colspan])::before {
+    opacity: 1;
+}

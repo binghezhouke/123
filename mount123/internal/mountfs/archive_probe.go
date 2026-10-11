@@ -219,26 +219,32 @@ func (t *Tree) withProbedArchives(ctx context.Context, parentID int64, base *clo
 }
 
 func (n *Node) probeStatus() ArchiveProbeStatus {
-	n.tree.probeMu.Lock()
-	defer n.tree.probeMu.Unlock()
-	if job := n.tree.probeJobs[n.item.cloud.ID]; job != nil {
+	return n.tree.probeStatus(n.item.cloud.ID)
+}
+
+func (n *Node) startArchiveProbe(ctx context.Context) (ArchiveProbeStatus, error) {
+	return n.tree.startProbe(ctx, n.item.cloud.ID)
+}
+
+func (t *Tree) probeStatus(parentID int64) ArchiveProbeStatus {
+	t.probeMu.Lock()
+	defer t.probeMu.Unlock()
+	if job := t.probeJobs[parentID]; job != nil {
 		return job.status
 	}
 	return ArchiveProbeStatus{State: "idle"}
 }
 
-func (n *Node) startArchiveProbe(ctx context.Context) (ArchiveProbeStatus, error) {
+func (t *Tree) startProbe(ctx context.Context, parentID int64) (ArchiveProbeStatus, error) {
 	if err := ctx.Err(); err != nil {
 		return ArchiveProbeStatus{}, err
 	}
-	if err := n.tree.ctx.Err(); err != nil {
+	if err := t.ctx.Err(); err != nil {
 		return ArchiveProbeStatus{}, err
 	}
-	if !n.tree.zipDirs || n.tree.cache == nil {
+	if !t.zipDirs || t.cache == nil {
 		return ArchiveProbeStatus{}, syscall.EOPNOTSUPP
 	}
-	t := n.tree
-	parentID := n.item.cloud.ID
 	t.probeMu.Lock()
 	if job := t.probeJobs[parentID]; job != nil && job.status.State == "running" {
 		status := job.status
@@ -265,21 +271,20 @@ func (n *Node) startArchiveProbe(ctx context.Context) (ArchiveProbeStatus, error
 	t.probeJobs[parentID] = job
 	t.probeActive++
 	t.probeMu.Unlock()
-	go n.runArchiveProbe(job)
-	return n.probeStatus(), nil
+	go t.runProbeSync(ctx, parentID, job)
+	return t.probeStatus(parentID), nil
 }
 
-func (n *Node) runArchiveProbe(job *archiveProbeJob) {
-	t := n.tree
+func (t *Tree) runProbeSync(ctx context.Context, parentID int64, job *archiveProbeJob) {
 	ctx, cancel := context.WithTimeout(workqueue.Background(t.ctx), 10*time.Minute)
 	defer cancel()
 	finish := func(state string) { t.probeMu.Lock(); job.status.State = state; t.probeActive--; t.probeMu.Unlock() }
-	directory, err := t.cloudDirectory(ctx, n.item.cloud.ID)
+	directory, err := t.cloudDirectory(ctx, parentID)
 	if err != nil {
 		finish("failed")
 		return
 	}
-	old, err := t.loadProbeRecord(ctx, n.item.cloud.ID)
+	old, err := t.loadProbeRecord(ctx, parentID)
 	if err != nil {
 		finish("failed")
 		return
@@ -324,7 +329,7 @@ func (n *Node) runArchiveProbe(job *archiveProbeJob) {
 						return
 					}
 					fileCtx, stop := context.WithTimeout(ctx, 25*time.Second)
-					result = n.probeFile(fileCtx, f)
+					result = t.probeFile(fileCtx, f)
 					stop()
 					<-t.probeGate
 				}
@@ -360,12 +365,10 @@ send:
 		finish("cancelled")
 		return
 	}
-	record := &archiveProbeRecord{Version: 1, ParentID: n.item.cloud.ID, Created: time.Now(), Results: results}
+	record := &archiveProbeRecord{Version: 1, ParentID: parentID, Created: time.Now(), Results: results}
 	persistence := t.saveProbeRecord(ctx, record)
-	// Drop the old overlay's negative dentry cache without changing any raw
-	// inode's type. Existing open directory handles keep their old snapshot.
-	if fresh, err := t.cloudDirectory(ctx, n.item.cloud.ID); err == nil {
-		n.notifyCloudDirectoryChange(".", &metaItem{value: directory}, fresh)
+	if t.probeDone != nil {
+		t.probeDone(parentID)
 	}
 	t.probeMu.Lock()
 	job.status.Persistence = persistence
@@ -374,10 +377,12 @@ send:
 }
 
 func (n *Node) probeFile(ctx context.Context, f panapi.File) archiveProbeResult {
+	return n.tree.probeFile(ctx, f)
+}
+
+func (t *Tree) probeFile(ctx context.Context, f panapi.File) archiveProbeResult {
 	result := archiveProbeResult{ID: f.ID, Version: f.Version, Size: f.Size, Updated: f.UpdatedAt, State: "failed"}
-	file := f
-	target := &Node{tree: n.tree, item: &entry{cloud: &file}}
-	source, err := target.source(ctx)
+	source, err := t.cloudFileSource(ctx, &f, t.opts.SourceTTL)
 	if err != nil {
 		return result
 	}

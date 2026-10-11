@@ -1,0 +1,52 @@
+/* Low-frequency directory actions stay out of everyday file navigation. */
+.directory-heading > :first-child { min-width: 0; }
+.directory-heading-actions { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+.directory-actions { position: relative; }
+.directory-actions > summary {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    list-style: none;
+    cursor: pointer;
+    color: var(--text-secondary);
+    background: #fff;
+    border: 1px solid #e2e5eb;
+    border-radius: 8px;
+}
+.directory-actions > summary::-webkit-details-marker { display: none; }
+.directory-actions > summary:focus-visible { outline: 3px solid #6ba0f2; outline-offset: 3px; }
+.directory-actions > summary:active { transform: scale(.97); }
+.directory-actions[open] > summary { background: #edf3ff; color: var(--accent-blue); border-color: #c9d8f0; }
+.directory-actions-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 20;
+    width: 220px;
+    max-width: calc(100vw - 36px);
+    padding: 5px;
+    border: 1px solid #e2e5eb;
+    border-radius: 10px;
+    background: #fff;
+    box-shadow: 0 8px 28px #15203324;
+}
+.directory-actions-panel a {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    color: #344154;
+    font-size: 13px;
+    text-decoration: none;
+}
+.directory-actions-panel a:focus-visible { outline-offset: -3px; background: #edf3ff; }
+@media (hover: hover) and (pointer: fine) {
+    .directory-actions > summary:hover { background: #f3f6fb; }
+    .directory-actions-panel a:hover { color: #234a87; background: #edf3ff; }
+}
+@media (max-width: 600px) {
+    .directory-heading-actions { gap: 8px; }
+    .directory-heading .item-count { max-width: 90px; white-space: normal; text-align: right; }
+}
