@@ -131,6 +131,14 @@ func (r nestedOffsetReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func nestedCopyMemberReader(reader io.ReaderAt, size int64, outer *member, ordinal int, password []byte) (io.ReaderAt, bool, error) {
+	// PackedRanges points at the encrypted packed bytes when the outer 7z
+	// uses 7zAES. They look like a valid Copy stream, but mapping them
+	// directly would expose ciphertext. Keep the decoder path whenever a
+	// password is involved; it also remains correct for shared-password
+	// metadata on an otherwise unencrypted archive.
+	if len(password) > 0 {
+		return nil, false, nil
+	}
 	zr, err := sevenzip.NewReaderWithPassword(reader, size, string(password))
 	if err != nil {
 		return nil, false, err

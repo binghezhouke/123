@@ -205,6 +205,31 @@ func TestNestedCopyMemberReaderUsesPackedRange(t *testing.T) {
 	}
 }
 
+func TestNestedCopyMemberReaderSkipsPasswordProtectedMapping(t *testing.T) {
+	data, err := os.ReadFile("testdata/encrypted/nested-vol-outer.7z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, err := sevenzip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := zr.File[0]
+	off, ok := f.StreamOffset()
+	if !ok {
+		t.Fatal("fixture member has no stream")
+	}
+	streams := zr.Streams()
+	member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0, sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
+	_, direct, err := nestedCopyMemberReader(bytes.NewReader(data), int64(len(data)), member, 0, []byte("shared-password"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if direct {
+		t.Fatal("password-protected outer stream was mapped as raw packed bytes")
+	}
+}
+
 func TestNestedArchiveCloseReleasesFallbackPins(t *testing.T) {
 	dir := t.TempDir()
 	cache, err := storage.NewCache(filepath.Join(dir, "cache"), 1<<20)
