@@ -196,6 +196,7 @@ func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath stri
 			if nestedErr != nil {
 				return nil, nestedErr
 			}
+			defer nested.Close()
 			return archiveEntriesFromIndex(nested.index, rest)
 		}
 	}
@@ -221,6 +222,7 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 			if nestedErr != nil {
 				return nil, 0, nestedErr
 			}
+			defer nested.Close()
 			nested.index.mu.RLock()
 			inner := nested.index.members[rest]
 			nested.index.mu.RUnlock()

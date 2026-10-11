@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -128,5 +130,60 @@ func TestServiceNestedMissingMemberReturnsNotFound(t *testing.T) {
 	service := newServiceNested(t, data)
 	if _, _, err := service.OpenArchiveMember(context.Background(), 77, "inner.7z.001/nope.txt"); err != syscall.ENOENT {
 		t.Fatalf("missing nested member err = %v, want ENOENT", err)
+	}
+}
+
+// The real compressed path must remain readable after listing has closed its
+// decoder, and after the lookup request/password buffers have gone away.
+func TestCompressedNestedSharedReader(t *testing.T) {
+	sevenzip, err := exec.LookPath("7z")
+	if err != nil {
+		t.Skip("7z fixture generator unavailable")
+	}
+	dir := t.TempDir()
+	inner, err := os.ReadFile("testdata/encrypted/plain.7z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "inner.7z"), inner, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(sevenzip, "a", "-t7z", "-m0=lzma2", "-mx=5", "outer.7z", "inner.7z")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate: %v %s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "outer.7z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newServiceNested(t, data)
+	ctx, cancel := context.WithCancel(context.Background())
+	if _, err := service.ListArchive(ctx, 77, "inner.7z"); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	reader, size, err := service.OpenArchiveMember(context.Background(), 77, "inner.7z/folder/hello.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := reader.(io.Closer); ok {
+		defer c.Close()
+	}
+	got := make([]byte, size)
+	if _, err = reader.ReadAt(got, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.HasPrefix(got, []byte("mount 7z fixture contents\n")) {
+		t.Fatalf("wrong bytes: %q", got)
+	}
+	root, _ := otherArchiveFixture(t, "outer.7z", data, nil, false)
+	nested := lookup(t, lookup(t, root, "outer.7z"), "inner.7z")
+	file := lookup(t, lookup(t, nested, "folder"), "hello.txt")
+	if got := readNode(t, file, 0, 100); !bytes.HasPrefix(got, []byte("mount 7z fixture contents\n")) {
+		t.Fatalf("FUSE bytes: %q", got)
+	}
+	if nested.item.nested != nil {
+		_ = nested.item.nested.Close()
 	}
 }

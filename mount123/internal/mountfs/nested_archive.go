@@ -31,8 +31,9 @@ type nestedArchive struct {
 	// reachable. Copy/Store members do not need a pin because they read from the
 	// outer source directly. The finalizer is a last-resort cleanup for FUSE
 	// inode lifetimes, which do not expose a corresponding Go release hook.
-	handles []*storage.Handle
-	closed  bool
+	handles     []*storage.Handle
+	lazyReaders []*nestedMemberReader
+	closed      bool
 }
 
 // Close releases cache pins held by compressed outer members. It is
@@ -55,6 +56,11 @@ func (n *nestedArchive) Close() error {
 	var first error
 	for _, h := range handles {
 		if err := h.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	for _, r := range n.lazyReaders {
+		if err := r.Close(); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -169,7 +175,7 @@ type nestedArchivePolicy struct {
 }
 
 var defaultNestedArchivePolicy = nestedArchivePolicy{
-	MaxDepth: 1, MaxBytes: 4 << 30, MaxMembers: 100000, MaxIndexBytes: 64 << 20,
+	MaxDepth: 1, MaxBytes: 64 << 30, MaxMembers: 100000, MaxIndexBytes: 64 << 20,
 }
 
 func (p nestedArchivePolicy) allow(depth int, size int64) error {
@@ -359,7 +365,7 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 		}
 	}
 	readers := make([]io.ReaderAt, 0, len(parts))
-	handles := make([]*storage.Handle, 0, len(parts))
+	lazyReaders := make([]*nestedMemberReader, 0, len(parts))
 	sizes := make([]int64, 0, len(parts))
 	for _, part := range parts {
 		if direct, ok, directErr := nestedCopyMemberReader(reader, size, part, part.ordinal, password); directErr != nil {
@@ -370,18 +376,15 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 			partSize += int64(part.size)
 			continue
 		}
-		key := n.tree.diskCacheScope() + ":" + identity + ":nested-member:" + part.name + fmt.Sprintf(":%d:%08x:%s", part.size, part.crc, n.tree.passwordTag(archive, password))
-		h, acquireErr := n.tree.cache.Acquire(ctx, key, int64(part.size), func(fillCtx context.Context, w io.Writer) error {
-			return archiveReadError(fillCtx, extractArchiveMember(fillCtx, reader, size, part, password, w), password)
-		})
-		if acquireErr != nil {
-			for _, old := range handles {
-				_ = old.Close()
+		lr, err := n.tree.newNestedMemberReader(n.tree.ctx, source, archive, identity, part, password)
+		if err != nil {
+			for _, r := range lazyReaders {
+				_ = r.Close()
 			}
-			return nil, acquireErr
+			return nil, err
 		}
-		handles = append(handles, h)
-		readers = append(readers, h)
+		lazyReaders = append(lazyReaders, lr)
+		readers = append(readers, lr)
 		sizes = append(sizes, int64(part.size))
 		partSize += int64(part.size)
 	}
@@ -393,20 +396,20 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 	innerMembers, err := indexNested7z(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
 	clear(innerPassword)
 	if err != nil {
-		for _, h := range handles {
-			_ = h.Close()
+		for _, r := range lazyReaders {
+			_ = r.Close()
 		}
 		return nil, err
 	}
 	idx, err := nestedIndexFromMembers(innerMembers, defaultNestedArchivePolicy)
 	if err != nil {
-		for _, h := range handles {
-			_ = h.Close()
+		for _, r := range lazyReaders {
+			_ = r.Close()
 		}
 		return nil, err
 	}
 	na := &nestedArchive{reader: cached, size: partSize, format: kind, index: idx, password: append([]byte(nil), password...), cachePrefix: n.tree.diskCacheScope() + ":" + identity + ":nested-content:" + n.tree.passwordTag(archive, password)}
-	na.handles = handles
+	na.lazyReaders = lazyReaders
 	// Nodes are owned by the FUSE inode tree and may not receive a Go-level
 	// release callback. Keep the handles pinned while the archive is reachable,
 	// then release them when the archive becomes unreachable during unmount or
