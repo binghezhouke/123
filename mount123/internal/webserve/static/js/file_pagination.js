@@ -72,6 +72,13 @@
             document.dispatchEvent(new CustomEvent('files:load-complete', {detail: {ok: succeeded}}));
             button.removeAttribute('aria-busy');
             if (button.hasAttribute('href')) button.removeAttribute('aria-disabled');
+            // Appending a short page may leave the sentinel inside the preload
+            // margin. Observe it afresh after releasing busy so another page
+            // loads without requiring an exit/re-entry intersection transition.
+            if (succeeded && button.hasAttribute('href') && observer) {
+                observer.unobserve(sentinel);
+                observer.observe(sentinel);
+            }
         }
     }
 

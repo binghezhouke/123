@@ -3,13 +3,14 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 
-function setup() {
+function setup({go = false} = {}) {
     const item = id => ({dataset: {fileId: String(id)}});
     const grid = {items: [item(1)], querySelectorAll() {return this.items;}, append(fragment) {this.items.push(...fragment.items);}};
     const list = {...grid, items: [item(1)]};
     const button = {
         href: 'http://test/?last_file_id=1', attrs: {href: 'yes'}, textContent: '',
         parentElement: {after(status) {state.status = status;}},
+        closest() {return this.parentElement;},
         addEventListener(name, fn) {this.click = fn;},
         hasAttribute(name) {return name in this.attrs;},
         setAttribute(name, value) {this.attrs[name] = value;},
@@ -37,7 +38,16 @@ function setup() {
             };
         }
     }
-    vm.runInNewContext(fs.readFileSync('static/js/file_pagination.js', 'utf8'), {
+    const intersections = [];
+    state.intersections = intersections;
+    class IntersectionObserver {
+        constructor(callback) {this.callback = callback;}
+        observe(target) {intersections.push(() => this.callback([{target, isIntersecting: true}]));}
+        unobserve() {}
+        disconnect() {intersections.length = 0;}
+    }
+    vm.runInNewContext(fs.readFileSync(go ? 'mount123/internal/webserve/static/js/file_pagination.js' : 'static/js/file_pagination.js', 'utf8'), {
+        window: {IntersectionObserver}, IntersectionObserver,
         CustomEvent: class {constructor(type, options) {this.type = type; this.detail = options.detail;}},
         document, DOMParser, fetch: async url => {state.calls.push(url); return state.response;},
     });
@@ -115,4 +125,21 @@ test('restores scroll when the browser anchors to the moving load button', async
     };
     await s.click();
     assert.equal(s.scroller.scrollTop, 120);
+});
+
+
+test('Go pagination keeps loading while sentinel remains inside preload margin', async () => {
+    const s = setup({go: true});
+    s.next = 'http://test/?offset=40';
+    s.intersections.shift()();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(s.calls.length, 1);
+    assert.equal(s.intersections.length, 1, 'visible sentinel must be checked again after append');
+    s.ids = [3];
+    s.next = null;
+    s.intersections.shift()();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(s.calls.length, 2);
+    assert.equal(s.grid.items.length, 3);
+    assert.equal(s.intersections.length, 0, 'stop observing at final page');
 });
