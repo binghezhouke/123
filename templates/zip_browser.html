@@ -24,7 +24,7 @@
                 <input type="hidden" name="path" value="{{ prefix }}">
                 {% if password_required and member_id is not none %}<input type="hidden" name="member_id" value="{{ member_id }}"><input type="hidden" name="v" value="{{ archive_version }}"><input type="hidden" name="download" value="{{ request.args.get('download', '') }}">{% if request.args.get("expected_path") is not none %}<input type="hidden" name="expected_path" value="{{ request.args['expected_path'] }}">{% endif %}{% endif %}
                 <label for="zip-password-entry">{% if password_set %}重新输入压缩包密码{% else %}压缩包密码{% endif %}</label>
-                <input id="zip-password-entry" type="password" name="password" required maxlength="1024" autocomplete="current-password">
+                <input id="zip-password-entry" type="text" name="password" required maxlength="1024" autocomplete="off">
                 {% if can_save_password %}
                 <label><input type="checkbox" name="save_password" value="1" checked> 验证后保存到网盘</label>
                 <p class="text-muted">将在同级保存明文密码文件 {{ password_filename }}。验证较大文件可能需要等待。</p>
