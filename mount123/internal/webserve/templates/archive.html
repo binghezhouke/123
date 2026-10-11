@@ -1,5 +1,5 @@
 {{define "grid-item"}}
-<div class="file-grid-item file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="{{.FavoriteKey}}" data-favorite-member-path="{{.MemberPath}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-download="{{.Download}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}"{{end}}>
+<div class="file-grid-item file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="{{.FavoriteKey}}" data-favorite-member-path="{{.MemberPath}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-download="{{.Download}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-name="{{.Name}}" data-url="{{.Href}}"{{end}}>
     <a class="favorite-file-link" href="{{.Href}}">
         <div class="file-grid-icon {{if .IsDir}}folder{{else if .Nested}}archive{{else}}{{.Icon}}{{end}}"><i class="{{.FAIcon}}" aria-hidden="true"></i></div>
         <div class="file-grid-name">{{.Name}}{{if .IsDir}}/{{else if .Nested}}/{{end}}{{if .Encrypted}} <span class="badge bg-secondary">加密</span>{{end}}</div>
@@ -8,7 +8,7 @@
 </div>
 {{end}}
 {{define "list-item"}}
-<div class="file-list-row file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="{{.FavoriteKey}}" data-favorite-member-path="{{.MemberPath}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-download="{{.Download}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-url="{{.Href}}"{{end}}>
+<div class="file-list-row file-item" data-member-id="{{.Href}}" data-size="{{.Size}}" data-kind="{{.Kind}}" data-updated="—" data-favorite-key="{{.FavoriteKey}}" data-favorite-member-path="{{.MemberPath}}" data-favorite-name="{{.Name}}" data-favorite-url="{{.Href}}" data-download="{{.Download}}" data-file-type="{{if .IsDir}}folder{{else if .Nested}}folder{{else}}file{{end}}"{{if .IsImage}} data-gallery-image data-name="{{.Name}}" data-url="{{.Href}}"{{end}}>
     <a class="file-list-name favorite-file-link" href="{{.Href}}"><span class="file-list-icon"><i class="{{.FAIcon}}" aria-hidden="true"></i></span>{{.Name}}{{if .IsDir}}/{{else if .Nested}}/{{end}}{{if .Encrypted}} <span class="badge bg-secondary">加密</span>{{end}}</a>
     <div class="file-list-date">—</div><div class="file-list-meta">{{if .IsDir}}—{{else}}{{.Size}}{{end}}</div><div class="file-list-meta">{{.Kind}}</div>
 </div>
@@ -25,5 +25,51 @@
 {{if not .Rows}}<div class="empty-state"><div class="empty-state-icon"><i class="fas fa-folder-open"></i></div><div class="empty-state-title">文件夹为空</div><div class="empty-state-subtitle">这个压缩包目录中没有条目</div></div>{{end}}
 </div><div class="preview-resizer" id="preview-resizer"></div><aside class="preview-pane" id="preview-pane"><div class="preview-empty">选择一个文件以预览</div><div class="preview-stage" id="preview-stage" hidden></div><div class="preview-title" id="preview-title" hidden></div><div class="preview-meta" id="preview-meta" hidden></div><div class="preview-actions" id="preview-actions" hidden><button id="preview-fullscreen" class="btn btn-secondary" type="button">全屏</button><a id="preview-open" class="btn btn-primary" href="#">打开</a><a id="preview-download" class="btn btn-secondary" href="#">下载</a></div></aside></div>
 <button id="preview-debug-toggle" class="gallery-debug-toggle preview-debug-toggle" type="button" aria-expanded="false" hidden>预取调试</button><pre id="preview-debug-output" class="gallery-debug-output preview-debug-output" hidden></pre>
+<button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
+<dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="archive:{{.FileID}}:{{.Prefix}}">
+    <div id="zip-gallery-fs-bar" class="gallery-fs-bar" hidden>
+        <button id="zip-gallery-fs-prev" class="btn" type="button" aria-label="上一张">←</button>
+        <span id="zip-gallery-fs-counter">1 / 1</span>
+        <button id="zip-gallery-fs-next" class="btn" type="button" aria-label="下一张">→</button>
+        <span class="gallery-fs-divider" aria-hidden="true"></span>
+        <button id="zip-gallery-fs-exit" class="btn" type="button">退出全屏</button>
+        <button id="zip-gallery-fs-close" class="btn" type="button">关闭</button>
+    </div>
+    <div class="zip-gallery-toolbar">
+        <h2 id="zip-gallery-title">图片预览</h2><span id="zip-gallery-counter"></span>
+        <a id="zip-gallery-download" class="btn btn-secondary">下载原图</a>
+        <button id="zip-gallery-fullscreen" class="btn btn-secondary" type="button" aria-pressed="false">全屏</button>
+        <button id="zip-gallery-close" class="btn btn-secondary" type="button">关闭 Esc</button>
+    </div>
+    <div class="zip-gallery-zoom" role="group" aria-label="图片缩放">
+        <button id="zip-gallery-zoom-out" class="btn btn-secondary" type="button" aria-label="缩小图片" disabled>−</button><span id="zip-gallery-zoom-level">100%</span>
+        <button id="zip-gallery-zoom-in" class="btn btn-secondary" type="button" aria-label="放大图片" disabled>＋</button>
+        <button id="zip-gallery-zoom-reset" class="btn btn-secondary" type="button" disabled>适应窗口</button>
+        <button id="zip-gallery-original" class="btn btn-secondary" type="button">原始尺寸 1:1</button>
+        <button id="zip-gallery-rotate" class="btn btn-secondary" type="button">旋转 90°</button>
+    </div>
+    <div id="zip-gallery-stage"></div>
+    <p id="zip-gallery-status" role="status" aria-live="polite"></p>
+    <div class="zip-gallery-toolbar gallery-controls">
+        <button id="zip-gallery-prev" class="btn btn-secondary" type="button">← 上一张</button><button id="zip-gallery-retry" class="btn btn-secondary" type="button" hidden>重试</button><button id="zip-gallery-next" class="btn btn-secondary" type="button">下一张 →</button>
+        <button id="zip-gallery-thumb-toggle" class="btn btn-secondary" type="button" aria-expanded="false">缩略图</button>
+        <form id="zip-gallery-jump-form"><label for="zip-gallery-jump-input">序号</label><input id="zip-gallery-jump-input" type="number" min="1" step="1" required><button class="btn btn-secondary" type="submit">跳转</button></form>
+    </div>
+    <p id="zip-gallery-jump-message" role="status"></p>
+    <div id="zip-gallery-thumbs" class="gallery-thumbs" hidden></div>
+    <div id="zip-gallery-index" hidden></div>
+    <details id="zip-gallery-settings"><summary>预取设置</summary><form id="zip-gallery-settings-form">
+        <label>预取数量 <input id="zip-gallery-setting-count" type="number" min="0" max="50" value="9"> 张</label>
+        <label>后台并发 <input id="zip-gallery-setting-concurrency" type="number" min="1" max="12" value="9"> 个</label>
+        <label>缓存数量 <input id="zip-gallery-setting-budget" type="number" min="1" max="200" value="30"> 张</label>
+        <button class="btn btn-secondary" type="submit">保存</button><button id="zip-gallery-settings-reset" class="btn btn-secondary" type="button">恢复默认</button>
+    </form></details>
+    <details id="zip-gallery-diagnostics"><summary>预取与缓存诊断</summary><p id="zip-gallery-diagnostics-output"></p><button id="zip-gallery-diagnostics-reset" class="btn btn-secondary" type="button">重置统计</button></details>
+    <button id="zip-gallery-debug-toggle" class="gallery-debug-toggle" type="button" aria-expanded="false">调试</button>
+    <pre id="zip-gallery-debug-output" class="gallery-debug-output" hidden></pre>
+</dialog>
+<script src="/static/js/vendor/panzoom/panzoom.min.js?v={{.Version}}" defer></script>
+<script src="/static/js/image_viewport.js?v={{.Version}}" defer></script>
+<script src="/static/js/zip_gallery.js?v={{.Version}}" defer></script>
 <script src="/static/js/viewport_images.js?v={{.Version}}"></script><script src="/static/js/archive_browser.js?v={{.Version}}"></script>
 {{end}}
