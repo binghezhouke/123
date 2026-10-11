@@ -158,7 +158,7 @@ func (n *Node) UnlockArchives(ctx context.Context, value string, password []byte
 		state := "saved"
 		reason := ""
 		for _, f := range directory.files {
-			if f.Name == panapi.SharedPasswordFileName && !f.IsDir {
+			if isSharedPasswordName(f.Name) && !f.IsDir {
 				if !options.Overwrite {
 					state = "skipped_existing"
 					summary.Skipped = 1

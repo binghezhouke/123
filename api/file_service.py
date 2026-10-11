@@ -731,7 +731,7 @@ class FileService:
     def save_shared_password(self, parent_id: int, password: str, *, overwrite=False) -> Dict[str, Any]:
         """Save the directory-wide password file used by mount123.
 
-        The hidden ``.mount123.pwd`` is resolved by the mount in the archive's
+        The hidden ``.mount123.pwd`` (and legacy ``.123mount.pwd``) is resolved by the mount in the archive's
         directory and, when enabled there, its parent directories. This
         operation deliberately skips archive validation: it is intended for a
         directory whose archives are known to share a password.
@@ -753,13 +753,14 @@ class FileService:
                     _is_trashed({"trashed": directory.trashed})):
                 raise ValidationError("parent_id 必须指向有效目录")
         siblings, _ = self.list_files(parent_id=parent_id, auto_fetch_all=True, use_cache=False)
-        matches = [item for item in siblings if item.filename == ".mount123.pwd"]
+        matches = [item for item in siblings
+                   if item.filename in (".mount123.pwd", ".123mount.pwd")]
         if any(item.is_folder for item in matches):
             raise ValidationError("同名共享密码路径是目录，拒绝覆盖")
         if len(matches) > 1:
             raise ValidationError("同目录存在多个共享密码文件，拒绝覆盖")
         if matches and not overwrite:
-            return {"skipped": True, "filename": ".mount123.pwd", "fileID": matches[0].file_id}
+            return {"skipped": True, "filename": matches[0].filename, "fileID": matches[0].file_id}
 
         fd, temp_path = tempfile.mkstemp(prefix="pan123-shared-password-")
         try:
@@ -789,7 +790,7 @@ class FileService:
             raise ValidationError("parent_id 必须是非负整数")
         siblings, _ = self.list_files(parent_id=parent_id, auto_fetch_all=True, use_cache=False)
         matches = [item for item in siblings
-                   if item.filename == ".mount123.pwd" and not item.is_folder]
+                   if item.filename in (".mount123.pwd", ".123mount.pwd") and not item.is_folder]
         if not matches:
             return None
         if len(matches) > 1:

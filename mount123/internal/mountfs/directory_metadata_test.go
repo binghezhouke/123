@@ -143,6 +143,17 @@ func TestArchivePasswordFindsNearestAncestorSharedPassword(t *testing.T) {
 	}
 }
 
+func TestArchivePasswordAcceptsLegacySharedPasswordName(t *testing.T) {
+	api := &recursivePasswordAPI{lists: map[int64][]panapi.File{
+		0: {{ID: 123, ParentID: 0, Name: ".123mount.pwd", Size: 6, Version: "shared-v1"}},
+	}, details: map[int64]panapi.File{}}
+	root := NewWithOptions(context.Background(), api, nil, 0, true, Options{})
+	pw, err := root.tree.archivePassword(context.Background(), &archiveDescriptor{id: 70, parentID: 0, name: "archive.7z", version: "a", size: 10})
+	if err != nil || string(pw) != "secret" {
+		t.Fatalf("password=%q err=%v", pw, err)
+	}
+}
+
 type recursivePasswordAPI struct {
 	lists   map[int64][]panapi.File
 	details map[int64]panapi.File
