@@ -20,11 +20,6 @@
         if (['txt', 'md', 'log', 'json', 'csv'].includes(ext)) return 'text';
         return 'file';
     };
-    const items = () => [...document.querySelectorAll('.file-item')].filter(item => {
-        const view = item.closest('#fileContainer, #fileListView');
-        return !view || getComputedStyle(view).display !== 'none';
-    });
-    const selected = () => items().find(item => item.classList.contains('keyboard-selected') || item.classList.contains('is-selected'));
     const icon = (name, color) => {
         const node = document.createElement('i');
         node.className = name;
@@ -105,14 +100,9 @@
         show(item);
         if (item.dataset.fileType !== 'folder') event.preventDefault();
     }, true);
-    document.addEventListener('keydown', event => {
-        if (event.target.matches('input, textarea, select')) return;
-        const list = items(); if (!list.length) return;
-        const current = selected(), index = current ? list.indexOf(current) : -1;
-        let next = index;
-        if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = Math.min(list.length - 1, Math.max(0, index) + 1);
-        if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') next = Math.max(0, (index < 0 ? 0 : index) - 1);
-        if (next !== index && next >= 0) { event.preventDefault(); show(list[next]); list[next].scrollIntoView({block: 'nearest'}); }
+    document.addEventListener('file:keyboard-selected', event => {
+        const item = event.detail?.item;
+        if (item?.closest('.browse-files')) show(item);
     });
     document.getElementById('preview-fullscreen')?.addEventListener('click', () => {
         if (document.fullscreenElement) document.exitFullscreen(); else pane.requestFullscreen?.();

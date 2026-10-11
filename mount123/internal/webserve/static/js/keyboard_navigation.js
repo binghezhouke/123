@@ -77,7 +77,8 @@
         if (isTyping(event.target) || event.defaultPrevented) return;
         const items = visibleItems();
         if (!items.length) return;
-        const current = event.target.closest?.('.file-item') || document.querySelector('.file-item.keyboard-selected');
+        const focused = event.target.closest?.('.file-item');
+        const current = items.includes(focused) ? focused : items.find(item => item.classList.contains('keyboard-selected'));
         if (!current) {
             if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
             const nearest = nearestToAnchor(items, blankAnchor);
