@@ -289,6 +289,7 @@ document.addEventListener('DOMContentLoaded', function () {
     const previewCache = new Map();
     const previewPending = new Map();
     const previewFailed = new Map();
+    const previewAttempted = new Set();
     const previewDebugToggle = document.getElementById('preview-debug-toggle');
     const previewDebugOutput = document.getElementById('preview-debug-output');
     const PREVIEW_PREFETCH_COUNT = 9;
@@ -316,6 +317,7 @@ document.addEventListener('DOMContentLoaded', function () {
             if (previewCache.has(key)) return '缓存';
             if (previewPending.has(key)) return '请求中';
             if (previewFailed.has(key)) return `失败(${previewFailed.get(key)})`;
+            if (previewAttempted.has(key)) return '已发起';
             return '待调度';
         };
         const mode = item => item?.dataset.directUrl ? '直链' : '代理';
@@ -351,6 +353,7 @@ document.addEventListener('DOMContentLoaded', function () {
         const fallback = item.dataset.url || '';
         const image = new Image();
         const request = {image, url: direct || fallback};
+        previewAttempted.add(key);
         previewPending.set(key, request);
         const finish = url => {
             const old = previewCache.get(key);
@@ -408,6 +411,7 @@ document.addEventListener('DOMContentLoaded', function () {
         previewSelectedId = previewIdentity(item);
         // Selecting a failed item explicitly gives it one fresh attempt.
         previewFailed.delete(previewSelectedId);
+        previewAttempted.delete(previewSelectedId);
         let resolution = '';
         const renderMeta = () => {
             metaEl.hidden = false;
