@@ -8,12 +8,26 @@
         const active = list && getComputedStyle(list).display !== 'none' ? list : grid;
         return [...(active?.querySelectorAll('.file-item') || [])];
     };
+    let blankAnchor = null;
+    const clearMark = () => document.querySelectorAll('.file-item.keyboard-selected').forEach(node => {
+        node.classList.remove('keyboard-selected');
+        node.removeAttribute('aria-selected');
+    });
+    const nearestToAnchor = (items, anchor) => {
+        if (!items.length) return null;
+        if (!anchor) return items[0];
+        return items.reduce((nearest, item) => {
+            const rect = item.getBoundingClientRect();
+            const dx = rect.left + rect.width / 2 - anchor.x;
+            const dy = rect.top + rect.height / 2 - anchor.y;
+            const distance = dx * dx + dy * dy;
+            if (!nearest || distance < nearest.distance) return {item, distance};
+            return nearest;
+        }, null)?.item || items[0];
+    };
     const mark = (item, announce = false) => {
         if (!item) return;
-        document.querySelectorAll('.file-item.keyboard-selected').forEach(node => {
-            node.classList.remove('keyboard-selected');
-            node.removeAttribute('aria-selected');
-        });
+        clearMark();
         item.classList.add('keyboard-selected');
         item.setAttribute('aria-selected', 'true');
         item.focus({preventScroll: true});
@@ -47,14 +61,32 @@
     document.addEventListener('files:appended', prepare);
     document.addEventListener('click', event => {
         const item = event.target.closest?.('.file-item');
-        if (item && !isTyping(event.target)) mark(item);
+        if (item && !isTyping(event.target)) {
+            blankAnchor = null;
+            mark(item);
+            return;
+        }
+        if (isTyping(event.target)) return;
+        const pane = event.target.closest?.('#fileContainer, #fileListView');
+        if (pane && getComputedStyle(pane).display !== 'none') {
+            blankAnchor = {x: event.clientX, y: event.clientY};
+            clearMark();
+        }
     }, true);
     document.addEventListener('keydown', event => {
         if (isTyping(event.target) || event.defaultPrevented) return;
         const items = visibleItems();
         if (!items.length) return;
         const current = event.target.closest?.('.file-item') || document.querySelector('.file-item.keyboard-selected');
-        if (!current) return;
+        if (!current) {
+            if (!['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+            const nearest = nearestToAnchor(items, blankAnchor);
+            if (!nearest) return;
+            blankAnchor = null;
+            mark(nearest, true);
+            event.preventDefault();
+            return;
+        }
         const index = items.indexOf(current);
         if (index < 0) return;
         let next = index;
