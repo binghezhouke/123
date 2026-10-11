@@ -25,6 +25,12 @@
 .file-grid-item:hover {
     background: rgba(0, 0, 0, 0.045);
 }
+.file-item.keyboard-selected,
+.file-item:focus-visible {
+    outline: 2px solid #5b8edb;
+    outline-offset: -2px;
+    background: #edf3ff;
+}
 
 .file-grid-icon {
     width: 52px;
