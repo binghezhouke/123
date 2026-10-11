@@ -79,6 +79,15 @@
 <script src="/static/js/app.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function () {
+    // Keep breadcrumbs in the Finder toolbar so directory content gets the
+    // full vertical viewport. Detail and browse pages share this navigation.
+    const toolbarLeft = document.querySelector('.finder-toolbar .toolbar-left');
+    const location = toolbarLeft?.querySelector('.toolbar-location');
+    document.querySelectorAll('.browser-path').forEach(function (path) {
+        if (!toolbarLeft || path.closest('.finder-toolbar')) return;
+        path.classList.add('toolbar-breadcrumbs');
+        toolbarLeft.insertBefore(path, location || null);
+    });
     const savedView = localStorage.getItem('finderViewMode');
     if (savedView && typeof switchView === 'function') switchView(savedView);
     updateStatusBar();

@@ -316,6 +316,35 @@
     overflow: hidden;
 }
 
+/* Breadcrumbs live in the toolbar to avoid spending a separate row above the
+   directory heading. */
+.toolbar-breadcrumbs {
+    display: block;
+    flex: 0 1 auto;
+    min-width: 0;
+    max-width: min(48vw, 620px);
+    padding: 0;
+    margin: 0 4px 0 8px;
+    border: 0;
+    background: transparent;
+    overflow: hidden;
+}
+.toolbar-breadcrumbs .path-bar {
+    max-width: 100%;
+    padding: 0;
+    gap: 7px;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+.toolbar-breadcrumbs .path-bar::-webkit-scrollbar { display: none; }
+.toolbar-breadcrumbs .path-item { font-size: 12px; }
+.toolbar-breadcrumbs .path-separator { font-size: 9px; color: #aab2bf; }
+body:has(.toolbar-breadcrumbs) .toolbar-location { display: none; }
+
+@media (max-width: 600px) {
+    .toolbar-breadcrumbs { max-width: calc(100vw - 150px); margin-left: 4px; }
+}
+
 /* Row numbers stay out of the way until a row is hovered, keeping the
    layout quiet while still showing position on demand. */
 .file-grid > .file-grid-item::before,
