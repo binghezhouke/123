@@ -784,17 +784,32 @@ class FileService:
                 pass
 
     def get_shared_password(self, parent_id: int) -> Optional[str]:
-        """Read the current directory's shared password for the web UI."""
+        """Read the nearest shared password, walking from a directory to root."""
         if not isinstance(parent_id, int) or isinstance(parent_id, bool) or parent_id < 0:
             raise ValidationError("parent_id 必须是非负整数")
-        siblings, _ = self.list_files(parent_id=parent_id, auto_fetch_all=True, use_cache=False)
-        matches = [item for item in siblings
-                   if item.filename == ".mount123.pwd" and not item.is_folder]
-        if not matches:
-            return None
-        if len(matches) > 1:
-            raise ValidationError("同目录存在多个共享密码文件，拒绝读取")
-        link = self.get_final_download_url(matches[0].file_id, prefer_webdav=False, use_cache=False)
+        seen = set()
+        current_id = parent_id
+        for _ in range(128):
+            if current_id in seen:
+                raise ValidationError("目录父级关系存在循环")
+            seen.add(current_id)
+            siblings, _ = self.list_files(parent_id=current_id, auto_fetch_all=True, use_cache=False)
+            matches = [item for item in siblings
+                       if item.filename == ".mount123.pwd" and not item.is_folder]
+            if len(matches) > 1:
+                raise ValidationError("同目录存在多个共享密码文件，拒绝读取")
+            if matches:
+                return self._read_shared_password_file(matches[0].file_id)
+            if current_id == 0:
+                return None
+            directory = self.get_file_detail(current_id)
+            if directory is None or directory.parent_file_id in (None, current_id):
+                return None
+            current_id = directory.parent_file_id
+        raise ValidationError("目录层级超过 128，拒绝继续查找共享密码")
+
+    def _read_shared_password_file(self, file_id: int) -> str:
+        link = self.get_final_download_url(file_id, prefer_webdav=False, use_cache=False)
         if not link:
             raise FileUploadError("无法获取共享密码文件下载地址")
         import requests

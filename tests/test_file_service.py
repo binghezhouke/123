@@ -134,6 +134,28 @@ def test_shared_password_skips_existing_sidecar_unless_overwriting(service, monk
     assert result == {"skipped": True, "filename": ".mount123.pwd", "fileID": 90}
 
 
+def test_shared_password_walks_to_nearest_parent(service, monkeypatch):
+    parent = File({"fileId": 3, "parentFileId": 0, "filename": "parent", "type": 1})
+    current = File({"fileId": 8, "parentFileId": 3, "filename": "child", "type": 1})
+    sidecar = make_file(90, ".mount123.pwd", parent_id=3)
+    calls = []
+    monkeypatch.setattr(service, "list_files", lambda **kwargs: (
+        (FileList([]), -1) if kwargs["parent_id"] == 8 else (FileList([sidecar]), -1)))
+    monkeypatch.setattr(service, "get_file_detail", lambda file_id: current if file_id == 8 else parent)
+    monkeypatch.setattr(service, "get_final_download_url", lambda *args, **kwargs: "https://example.test/pwd")
+
+    class Response:
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def raise_for_status(self): pass
+        def iter_content(self, chunk_size): return [b"shared-password"]
+        def close(self): calls.append("closed")
+
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs: Response())
+    assert service.get_shared_password(8) == "shared-password"
+    assert calls == ["closed"]
+
+
 @pytest.mark.parametrize("name,sidecar", [("archive.zip", "archive.zip.pwd"),
     ("archive.7z", "archive.7z.pwd"), ("archive.rar", "archive.rar.pwd"),
     ("archive.7z.001", "archive.7z.pwd"), ("archive.7z.002", "archive.7z.pwd")])
