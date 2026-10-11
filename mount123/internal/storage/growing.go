@@ -284,6 +284,18 @@ func (f *growingFlight) release() {
 
 func (h *GrowingHandle) Size() int64 { return h.size }
 
+// Done closes when the producer has stopped and completed publication or
+// failure cleanup. Unlike a read wait it survives handle Close, allowing the
+// owner of a producer's source to release it safely after cancellation.
+func (h *GrowingHandle) Done() <-chan struct{} {
+	if h.ready == nil {
+		return h.flight.done
+	}
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
 // Materialized reports whether this handle refers to a completely validated
 // cache object. A growing prefix remains false until fill, validation and
 // publication all succeed.

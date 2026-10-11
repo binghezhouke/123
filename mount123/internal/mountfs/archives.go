@@ -601,7 +601,7 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	if growing, err := n.acquireGrowingMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+	if growing, err := n.tree.acquireGrowingMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
 		streamPassword, err := t.decryptPassword(key, protected)
 		if err != nil {
 			return err

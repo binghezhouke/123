@@ -113,11 +113,22 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 
 func (s *Service) openNestedMember(ctx context.Context, na *nestedArchive, m *member) (io.ReaderAt, int64, error) {
 	key := na.cachePrefix + ":" + m.name + fmt.Sprintf(":%d:%08x", m.size, m.crc)
-	handle, err := s.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
+	handle, err := s.acquireMemberReader(ctx, key, int64(m.size), m.format == ".zip", func(fillCtx context.Context, w io.Writer) error {
 		return archiveReadError(fillCtx, extractArchiveMember(fillCtx, na.reader, na.size, m, na.password, w), na.password)
 	})
 	if err != nil {
+		_ = na.Close()
 		return nil, 0, err
+	}
+	if growing, ok := handle.(*serviceGrowingReader); ok {
+		// The producer still owns these nested readers after this request
+		// returns or closes its handle. Release only after the fill stops.
+		go func() {
+			<-growing.handle.Done()
+			_ = na.Close()
+		}()
+	} else {
+		_ = na.Close()
 	}
 	return handle, int64(m.size), nil
 }

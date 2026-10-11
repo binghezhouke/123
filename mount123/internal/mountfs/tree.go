@@ -1308,7 +1308,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		tag := n.tree.passwordTag(n.item.archive, password)
 		key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
 		streamPassword := append([]byte(nil), password...)
-		if growing, err := n.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+		if growing, err := n.tree.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
 			defer clear(streamPassword)
 			release, err := n.tree.acquireBuild(fillCtx)
 			if err != nil {
@@ -1362,7 +1362,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		return n.newRemoteHandle(src, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
 	}
 	key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:member:" + m.name + fmt.Sprintf(":%08x:%d", m.crc, m.size)
-	if growing, err := n.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+	if growing, err := n.tree.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(fillCtx)
 		if err != nil {
 			return err
@@ -1421,18 +1421,18 @@ func (n *Node) newRemoteHandle(remote *storage.Remote, base int64, size uint64) 
 
 // acquireGrowingMember returns nil when strict full-member verification should
 // be preserved (small members or a strict-read mount).
-func (n *Node) acquireGrowingMember(ctx context.Context, key string, size uint64, fill func(context.Context, io.Writer) error) (*storage.GrowingHandle, error) {
-	if size > math.MaxInt64 || n.tree.opts.DisableStreamMembers || int64(size) < n.tree.opts.StreamMemberThreshold {
+func (t *Tree) acquireGrowingMember(ctx context.Context, key string, size uint64, fill func(context.Context, io.Writer) error) (*storage.GrowingHandle, error) {
+	if size > math.MaxInt64 || t.opts.DisableStreamMembers || int64(size) < t.opts.StreamMemberThreshold {
 		return nil, nil
 	}
-	lifetime := n.tree.ctx
+	lifetime := t.ctx
 	if lifetime == nil {
 		lifetime = context.Background()
 	}
 	if workqueue.IsBackground(ctx) {
 		lifetime = workqueue.Background(lifetime)
 	}
-	h, err := n.tree.cache.AcquireGrowing(ctx, lifetime, key, int64(size), fill)
+	h, err := t.cache.AcquireGrowing(ctx, lifetime, key, int64(size), fill)
 	return h, err
 }
 
@@ -1441,28 +1441,28 @@ func (n *Node) acquireGrowingMember(ctx context.Context, key string, size uint64
 // limits prevent an abandoned video seek from occupying the whole cache or
 // running indefinitely. Other archive formats deliberately use the strict
 // AcquireGrowing lifecycle above.
-func (n *Node) acquireGrowingZIPMember(ctx context.Context, key string, size uint64, fill func(context.Context, io.Writer) error) (*storage.GrowingHandle, error) {
-	if size > math.MaxInt64 || n.tree.opts.DisableStreamMembers || int64(size) < n.tree.opts.StreamMemberThreshold || int64(size) > n.tree.opts.ZIPRetainedMemberMaxBytes {
+func (t *Tree) acquireGrowingZIPMember(ctx context.Context, key string, size uint64, fill func(context.Context, io.Writer) error) (*storage.GrowingHandle, error) {
+	if size > math.MaxInt64 || t.opts.DisableStreamMembers || int64(size) < t.opts.StreamMemberThreshold || int64(size) > t.opts.ZIPRetainedMemberMaxBytes {
 		return nil, nil
 	}
-	if n.tree.cache == nil || n.tree.cache.Capacity() <= 0 {
+	if t.cache == nil || t.cache.Capacity() <= 0 {
 		return nil, nil
 	}
-	maxRetained := n.tree.opts.ZIPRetainedMemberMaxBytes
-	if capacity := n.tree.cache.Capacity(); maxRetained > capacity {
+	maxRetained := t.opts.ZIPRetainedMemberMaxBytes
+	if capacity := t.cache.Capacity(); maxRetained > capacity {
 		maxRetained = capacity
 	}
 	if int64(size) > maxRetained {
 		return nil, nil
 	}
-	lifetime := n.tree.ctx
+	lifetime := t.ctx
 	if lifetime == nil {
 		lifetime = context.Background()
 	}
 	if workqueue.IsBackground(ctx) {
 		lifetime = workqueue.Background(lifetime)
 	}
-	if ttl := n.tree.opts.ZIPRetainedMemberTTL; ttl > 0 {
+	if ttl := t.opts.ZIPRetainedMemberTTL; ttl > 0 {
 		// Keep the retained fill bounded without discarding a context cancel
 		// function. The timer owns cancellation because the growing-cache API
 		// intentionally retains this context after the initiating handle closes.
@@ -1470,7 +1470,7 @@ func (n *Node) acquireGrowingZIPMember(ctx context.Context, key string, size uin
 		time.AfterFunc(ttl, cancel)
 		lifetime = retained
 	}
-	h, err := n.tree.cache.AcquireGrowingRetained(ctx, lifetime, key, int64(size), fill)
+	h, err := t.cache.AcquireGrowingRetained(ctx, lifetime, key, int64(size), fill)
 	return h, err
 }
 

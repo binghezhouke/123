@@ -12,7 +12,7 @@ import (
 	"github.com/bodgit/sevenzip"
 )
 
-const nestedMemberBlockBytes int64 = 256 << 10
+const nestedMemberBlockBytes int64 = 1 << 20
 
 // nestedMemberReader persists only demanded decompressed blocks. The live
 // decoder and position form a forward continuation point; no codec snapshot is
@@ -35,7 +35,7 @@ type nestedMemberReader struct {
 }
 
 func (t *Tree) newNestedMemberReader(ctx context.Context, source *storage.Remote, a *archiveDescriptor, identity string, m *member, password []byte) (*nestedMemberReader, error) {
-	key := t.diskCacheScope() + ":" + identity + fmt.Sprintf(":nested-range-v1:%q:%d:%08x:", m.name, m.size, m.crc) + t.passwordTag(a, password)
+	key := t.diskCacheScope() + ":" + identity + fmt.Sprintf(":nested-range-v2:%q:%d:%08x:", m.name, m.size, m.crc) + t.passwordTag(a, password)
 	protected, err := t.encryptPassword(key, password)
 	if err != nil {
 		return nil, err

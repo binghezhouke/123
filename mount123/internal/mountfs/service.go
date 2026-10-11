@@ -222,7 +222,8 @@ func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath stri
 }
 
 // OpenArchiveMember returns a random-access reader over one archive member and
-// its size. Members are materialized through the shared disk cache; large
+// its size. Callers must close readers implementing io.Closer. Large members
+// stream through the shared growing cache;
 // plain ZIP Store members map directly onto the remote file instead.
 func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPath string) (io.ReaderAt, int64, error) {
 	idx, archive, source, password, err := s.outerArchiveIndex(ctx, fileID)
@@ -240,11 +241,11 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 			if nestedErr != nil {
 				return nil, 0, nestedErr
 			}
-			defer nested.Close()
 			nested.index.mu.RLock()
 			inner := nested.index.members[rest]
 			nested.index.mu.RUnlock()
 			if inner == nil {
+				_ = nested.Close()
 				return nil, 0, syscall.ENOENT
 			}
 			return s.openNestedMember(ctx, nested, inner)
@@ -268,10 +269,13 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 		return nil, 0, err
 	}
 	key := s.tree.diskCacheScope() + ":" + identity + ":" + kind + ":archive-member:" + memberPath + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + s.tree.passwordTag(archive, password)
-	handle, err := s.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
-		fillErr := s.tree.extractOtherMember(fillCtx, source, archive, m, password, w)
-		return fillErr
+	fill, err := s.memberFillWithPassword(key, password, func(fillCtx context.Context, w io.Writer, pw []byte) error {
+		return s.tree.extractOtherMember(fillCtx, source, archive, m, pw, w)
 	})
+	if err != nil {
+		return nil, 0, err
+	}
+	handle, err := s.acquireMemberReader(ctx, key, int64(m.size), false, fill)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -299,17 +303,21 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 		}
 		defer clear(password)
 		key := s.tree.diskCacheScope() + ":" + source.Key() + ":.zip:encrypted-member:" + memberPath + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, s.tree.passwordTag(archive, password))
-		handle, err := s.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
+		fill, err := s.memberFillWithPassword(key, password, func(fillCtx context.Context, w io.Writer, pw []byte) error {
 			release, releaseErr := s.tree.acquireBuild(fillCtx)
 			if releaseErr != nil {
 				return releaseErr
 			}
 			defer release()
 			started := time.Now()
-			fillErr := encryptedMember(fillCtx, source, m, password, w)
+			fillErr := encryptedMember(fillCtx, source, m, pw, w)
 			s.tree.observeStage(iostats.StageDecompression, started)
 			return fillErr
 		})
+		if err != nil {
+			return nil, 0, err
+		}
+		handle, err := s.acquireMemberReader(ctx, key, int64(m.size), false, fill)
 		if err != nil {
 			if isPasswordError(err) {
 				return nil, 0, syscall.EACCES
@@ -329,7 +337,7 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 		return nil, 0, syscall.EOPNOTSUPP
 	}
 	key := s.tree.diskCacheScope() + ":" + source.Key() + ":.zip:member:" + memberPath + fmt.Sprintf(":%08x:%d", m.crc, m.size)
-	handle, err := s.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
+	handle, err := s.acquireMemberReader(ctx, key, int64(m.size), true, func(fillCtx context.Context, w io.Writer) error {
 		release, releaseErr := s.tree.acquireBuild(fillCtx)
 		if releaseErr != nil {
 			return releaseErr

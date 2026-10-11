@@ -173,6 +173,9 @@ func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "读取成员失败："+err.Error(), http.StatusBadRequest)
 		return
 	}
+	if closer, ok := reader.(io.Closer); ok {
+		defer closer.Close()
+	}
 	section := io.NewSectionReader(reader, 0, size)
 	base := path.Base(memberPath)
 	suffix := strings.ToLower(path.Ext(base))
