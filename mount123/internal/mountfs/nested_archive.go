@@ -10,7 +10,6 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"io"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -369,133 +368,26 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 	if archive == nil {
 		return e, nil
 	}
-	if err := defaultNestedArchivePolicy.allow(1, int64(e.member.size)); err != nil {
-		return nil, err
-	}
 	source := n.item.source
 	if source == nil {
 		source = e.source
 	}
-	if source == nil {
+	if source == nil || n.tree.cache == nil {
 		return e, nil
 	}
-	reader, size, identity, err := n.tree.archiveSource(ctx, source, archive)
+	na, err := n.tree.buildNestedArchive(ctx, source, archive, nil, e.member.name, e.member)
 	if err != nil {
 		return nil, err
 	}
-	password, err := n.tree.otherPassword(ctx, archive)
-	if err != nil {
-		return nil, err
-	}
-	defer clear(password)
-	// An inner archive may carry its own sidecar. If it does not, reusing the
-	// outer password also covers the common case where a directory shares one
-	// password across all archives.
-	innerArchive := &archiveDescriptor{id: archive.id, parentID: archive.parentID, name: e.member.name, version: archive.version, size: int64(e.member.size), format: kind}
-	if candidate, candidateErr := n.tree.otherPassword(ctx, innerArchive); candidateErr == nil && len(candidate) > 0 {
-		clear(password)
-		password = candidate
-	} else {
-		clear(candidate)
-	}
-	if n.tree.cache == nil {
-		return nil, syscall.EIO
-	}
-	parts := []*member{e.member}
-	partNames := []string{e.member.name}
-	partSize := int64(0)
-	if strings.HasSuffix(strings.ToLower(e.member.name), ".7z.001") {
-		outer, outerErr := n.tree.otherIndex(ctx, source, archive, password)
-		if outerErr != nil {
-			return nil, outerErr
-		}
-		stem := e.member.name[:len(e.member.name)-4]
-		for name, candidate := range outer.members {
-			if !strings.HasPrefix(name, stem+".") || len(name) != len(stem)+4 || name[len(name)-3:] < "002" {
-				continue
-			}
-			partNames = append(partNames, name)
-			parts = append(parts, candidate)
-		}
-		order := make([]int, len(partNames))
-		for i := range order {
-			order[i] = i
-		}
-		sort.Slice(order, func(i, j int) bool { return partNames[order[i]] < partNames[order[j]] })
-		sortedParts := make([]*member, len(parts))
-		sortedNames := make([]string, len(parts))
-		for i, j := range order {
-			sortedParts[i], sortedNames[i] = parts[j], partNames[j]
-		}
-		parts, partNames = sortedParts, sortedNames
-		for i, name := range partNames {
-			want := fmt.Sprintf("%s.%03d", stem, i+1)
-			if name != want {
-				return nil, syscall.EIO
-			}
-		}
-	}
-	readers := make([]io.ReaderAt, 0, len(parts))
-	lazyReaders := make([]*nestedMemberReader, 0, len(parts))
-	sizes := make([]int64, 0, len(parts))
-	for _, part := range parts {
-		if direct, ok, directErr := nestedCopyMemberReader(reader, size, part, part.ordinal, password); directErr != nil {
-			return nil, directErr
-		} else if ok {
-			readers = append(readers, direct)
-			sizes = append(sizes, int64(part.size))
-			partSize += int64(part.size)
-			continue
-		}
-		lr, err := n.tree.newNestedMemberReader(n.tree.ctx, source, archive, identity, part, password)
-		if err != nil {
-			for _, r := range lazyReaders {
-				_ = r.Close()
-			}
-			return nil, err
-		}
-		lazyReaders = append(lazyReaders, lr)
-		readers = append(readers, lr)
-		sizes = append(sizes, int64(part.size))
-		partSize += int64(part.size)
-	}
-	var cached io.ReaderAt = readers[0]
-	if len(readers) > 1 {
-		cached = &nestedConcatReader{parts: readers, sizes: sizes, total: partSize}
-	}
-	innerPassword := append([]byte(nil), password...)
-	var innerMembers []archiveMember
-	if kind == ".rar" {
-		innerMembers, err = indexNestedRAR(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
-	} else {
-		innerMembers, err = indexNested7z(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
-	}
-	clear(innerPassword)
-	if err != nil {
-		for _, r := range lazyReaders {
-			_ = r.Close()
-		}
-		return nil, err
-	}
-	idx, err := nestedIndexFromMembers(innerMembers, defaultNestedArchivePolicy)
-	if err != nil {
-		for _, r := range lazyReaders {
-			_ = r.Close()
-		}
-		return nil, err
-	}
-	na := &nestedArchive{reader: cached, size: partSize, format: kind, index: idx, password: append([]byte(nil), password...), cachePrefix: n.tree.diskCacheScope() + ":" + identity + ":nested-content:" + n.tree.passwordTag(archive, password)}
-	na.lazyReaders = lazyReaders
 	// Nodes are owned by the FUSE inode tree and may not receive a Go-level
-	// release callback. Keep the handles pinned while the archive is reachable,
-	// then release them when the archive becomes unreachable during unmount or
-	// inode reclamation.
+	// release callback. Keep the readers alive until the archive becomes
+	// unreachable during unmount or inode reclamation.
 	runtime.SetFinalizer(na, func(a *nestedArchive) { _ = a.Close() })
 	copy := *e
 	copy.directory = true
 	copy.member = nil
 	copy.nested = na
-	copy.archiveSize = partSize
+	copy.archiveSize = na.size
 	return &copy, nil
 }
 
