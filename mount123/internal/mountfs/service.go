@@ -237,7 +237,7 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 		return nil, 0, syscall.ENOTSUP
 	}
 	if kind == ".zip" {
-		return s.openZIPMember(ctx, source, archive, memberPath)
+		return s.openZIPMember(ctx, source, archive, idx, memberPath)
 	}
 	idx.mu.RLock()
 	m := idx.members[memberPath]
@@ -260,13 +260,16 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	return handle, int64(m.size), nil
 }
 
-func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, archive *archiveDescriptor, memberPath string) (io.ReaderAt, int64, error) {
-	idx, err := s.tree.getZIP(ctx, source, archive.size, archive)
-	if err != nil {
-		return nil, 0, err
+func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, archive *archiveDescriptor, idx *zipIndex, memberPath string) (io.ReaderAt, int64, error) {
+	if idx == nil {
+		var err error
+		idx, err = s.tree.getZIP(ctx, source, archive.size, archive)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 	idx.mu.RLock()
-	m := idx.members[memberPath]
+	m := idx.displayMemberLocked(memberPath)
 	idx.mu.RUnlock()
 	if m == nil {
 		return nil, 0, syscall.ENOENT

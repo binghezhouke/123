@@ -239,6 +239,27 @@ func indexNested7z(ctx context.Context, reader io.ReaderAt, size int64, password
 	return result, nil
 }
 
+// indexNestedRAR performs the same bounded header scan for an inner RAR.
+// The reader is normally a lazy view over a compressed outer 7z member, so
+// scanning headers does not materialize the entire outer archive.
+func indexNestedRAR(ctx context.Context, reader io.ReaderAt, size int64, password []byte, policy nestedArchivePolicy) ([]archiveMember, error) {
+	if err := policy.allow(1, size); err != nil {
+		return nil, err
+	}
+	result := make([]archiveMember, 0, 128)
+	err := scanArchive(ctx, ".rar", boundedReaderAt{r: reader, size: size}, size, password, func(m archiveMember) error {
+		if len(result) >= policy.MaxMembers {
+			return syscall.EFBIG
+		}
+		result = append(result, m)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy) (*zipIndex, error) {
 	idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, complete: true, changed: make(chan struct{})}
 	for _, f := range members {
@@ -270,7 +291,11 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 			if dir.dirs[part] != nil || dir.files[part] != nil {
 				return nil, syscall.EIO
 			}
-			m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, format: ".7z", sevenStream: f.sevenStream}
+			format := ".7z"
+			if f.rarLocator != nil {
+				format = ".rar"
+			}
+			m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, format: format, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
 			dir.order = append(dir.order, part)
 			dir.files[part] = m
 			idx.members[f.name] = m
@@ -285,7 +310,7 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 		return e, nil
 	}
 	kind := archiveKind(e.member.name)
-	if kind != ".7z" {
+	if kind != ".7z" && kind != ".rar" {
 		return e, nil
 	}
 	if n.item == nil {
@@ -393,7 +418,12 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 		cached = &nestedConcatReader{parts: readers, sizes: sizes, total: partSize}
 	}
 	innerPassword := append([]byte(nil), password...)
-	innerMembers, err := indexNested7z(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
+	var innerMembers []archiveMember
+	if kind == ".rar" {
+		innerMembers, err = indexNestedRAR(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
+	} else {
+		innerMembers, err = indexNested7z(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
+	}
 	clear(innerPassword)
 	if err != nil {
 		for _, r := range lazyReaders {

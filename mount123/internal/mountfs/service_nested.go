@@ -104,11 +104,12 @@ func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipInde
 	return idx, archive, source, password, nil
 }
 
-// nestedArchiveFrom opens an archive member as a nested 7z (including split
-// .7z.001 volumes). It reuses the mount's lazy member mapping so the inner
-// archive is never fully decompressed.
+// nestedArchiveFrom opens an archive member as a nested 7z or RAR (including
+// split .7z.001 volumes). It reuses the mount's lazy member mapping so the
+// inner archive is never fully decompressed.
 func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote, outer *archiveDescriptor, idx *zipIndex, memberPath string, m *member) (*nestedArchive, error) {
-	if archiveKind(m.name) != ".7z" {
+	kind := archiveKind(m.name)
+	if kind != ".7z" && kind != ".rar" {
 		return nil, syscall.ENOTSUP
 	}
 	if err := defaultNestedArchivePolicy.allow(1, int64(m.size)); err != nil {
@@ -118,11 +119,22 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 	if err != nil {
 		return nil, err
 	}
-	password, err := s.tree.otherPassword(ctx, outer)
+	outerPassword, err := s.tree.otherPassword(ctx, outer)
 	if err != nil {
 		return nil, err
 	}
-	defer clear(password)
+	defer clear(outerPassword)
+	innerPassword := append([]byte(nil), outerPassword...)
+	defer clear(innerPassword)
+	// Prefer a sidecar belonging to the nested archive. If it is absent, the
+	// outer password remains the fallback for shared-password collections.
+	innerArchive := &archiveDescriptor{id: outer.id, parentID: outer.parentID, name: m.name, version: outer.version, size: int64(m.size), format: kind}
+	if candidate, candidateErr := s.tree.otherPassword(ctx, innerArchive); candidateErr == nil && len(candidate) > 0 {
+		clear(innerPassword)
+		innerPassword = candidate
+	} else {
+		clear(candidate)
+	}
 
 	parts := []*member{m}
 	partNames := []string{memberPath}
@@ -160,7 +172,7 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 	sizes := make([]int64, 0, len(parts))
 	partSize := int64(0)
 	for _, part := range parts {
-		if direct, ok, directErr := nestedCopyMemberReader(reader, size, part, part.ordinal, password); directErr != nil {
+		if direct, ok, directErr := nestedCopyMemberReader(reader, size, part, part.ordinal, outerPassword); directErr != nil {
 			return nil, directErr
 		} else if ok {
 			readers = append(readers, direct)
@@ -168,7 +180,7 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 			partSize += int64(part.size)
 			continue
 		}
-		lr, err := s.tree.newNestedMemberReader(ctx, source, outer, identity, part, password)
+		lr, err := s.tree.newNestedMemberReader(ctx, source, outer, identity, part, outerPassword)
 		if err != nil {
 			for _, r := range lazyReaders {
 				_ = r.Close()
@@ -184,7 +196,12 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 	if len(readers) > 1 {
 		cached = &nestedConcatReader{parts: readers, sizes: sizes, total: partSize}
 	}
-	innerMembers, err := indexNested7z(ctx, cached, partSize, password, defaultNestedArchivePolicy)
+	var innerMembers []archiveMember
+	if kind == ".rar" {
+		innerMembers, err = indexNestedRAR(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
+	} else {
+		innerMembers, err = indexNested7z(ctx, cached, partSize, innerPassword, defaultNestedArchivePolicy)
+	}
 	if err != nil {
 		for _, r := range lazyReaders {
 			_ = r.Close()
@@ -198,7 +215,7 @@ func (s *Service) nestedArchiveFrom(ctx context.Context, source *storage.Remote,
 		}
 		return nil, err
 	}
-	return &nestedArchive{reader: cached, size: partSize, format: ".7z", index: innerIndex, password: append([]byte(nil), password...), cachePrefix: s.tree.diskCacheScope() + ":" + identity + ":nested-content:" + s.tree.passwordTag(outer, password), lazyReaders: lazyReaders}, nil
+	return &nestedArchive{reader: cached, size: partSize, format: kind, index: innerIndex, password: append([]byte(nil), innerPassword...), cachePrefix: s.tree.diskCacheScope() + ":" + identity + ":nested-content:" + s.tree.passwordTag(innerArchive, innerPassword), lazyReaders: lazyReaders}, nil
 }
 
 func (s *Service) openNestedMember(ctx context.Context, na *nestedArchive, m *member) (io.ReaderAt, int64, error) {

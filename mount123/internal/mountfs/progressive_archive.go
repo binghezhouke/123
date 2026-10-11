@@ -50,6 +50,27 @@ func (z *zipIndex) dirLocked(path string) *zipDir {
 	}
 	return d
 }
+
+// displayMemberLocked resolves the decoded path exposed by directory listings.
+// ZIP members retains raw names for local-header validation and decoding.
+// The caller holds the index read lock.
+func (z *zipIndex) displayMemberLocked(path string) *member {
+	parent, name, found := strings.Cut(path, "/")
+	dir := z.root
+	for found {
+		if dir == nil {
+			return nil
+		}
+		dir = dir.dirs[parent]
+		path = name
+		parent, name, found = strings.Cut(path, "/")
+	}
+	if dir == nil {
+		return nil
+	}
+	return dir.files[path]
+}
+
 func indexEntry(d *zipDir, path, name string, source *storage.Remote, a *archiveDescriptor) *entry {
 	if d == nil {
 		return nil

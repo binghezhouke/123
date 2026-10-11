@@ -1,6 +1,7 @@
 package mountfs
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"fmt"
@@ -122,6 +123,53 @@ func TestServiceReadsNestedMember(t *testing.T) {
 	}
 }
 
+func TestServiceReadsNestedRARMember(t *testing.T) {
+	sevenzip, err := exec.LookPath("7z")
+	if err != nil {
+		t.Skip("7z fixture generator unavailable")
+	}
+	dir := t.TempDir()
+	rardata, err := os.ReadFile("../../../tests/fixtures/rar/rar5-crc.rar")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(dir, "inner.rar"), rardata, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(sevenzip, "a", "-t7z", "-m0=lzma2", "-mx=5", "outer.7z", "inner.rar")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("generate: %v %s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "outer.7z"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := newServiceNested(t, data)
+	ctx := context.Background()
+	inner, err := service.ListArchive(ctx, 77, "inner.rar")
+	if err != nil {
+		t.Fatalf("nested RAR listing: %v", err)
+	}
+	if len(inner) != 2 || inner[0].Name != "stest1.txt" {
+		t.Fatalf("nested RAR entries: %#v", inner)
+	}
+	reader, size, err := service.OpenArchiveMember(ctx, 77, "inner.rar/stest1.txt")
+	if err != nil {
+		t.Fatalf("open nested RAR member: %v", err)
+	}
+	if c, ok := reader.(io.Closer); ok {
+		defer c.Close()
+	}
+	got := make([]byte, size)
+	if _, err = reader.ReadAt(got, 0); err != nil && err != io.EOF {
+		t.Fatalf("read nested RAR member: %v", err)
+	}
+	if len(got) != 2048 {
+		t.Fatalf("nested RAR member size = %d", len(got))
+	}
+}
+
 func TestServiceNestedMissingMemberReturnsNotFound(t *testing.T) {
 	data, err := os.ReadFile("testdata/encrypted/nested-vol-outer.7z")
 	if err != nil {
@@ -185,5 +233,48 @@ func TestCompressedNestedSharedReader(t *testing.T) {
 	}
 	if nested.item.nested != nil {
 		_ = nested.item.nested.Close()
+	}
+}
+
+func TestServiceZIPDecodedMemberPath(t *testing.T) {
+	var payload bytes.Buffer
+	zw := zip.NewWriter(&payload)
+	// GBK name; both the directory and leaf differ from the raw index key.
+	raw := "\xd6\xd0\xce\xc4/  \xcd\xbc.jpg"
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: raw, NonUTF8: true, Method: zip.Deflate})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("fixture image bytes")
+	if _, err = w.Write(want); err != nil {
+		t.Fatal(err)
+	}
+	if err = zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	service := newServiceNested(t, payload.Bytes())
+	api := service.tree.api.(*serviceNestedAPI)
+	api.detail.Name = "fixture.zip"
+	api.files[0].Name = "fixture.zip"
+	rows, err := service.ListArchive(context.Background(), 77, "中文")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Name != "  图.jpg" {
+		t.Fatalf("rows: %#v", rows)
+	}
+	reader, _, err := service.OpenArchiveMember(context.Background(), 77, "中文/"+rows[0].Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c, ok := reader.(io.Closer); ok {
+		defer c.Close()
+	}
+	got := make([]byte, len(want))
+	if _, err = reader.ReadAt(got, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("wrong member bytes")
 	}
 }
