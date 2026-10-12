@@ -188,6 +188,10 @@ type entry struct {
 type member struct {
 	sevenStream      *sevenStreamLocation
 	rarLocator       *rardecode.MemberLocator
+	rarSolid         bool
+	rarGroupStart    int
+	rarGroupOffset   uint64
+	rarGroupSize     uint64
 	format           string
 	ordinal          int
 	file             *zip.File
