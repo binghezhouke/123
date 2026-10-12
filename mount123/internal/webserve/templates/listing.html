@@ -371,6 +371,10 @@ document.addEventListener('DOMContentLoaded', function () {
     document.addEventListener('click', event => {
         const item = event.target.closest('.file-item');
         if (!item) return;
+        // Archive pages replace the listing contents during partial
+        // navigation, but this document-level listener remains alive. Their
+        // members have archive URLs and no ordinary cloud file ID.
+        if (item.dataset.memberId) return;
         if (event.target.closest('.favorite-marker')) return;
         showPreview(item);
         // Files preview in place on single click; folders still navigate.
@@ -381,12 +385,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
     document.addEventListener('file:keyboard-selected', event => {
         const item = event.detail?.item || event.target.closest?.('.file-item');
-        if (item) showPreview(item);
+        if (item && !item.dataset.memberId) showPreview(item);
     });
 
     document.addEventListener('dblclick', event => {
         const item = event.target.closest('.file-item');
         if (!item || item.dataset.fileType === 'folder') return;
+        if (item.dataset.memberId) return;
         if (event.target.closest('.favorite-marker')) return;
         const id = item.dataset.fileId;
         window.location.href = `/file/${id}`;
