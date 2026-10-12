@@ -166,8 +166,56 @@ func (s *Server) GeneratedPassword() (string, bool) {
 
 // Handler returns the HTTP handler for the backend.
 func (s *Server) Handler() http.Handler {
-	return s.securityHeaders(s.mux)
+	return s.requestLog(s.securityHeaders(s.mux))
 }
+
+// requestLog records slow interactive requests so archive/index stalls can be
+// diagnosed from the service log without asking the operator to reproduce the
+// URL. Static assets and health checks are intentionally omitted.
+func (s *Server) requestLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		started := time.Now()
+		rw := &requestLogWriter{ResponseWriter: w}
+		s.logger.Printf("web request start method=%s path=%s query=%q", r.Method, r.URL.Path, r.URL.RawQuery)
+		next.ServeHTTP(rw, r)
+		s.logger.Printf("web request done method=%s path=%s status=%d bytes=%d duration=%s canceled=%t", r.Method, r.URL.Path, rw.status, rw.bytes, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil)
+	})
+}
+
+type requestLogWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int
+}
+
+func (w *requestLogWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *requestLogWriter) Write(p []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	n, err := w.ResponseWriter.Write(p)
+	w.bytes += n
+	return n, err
+}
+
+func (w *requestLogWriter) Flush() {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if f, ok := w.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (w *requestLogWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // Close releases session state. It does not own the underlying cloud tree.
 func (s *Server) Close() {
