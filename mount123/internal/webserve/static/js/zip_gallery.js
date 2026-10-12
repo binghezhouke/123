@@ -66,9 +66,6 @@
         panel.innerHTML = `<strong>EXIF</strong>${Object.entries(info).map(([key, value]) => `<div>${escape(key)}：${escape(value)}</div>`).join('')}`;
     }
     function setCounter(text) { el('counter').textContent = text; const fsCounter = document.getElementById('zip-gallery-fs-counter'); if (fsCounter) fsCounter.textContent = text; }
-    function pageKey() { return dialog.dataset.galleryScope || location.pathname + location.search.replace(/([?&])(last_file_id|limit)=.*?(&|$)/g, '$1'); }
-    function savedProgress() { try { return JSON.parse(localStorage.getItem(`galleryProgress:${pageKey()}`) || 'null'); } catch { return null; } }
-    function saveProgress(item) { try { localStorage.setItem(`galleryProgress:${pageKey()}`, JSON.stringify({identity: identity(item), name: title(item)})); const button=document.querySelector('[data-gallery-resume]'); if(button) button.hidden=false; } catch {} }
     function findIndex(list, id) { return list.findIndex(item => identity(item) === id); }
     async function waitForPage() {
         if (window.loadArchiveNextPage) return await window.loadArchiveNextPage();
@@ -261,7 +258,7 @@
         const panel = el('exif-panel'); el('stage').replaceChildren(); if (panel) el('stage').append(panel);
         renderExif(null, true); el('title').textContent = title(list[index]); setCounter(`${index + 1} / ${list.length}`);
         const url = source(list[index]); el('download').href = `${url}${url.includes('?') ? '&' : '?'}download=1`;
-        el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…'; saveProgress(list[index]);
+        el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…';
         try {
             // Start the foreground request before allowing pumpPrefetch() to
             // schedule neighbors. load() installs the priority task
@@ -331,23 +328,6 @@
     document.querySelector('[data-gallery-open]')?.addEventListener('click', () => {
         document.querySelector('[data-gallery-image], .zip-image')?.click();
     });
-    // Resume follows the stable file identity, loading metadata pages as needed.
-    document.addEventListener('click', async event => {
-        const button = event.target.closest('[data-gallery-resume]'); if (!button) return;
-        const saved = savedProgress(); if (!saved) return;
-        dialog.showModal();
-        if (dialog.dataset.galleryIndexUrl && !el('index').childElementCount) {
-            try { await populateDirectoryIndex(saved.identity); } catch (error) { dialog.showModal(); el('status').textContent = error.message; return; }
-        }
-        let index = findIndex(items(), saved.identity);
-        while (index < 0 && document.querySelector('[data-load-more][href]')) {
-            button.disabled = true; const loaded = await waitForPage(); button.disabled = false;
-            if (!loaded) break;
-            index = findIndex(items(), saved.identity);
-        }
-        if (index >= 0) show(index);
-        else { button.hidden = true; dialog.showModal(); el('status').textContent = `上次浏览的图片“${saved.name}”已无法定位。关闭查看器后可继续浏览当前目录。`; }
-    });
     el('prev').onclick = () => show(selected - 1); el('next').onclick = () => show(selected + 1);
     el('retry').onclick = () => { const old = cache.get(selected); if (old) { URL.revokeObjectURL(old.url); stats.cacheBytes -= old.size; cache.delete(selected); } attempted.delete(selected); show(selected); };
     el('close').onclick = () => dialog.close();
@@ -386,8 +366,6 @@
     if (el('setting-concurrency')) el('setting-concurrency').value = settings.concurrency;
     if (el('setting-budget')) el('setting-budget').value = settings.budget;
     exifToggle?.setAttribute?.('aria-pressed', String(exifVisible));
-    const resumeButton = document.querySelector('[data-gallery-resume]');
-    if (resumeButton) resumeButton.hidden = !savedProgress();
     dialog.addEventListener('keydown', event => {
         if (event.target?.matches?.('input,textarea,select,[contenteditable="true"]')) return;
         if (event.key === 'ArrowLeft') { event.preventDefault(); show(selected-1); } else if (event.key === 'ArrowRight') { event.preventDefault(); show(selected+1); }
@@ -396,5 +374,4 @@
     el('stage').addEventListener('touchend', event => { if (viewport?.isZoomed()) {touchStart=undefined; return;} if (touchStart === undefined) return; const dx=event.changedTouches[0].clientX-touchStart; touchStart=undefined; if (Math.abs(dx)>60) show(selected+(dx<0?1:-1)); }, {passive:true});
     el('stage').addEventListener('touchcancel',()=>{touchStart=undefined;},{passive:true});
     dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; const panel=el('exif-panel'); el('stage').replaceChildren(); if(panel) el('stage').append(panel); renderExif(null); const debug=el('debug-output'); if(debug) debug.hidden=true; const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false'); });
-    // Restore exact progress by stable identity when the dialog opens with an explicit resume action.
 })();

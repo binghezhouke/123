@@ -25,6 +25,60 @@
 .file-grid-item:hover {
     background: rgba(0, 0, 0, 0.045);
 }
+
+/* Recent locations keep the Finder sidebar useful without turning it into a
+   second full navigation tree. */
+.sidebar-header-action {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.sidebar-header-action-button {
+    border: 0;
+    padding: 0;
+    color: #7a8494;
+    background: transparent;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.sidebar-header-action-button:hover:not(:disabled) { color: #2463c5; }
+.sidebar-header-action-button:disabled { visibility: hidden; }
+
+.sidebar-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 248px;
+    overflow-y: auto;
+    padding: 0 8px;
+}
+
+.sidebar-history-item {
+    min-width: 0;
+    width: 100%;
+    margin: 0;
+    padding: 6px 8px;
+}
+
+.sidebar-history-item .sidebar-icon {
+    color: #6f7f96;
+    flex: 0 0 22px;
+}
+
+.sidebar-history-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.sidebar-history-empty {
+    padding: 5px 8px;
+    color: var(--text-secondary, #86868b);
+    font-size: 12px;
+}
 .file-item.keyboard-selected,
 .file-item:focus-visible {
     outline: 2px solid #5b8edb;
