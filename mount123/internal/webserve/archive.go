@@ -2,6 +2,7 @@ package webserve
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -21,6 +22,8 @@ import (
 )
 
 const archivePageName = "archive.html"
+const archiveInitialPageSize = 60
+const archiveEntryPageSize = 100
 
 var (
 	archiveOnce sync.Once
@@ -43,6 +46,9 @@ type archivePageData struct {
 	Parent     string
 	Rows       []archiveRow
 	ImageCount int
+	Total      int
+	NextCursor string
+	EntriesURL string
 }
 
 type archiveRow struct {
@@ -63,6 +69,7 @@ type archiveRow struct {
 
 func (s *Server) registerArchiveRoutes() {
 	s.mux.HandleFunc("GET /archive/{id}", s.requireAuth(s.handleArchiveList))
+	s.mux.HandleFunc("GET /archive/{id}/entries", s.requireAuth(s.handleArchiveEntries))
 	s.mux.HandleFunc("GET /archive/{id}/member", s.requireAuth(s.handleArchiveMember))
 }
 
@@ -114,7 +121,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	if parent == "." {
 		parent = ""
 	}
-	rows := archiveRows(fileID, prefix, members)
+	rows, nextCursor := archiveMemberPage(fileID, prefix, members, "", archiveInitialPageSize)
 	imageCount := 0
 	for _, row := range rows {
 		if row.IsImage {
@@ -129,7 +136,71 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		Parent:     parent,
 		Rows:       rows,
 		ImageCount: imageCount,
+		Total:      len(members),
+		NextCursor: nextCursor,
+		EntriesURL: archiveEntriesURL(fileID, prefix),
 	})
+}
+
+func archiveEntriesURL(fileID int64, prefix string) string {
+	return "/archive/" + strconv.FormatInt(fileID, 10) + "/entries?path=" + url.QueryEscape(prefix)
+}
+
+func archiveMemberPage(fileID int64, prefix string, members []mountfs.ArchiveEntry, cursor string, limit int) ([]archiveRow, string) {
+	start := 0
+	for start < len(members) && cursor != "" && members[start].Name <= cursor {
+		start++
+	}
+	end := start + limit
+	if end > len(members) {
+		end = len(members)
+	}
+	rows := archiveRows(fileID, prefix, members[start:end])
+	if end == len(members) || end == start {
+		return rows, ""
+	}
+	return rows, members[end-1].Name
+}
+
+type archiveEntryJSON struct {
+	Name        string `json:"name"`
+	Size        string `json:"size"`
+	IsDir       bool   `json:"is_dir"`
+	Nested      bool   `json:"nested"`
+	Encrypted   bool   `json:"encrypted"`
+	IsImage     bool   `json:"is_image"`
+	Kind        string `json:"kind"`
+	Icon        string `json:"icon"`
+	FAIcon      string `json:"fa_icon"`
+	Href        string `json:"href"`
+	Download    string `json:"download"`
+	FavoriteKey string `json:"favorite_key"`
+	MemberPath  string `json:"member_path"`
+}
+
+func (s *Server) handleArchiveEntries(w http.ResponseWriter, r *http.Request) {
+	if s.service == nil {
+		http.Error(w, "服务不可用", http.StatusServiceUnavailable)
+		return
+	}
+	fileID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || fileID <= 0 {
+		http.Error(w, "无效的文件 ID", http.StatusBadRequest)
+		return
+	}
+	prefix := strings.Trim(r.URL.Query().Get("path"), "/")
+	members, err := s.service.ListArchiveProgressive(r.Context(), fileID, prefix)
+	if err != nil {
+		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
+		return
+	}
+	rows, next := archiveMemberPage(fileID, prefix, members, r.URL.Query().Get("cursor"), archiveEntryPageSize)
+	items := make([]archiveEntryJSON, 0, len(rows))
+	for _, row := range rows {
+		items = append(items, archiveEntryJSON{Name: row.Name, Size: row.Size, IsDir: row.IsDir, Nested: row.Nested, Encrypted: row.Encrypted, IsImage: row.IsImage, Kind: row.Kind, Icon: row.Icon, FAIcon: row.FAIcon, Href: row.Href, Download: row.Download, FavoriteKey: row.FavoriteKey, MemberPath: row.MemberPath})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": next, "total": len(members)})
 }
 
 func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []archiveRow {

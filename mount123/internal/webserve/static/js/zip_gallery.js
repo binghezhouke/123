@@ -71,6 +71,7 @@
     function saveProgress(item) { try { localStorage.setItem(`galleryProgress:${pageKey()}`, JSON.stringify({identity: identity(item), name: title(item)})); const button=document.querySelector('[data-gallery-resume]'); if(button) button.hidden=false; } catch {} }
     function findIndex(list, id) { return list.findIndex(item => identity(item) === id); }
     async function waitForPage() {
+        if (window.loadArchiveNextPage) return await window.loadArchiveNextPage();
         return new Promise(resolve => {
             const done = event => { document.removeEventListener('files:load-complete', done); resolve(event.detail?.ok); };
             document.addEventListener('files:load-complete', done, {once:true});
