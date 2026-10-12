@@ -136,6 +136,40 @@ func TestSolidSessionCancellationAndWriterFailure(t *testing.T) {
 	}
 }
 
+func TestSolidSessionVerifiesEncryptedMembers(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "tests", "fixtures", "rar", "rar5-psw.rar")
+	session, err := OpenSolidSession(path, Password("password"), SkipCheck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	member, err := session.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(member)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) == 0 || int64(len(data)) != member.Header.UnPackedSize {
+		t.Fatalf("encrypted member size = %d, want %d", len(data), member.Header.UnPackedSize)
+	}
+
+	wrong, err := OpenSolidSession(path, Password("wrong"))
+	if err != nil {
+		// Header-encrypted archives are allowed to reject the session at open.
+		return
+	}
+	defer wrong.Close()
+	badMember, err := wrong.Next()
+	if err != nil {
+		return // Header-encrypted archives may reject on the first header.
+	}
+	if _, err = io.ReadAll(badMember); err == nil {
+		t.Fatal("wrong password unexpectedly decoded encrypted member")
+	}
+}
+
 type failingSolidWriter struct{}
 
 func (failingSolidWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
