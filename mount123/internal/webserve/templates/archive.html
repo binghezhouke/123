@@ -18,12 +18,13 @@
 <nav class="browser-path" aria-label="压缩包路径"><div class="path-bar" style="min-width:0;overflow-x:auto;white-space:nowrap;">
     <a href="/browse?parent_id=0" class="path-item"><i class="fas fa-hdd" style="margin-right:4px;"></i>123云盘</a><span class="path-separator"><i class="fas fa-chevron-right"></i></span><a href="/file/{{.FileID}}" class="path-item">{{.FileName}}</a>{{if .Prefix}}<span class="path-separator"><i class="fas fa-chevron-right"></i></span><span class="path-item">{{.Prefix}}</span>{{end}}
 </div></nav>
-<header class="browser-heading directory-heading"><div><p class="eyebrow">压缩包文件夹</p><h1>{{if .Prefix}}{{.Prefix}}{{else}}{{.FileName}}{{end}}</h1></div><div class="directory-heading-actions"><span class="item-count" data-file-count>{{len .Rows}} 个项目</span>{{if .ImageCount}}<span class="item-count">{{.ImageCount}} 张图片</span>{{end}}</div></header>
+<header class="browser-heading directory-heading"><div><p class="eyebrow">压缩包文件夹</p><h1>{{if .Prefix}}{{.Prefix}}{{else}}{{.FileName}}{{end}}</h1></div><div class="directory-heading-actions"><span class="item-count" data-file-count data-pagination-total="{{.Total}}">{{.Total}} 个项目</span>{{if .ImageCount}}<span class="item-count">{{.ImageCount}} 张图片</span>{{end}}</div></header>
 <div class="browse-layout"><div class="browse-files">
 <div class="file-grid" id="fileContainer">{{range .Rows}}{{template "grid-item" .}}{{end}}</div>
 <div class="file-list" id="fileListView" data-column-layout="files" style="display:none;"><div class="file-list-header"><div>名称</div><div>修改日期</div><div>大小</div><div>种类</div></div>{{range .Rows}}{{template "list-item" .}}{{end}}</div>
 {{if not .Rows}}<div class="empty-state"><div class="empty-state-icon"><i class="fas fa-folder-open"></i></div><div class="empty-state-title">文件夹为空</div><div class="empty-state-subtitle">这个压缩包目录中没有条目</div></div>{{end}}
 </div><div class="preview-resizer" id="preview-resizer"></div><aside class="preview-pane" id="preview-pane"><div class="preview-empty">选择一个文件以预览</div><div class="preview-stage" id="preview-stage" hidden></div><div class="preview-title" id="preview-title" hidden></div><div class="preview-meta" id="preview-meta" hidden></div><div class="preview-actions" id="preview-actions" hidden><button id="preview-fullscreen" class="btn btn-secondary" type="button">全屏</button><a id="preview-open" class="btn btn-primary" href="#">打开</a><a id="preview-download" class="btn btn-secondary" href="#">下载</a></div></aside></div>
+{{if .NextHref}}<div class="file-pagination" data-load-sentinel><a class="btn btn-secondary" data-load-more href="{{.NextHref}}"><i class="fas fa-chevron-down" aria-hidden="true"></i><span>加载更多</span></a></div>{{end}}
 <button id="preview-debug-toggle" class="gallery-debug-toggle preview-debug-toggle" type="button" aria-expanded="false" hidden>预取调试</button><pre id="preview-debug-output" class="gallery-debug-output preview-debug-output" hidden></pre>
 <button type="button" class="btn btn-secondary gallery-resume" data-gallery-resume hidden>恢复上次浏览的图片</button>
 <dialog id="zip-gallery" aria-labelledby="zip-gallery-title" data-gallery-scope="archive:{{.FileID}}:{{.Prefix}}">
@@ -73,6 +74,7 @@
 <script src="/static/js/image_viewport.js?v={{.Version}}" defer></script>
 <script src="/static/js/image_exif.js?v={{.Version}}" defer></script>
 <script src="/static/js/zip_gallery.js?v={{.Version}}" defer></script>
+<script src="/static/js/file_pagination.js?v={{.Version}}" defer></script>
 <script src="/static/js/keyboard_navigation.js?v={{.Version}}" defer></script>
 <script src="/static/js/image_read_coordinator.js?v={{.Version}}"></script>
 <script src="/static/js/viewport_images.js?v={{.Version}}"></script><script src="/static/js/file_preview.js?v={{.Version}}"></script>

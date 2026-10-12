@@ -36,6 +36,11 @@
             else currentPath.replaceChildren(...[...incomingPath.childNodes].map(node => document.importNode(node, true)));
         }
         currentBrowse.replaceChildren(...[...incomingBrowse.childNodes].map(node => document.importNode(node, true)));
+        const currentSentinel = document.querySelector('[data-load-sentinel]');
+        const incomingSentinel = incoming.querySelector('[data-load-sentinel]');
+        if (currentSentinel && incomingSentinel) currentSentinel.replaceWith(document.importNode(incomingSentinel, true));
+        else if (currentSentinel && !incomingSentinel) currentSentinel.remove();
+        else if (!currentSentinel && incomingSentinel) currentBrowse.after(document.importNode(incomingSentinel, true));
         const currentGallery = document.getElementById('zip-gallery');
         const incomingGallery = incoming.querySelector('#zip-gallery');
         if (currentGallery && incomingGallery) {

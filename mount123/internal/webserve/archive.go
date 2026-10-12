@@ -23,6 +23,8 @@ import (
 
 const archivePageName = "archive.html"
 
+const archivePageSize = 200
+
 var (
 	archiveOnce sync.Once
 	archivePage *template.Template
@@ -44,6 +46,8 @@ type archivePageData struct {
 	Parent     string
 	Rows       []archiveRow
 	ImageCount int
+	Total      int
+	NextHref   string
 }
 
 type archiveRow struct {
@@ -116,8 +120,22 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		parent = ""
 	}
 	rows := archiveRows(fileID, prefix, members)
+	total := len(rows)
+	offset := queryInt(r, "offset", 0)
+	if offset > total {
+		offset = total
+	}
+	end := offset + archivePageSize
+	if end > total {
+		end = total
+	}
+	pageRows := rows[offset:end]
+	nextHref := ""
+	if end < total {
+		nextHref = archivePageURL(fileID, prefix, end)
+	}
 	imageCount := 0
-	for _, row := range rows {
+	for _, row := range pageRows {
 		if row.IsImage {
 			imageCount++
 		}
@@ -128,9 +146,23 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		FileName:   name,
 		Prefix:     prefix,
 		Parent:     parent,
-		Rows:       rows,
+		Rows:       pageRows,
 		ImageCount: imageCount,
+		Total:      total,
+		NextHref:   nextHref,
 	})
+}
+
+func queryInt(r *http.Request, key string, fallback int) int {
+	value, err := strconv.Atoi(r.URL.Query().Get(key))
+	if err != nil || value < 0 {
+		return fallback
+	}
+	return value
+}
+
+func archivePageURL(fileID int64, prefix string, offset int) string {
+	return "/archive/" + strconv.FormatInt(fileID, 10) + "?path=" + url.QueryEscape(prefix) + "&offset=" + strconv.Itoa(offset)
 }
 
 func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []archiveRow {
