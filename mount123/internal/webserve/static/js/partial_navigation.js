@@ -81,6 +81,10 @@
         if (isModifierClick(event)) return;
         const link = event.target.closest('a[href]');
         if (!link || event.defaultPrevented || link.hasAttribute('download') || link.target === '_blank') return;
+        // Pagination links are consumed by file_pagination.js and append the
+        // next page in place. Letting partial navigation handle them replaces
+        // the whole listing and leaves the browser URL stuck at offset=N.
+        if (link.matches('[data-load-more]') || link.closest('[data-load-sentinel]')) return;
         if (event.target.closest('[data-gallery-image], .zip-image, .favorite-marker')) return;
         const url = targetURL(link); if (!url) return;
         event.preventDefault(); navigate(url);
