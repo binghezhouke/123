@@ -120,6 +120,10 @@ func (s *Server) handleSaveArchive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "获取文件信息失败", http.StatusBadRequest)
 		return
 	}
+	if file.IsDir || !isArchiveName(file.Name) {
+		http.Error(w, "目标文件不是支持的压缩包", http.StatusBadRequest)
+		return
+	}
 	if _, _, err := s.service.SaveArchivePassword(r.Context(), *file, []byte(password), true); err != nil {
 		http.Error(w, "保存归档密码失败："+err.Error(), http.StatusBadRequest)
 		return

@@ -181,6 +181,16 @@ func TestServiceNestedMissingMemberReturnsNotFound(t *testing.T) {
 	}
 }
 
+func TestNestedArchivePathFindsArchiveBelowDirectory(t *testing.T) {
+	idx := &zipIndex{members: map[string]*member{
+		"photos/inner.7z": {name: "photos/inner.7z", format: ".7z"},
+	}}
+	archivePath, rest, found := nestedArchivePath(idx, "photos/inner.7z/folder/cover.jpg")
+	if found == nil || archivePath != "photos/inner.7z" || rest != "folder/cover.jpg" {
+		t.Fatalf("nested path = (%q, %q, %#v), want archive prefix and remainder", archivePath, rest, found)
+	}
+}
+
 // The real compressed path must remain readable after listing has closed its
 // decoder, and after the lookup request/password buffers have gone away.
 func TestCompressedNestedSharedReader(t *testing.T) {

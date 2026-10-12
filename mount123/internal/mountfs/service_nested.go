@@ -12,14 +12,34 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 )
 
-// splitArchivePath splits a slash-separated member path into its first
-// component and the remainder.
-func splitArchivePath(path string) (string, string) {
-	path = strings.Trim(path, "/")
-	if index := strings.IndexByte(path, '/'); index >= 0 {
-		return path[:index], strings.TrimPrefix(path[index+1:], "/")
+// nestedArchivePath finds the longest archive member prefix in a path. An
+// archive may live below one or more ordinary directories, for example
+// "photos/inner.zip/cover.jpg". Looking only at the first component would
+// mistake "photos" for the nested archive and make that common layout
+// unreachable from the web service.
+func nestedArchivePath(idx *zipIndex, memberPath string) (archivePath, remainder string, m *member) {
+	path := strings.Trim(memberPath, "/")
+	if path == "" {
+		return "", "", nil
 	}
-	return path, ""
+	for end := len(path); end > 0; {
+		candidate := path[:end]
+		idx.mu.RLock()
+		candidateMember := idx.members[candidate]
+		idx.mu.RUnlock()
+		if candidateMember != nil && archiveKind(candidateMember.name) != "" {
+			if end == len(path) {
+				return candidate, "", candidateMember
+			}
+			return candidate, strings.TrimPrefix(path[end:], "/"), candidateMember
+		}
+		separator := strings.LastIndexByte(candidate, '/')
+		if separator < 0 {
+			break
+		}
+		end = separator
+	}
+	return "", "", nil
 }
 
 func archiveEntriesFromIndex(idx *zipIndex, memberPath string) ([]ArchiveEntry, error) {

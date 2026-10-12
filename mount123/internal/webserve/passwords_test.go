@@ -175,6 +175,25 @@ func TestSaveArchivePassword(t *testing.T) {
 	}
 }
 
+func TestSaveArchivePasswordRejectsNonArchive(t *testing.T) {
+	server, api := newPasswordFixture(t)
+	cookie := sessionCookie(t, login(t, server.Handler(), testPassword))
+	form := url.Values{"password": {"archive-pass"}}
+	request := httptest.NewRequest(http.MethodPost, "/passwords/archive/2", strings.NewReader(form.Encode()))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	request.AddCookie(cookie)
+	recorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", recorder.Code, recorder.Body.String())
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if len(api.archiveSaves) != 0 {
+		t.Fatalf("archive saves = %#v, want none", api.archiveSaves)
+	}
+}
+
 func TestPasswordRoutesRequireAuth(t *testing.T) {
 	server, _ := newPasswordFixture(t)
 	recorder := get(t, server.Handler(), "/passwords", nil)

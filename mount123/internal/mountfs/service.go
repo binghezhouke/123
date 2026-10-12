@@ -209,19 +209,13 @@ func (s *Service) ListArchive(ctx context.Context, fileID int64, memberPath stri
 	if err != nil {
 		return nil, err
 	}
-	first, rest := splitArchivePath(memberPath)
-	if first != "" {
-		idx.mu.RLock()
-		m := idx.members[first]
-		idx.mu.RUnlock()
-		if m != nil && archiveKind(m.name) != "" {
-			nested, nestedErr := s.nestedArchiveFrom(ctx, source, archive, idx, first, m)
-			if nestedErr != nil {
-				return nil, nestedErr
-			}
-			defer nested.Close()
-			return archiveEntriesFromIndex(nested.index, rest)
+	if nestedPath, rest, m := nestedArchivePath(idx, memberPath); m != nil {
+		nested, nestedErr := s.nestedArchiveFrom(ctx, source, archive, idx, nestedPath, m)
+		if nestedErr != nil {
+			return nil, nestedErr
 		}
+		defer nested.Close()
+		return archiveEntriesFromIndex(nested.index, rest)
 	}
 	return archiveEntriesFromIndex(idx, memberPath)
 }
@@ -239,25 +233,19 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	if err != nil {
 		return nil, 0, err
 	}
-	first, rest := splitArchivePath(memberPath)
-	if rest != "" {
-		idx.mu.RLock()
-		m := idx.members[first]
-		idx.mu.RUnlock()
-		if m != nil && archiveKind(m.name) != "" {
-			nested, nestedErr := s.nestedArchiveFrom(ctx, source, archive, idx, first, m)
-			if nestedErr != nil {
-				return nil, 0, nestedErr
-			}
-			nested.index.mu.RLock()
-			inner := nested.index.members[rest]
-			nested.index.mu.RUnlock()
-			if inner == nil {
-				_ = nested.Close()
-				return nil, 0, syscall.ENOENT
-			}
-			return s.openNestedMember(ctx, nested, inner)
+	if nestedPath, rest, m := nestedArchivePath(idx, memberPath); m != nil && rest != "" {
+		nested, nestedErr := s.nestedArchiveFrom(ctx, source, archive, idx, nestedPath, m)
+		if nestedErr != nil {
+			return nil, 0, nestedErr
 		}
+		nested.index.mu.RLock()
+		inner := nested.index.members[rest]
+		nested.index.mu.RUnlock()
+		if inner == nil {
+			_ = nested.Close()
+			return nil, 0, syscall.ENOENT
+		}
+		return s.openNestedMember(ctx, nested, inner)
 	}
 	kind := archive.kind()
 	if kind == "" {
