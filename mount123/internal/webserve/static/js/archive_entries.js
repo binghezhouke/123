@@ -13,7 +13,7 @@
         return `<div class="file-grid-item file-item" ${attrs}><a class="favorite-file-link" href="${esc(row.href)}"><div class="file-grid-icon ${cls}"><i class="${esc(icon)}" aria-hidden="true"></i></div><div class="file-grid-name">${esc(row.name)}${suffix}${row.encrypted ? ' <span class="badge bg-secondary">加密</span>' : ''}</div><span class="file-grid-meta">${folder ? (row.nested ? '压缩包' : '文件夹') : esc(row.size)}</span></a></div>`;
     };
     async function loadNext() {
-        if (!state || state.busy || !state.cursor) return false;
+        if (!state || state.busy || (!state.cursor && state.complete)) return false;
         state.busy = true;
         try {
             const url = new URL(state.url, location.href); url.searchParams.set('cursor', state.cursor);
@@ -21,12 +21,19 @@
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const page = await response.json();
             const grid = document.getElementById('fileContainer'), list = document.getElementById('fileListView');
+            const seen = new Set([...document.querySelectorAll('#fileContainer .file-item')].map(item => item.dataset.memberId));
             for (const row of page.items || []) {
+                if (seen.has(row.href)) continue;
+                seen.add(row.href);
                 if (grid) grid.insertAdjacentHTML('beforeend', rowHTML(row, false));
                 if (list) list.insertAdjacentHTML('beforeend', rowHTML(row, true));
             }
-            state.cursor = page.next_cursor || '';
-            if (!state.cursor) state.sentinel?.remove();
+            state.complete = page.complete !== false;
+            state.cursor = page.next_cursor || (state.complete ? '' : state.cursor);
+            if (!state.cursor && state.complete) state.sentinel?.remove();
+            else if (!page.items?.length && !state.complete) setTimeout(loadNext, 1000);
+            state.observer?.unobserve(state.sentinel);
+            if (state.sentinel?.isConnected) state.observer?.observe(state.sentinel);
             document.dispatchEvent(new CustomEvent('files:appended', {detail: {url: url.href}}));
             document.dispatchEvent(new CustomEvent('files:load-complete', {detail: {ok: true}}));
             return true;
@@ -39,7 +46,7 @@
         const dialog = document.getElementById('zip-gallery');
         const sentinel = document.querySelector('[data-archive-sentinel]');
         if (!dialog || !sentinel || !dialog.dataset.archiveEntriesUrl || !dialog.dataset.archiveNextCursor) { state = null; return; }
-        state = {url: dialog.dataset.archiveEntriesUrl, cursor: dialog.dataset.archiveNextCursor, sentinel, busy: false};
+        state = {url: dialog.dataset.archiveEntriesUrl, cursor: dialog.dataset.archiveNextCursor, complete: dialog.dataset.archiveComplete === 'true', sentinel, busy: false};
         window.loadArchiveNextPage = loadNext;
         if ('IntersectionObserver' in window) {
             const root = document.querySelector('.browse-files');

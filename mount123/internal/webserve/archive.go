@@ -49,6 +49,7 @@ type archivePageData struct {
 	Total      int
 	NextCursor string
 	EntriesURL string
+	Complete   bool
 }
 
 type archiveRow struct {
@@ -103,7 +104,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	// Archive scans can be expensive for remote solid RARs. Use the same
 	// progressive index path as FUSE so the first safe batch renders without
 	// waiting for the complete archive.
-	members, err := s.service.ListArchiveProgressive(r.Context(), fileID, prefix)
+	members, complete, err := s.service.ListArchiveProgressiveStatus(r.Context(), fileID, prefix)
 	if err != nil {
 		if err == syscall.EACCES {
 			http.Error(w, "压缩包已加密：请先在密码管理页为它设置密码。", http.StatusForbidden)
@@ -122,6 +123,9 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		parent = ""
 	}
 	rows, nextCursor := archiveMemberPage(fileID, prefix, members, "", archiveInitialPageSize)
+	if !complete && nextCursor == "" && len(rows) > 0 {
+		nextCursor = rows[len(rows)-1].Name
+	}
 	imageCount := 0
 	for _, row := range rows {
 		if row.IsImage {
@@ -139,6 +143,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		Total:      len(members),
 		NextCursor: nextCursor,
 		EntriesURL: archiveEntriesURL(fileID, prefix),
+		Complete:   complete,
 	})
 }
 
@@ -189,18 +194,21 @@ func (s *Server) handleArchiveEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := strings.Trim(r.URL.Query().Get("path"), "/")
-	members, err := s.service.ListArchiveProgressive(r.Context(), fileID, prefix)
+	members, complete, err := s.service.ListArchiveProgressiveStatus(r.Context(), fileID, prefix)
 	if err != nil {
 		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
 		return
 	}
 	rows, next := archiveMemberPage(fileID, prefix, members, r.URL.Query().Get("cursor"), archiveEntryPageSize)
+	if !complete && next == "" && len(rows) > 0 {
+		next = rows[len(rows)-1].Name
+	}
 	items := make([]archiveEntryJSON, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, archiveEntryJSON{Name: row.Name, Size: row.Size, IsDir: row.IsDir, Nested: row.Nested, Encrypted: row.Encrypted, IsImage: row.IsImage, Kind: row.Kind, Icon: row.Icon, FAIcon: row.FAIcon, Href: row.Href, Download: row.Download, FavoriteKey: row.FavoriteKey, MemberPath: row.MemberPath})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": next, "total": len(members)})
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": next, "total": len(members), "complete": complete})
 }
 
 func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []archiveRow {

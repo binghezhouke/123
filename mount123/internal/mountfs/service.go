@@ -211,6 +211,41 @@ func (s *Service) ListArchiveProgressive(ctx context.Context, fileID int64, memb
 	return s.listArchive(ctx, fileID, memberPath, true)
 }
 
+// ListArchiveProgressiveStatus is the progressive listing variant with the
+// scan-complete bit exposed to interactive clients. A partial index must not
+// be mistaken for a small, complete directory.
+func (s *Service) ListArchiveProgressiveStatus(ctx context.Context, fileID int64, memberPath string) ([]ArchiveEntry, bool, error) {
+	if file, fileErr := s.File(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
+		entries, err := s.ListISO(ctx, fileID, memberPath)
+		return entries, true, err
+	}
+	idx, archive, source, password, err := s.outerArchiveIndexMode(ctx, fileID, true)
+	defer clear(password)
+	if err != nil {
+		return nil, false, err
+	}
+	first, rest := splitArchivePath(memberPath)
+	if first != "" {
+		idx.mu.RLock()
+		m := idx.members[first]
+		idx.mu.RUnlock()
+		if m != nil && archiveKind(m.name) != "" {
+			nested, nestedErr := s.nestedArchiveFrom(ctx, source, archive, idx, first, m)
+			if nestedErr != nil {
+				return nil, false, nestedErr
+			}
+			defer nested.Close()
+			entries, listErr := archiveEntriesFromIndex(nested.index, rest)
+			return entries, true, listErr
+		}
+	}
+	entries, listErr := archiveEntriesFromIndex(idx, memberPath)
+	idx.mu.RLock()
+	complete := idx.complete
+	idx.mu.RUnlock()
+	return entries, complete, listErr
+}
+
 func (s *Service) listArchive(ctx context.Context, fileID int64, memberPath string, progressive bool) ([]ArchiveEntry, error) {
 	if file, fileErr := s.File(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
 		return s.ListISO(ctx, fileID, memberPath)

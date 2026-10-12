@@ -40,6 +40,7 @@
             currentGallery.dataset.galleryScope = incomingGallery.dataset.galleryScope || '';
             currentGallery.dataset.archiveEntriesUrl = incomingGallery.dataset.archiveEntriesUrl || '';
             currentGallery.dataset.archiveNextCursor = incomingGallery.dataset.archiveNextCursor || '';
+            currentGallery.dataset.archiveComplete = incomingGallery.dataset.archiveComplete || '';
         }
         currentBrowse.replaceChildren(...[...incomingBrowse.childNodes].map(node => document.importNode(node, true)));
         const incomingHeading = incoming.querySelector('.directory-heading h1');
