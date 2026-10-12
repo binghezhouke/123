@@ -6,3 +6,8 @@ The only upstream source addition is walk.go:
   password, then opens an independent member directly with normal checksum checks.
   Solid members retain the sequential extraction path.
 Keep the upstream files unchanged when updating.
+
+The second local addition, `solid_session.go`, exposes a serialized sequential
+solid decoder session. It keeps the upstream decoder state alive between
+members and is used by mount123 to build a bounded group cache; it does not
+add global caching to the decoder.
