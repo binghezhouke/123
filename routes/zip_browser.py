@@ -34,37 +34,9 @@ from api.archive_preview import read_archive_member, read_archive_member_file
 from api.zip_password_validation import validate_archive_password
 from .utils import get_client, folder_breadcrumbs
 from .listing import options, natural_key
+from .preview_types import TEXT_EXTENSIONS, PREVIEW_TYPES
 
 zip_bp = Blueprint("zip", __name__)
-TEXT_EXTENSIONS = {
-    ".txt",
-    ".md",
-    ".log",
-    ".json",
-    ".csv",
-    ".xml",
-    ".html",
-    ".css",
-    ".js",
-    ".py",
-    ".yaml",
-    ".yml",
-    ".ini",
-    ".toml",
-    ".sh",
-    ".sql",
-    ".svg",
-}
-PREVIEW_TYPES = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".pdf": "application/pdf",
-}
-
 
 def no_store(response):
     response = make_response(response)
