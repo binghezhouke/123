@@ -1,16 +1,26 @@
 """Inline file content from API download links, preserving media range requests."""
 
-from urllib.parse import quote
 from pathlib import PurePosixPath
+from urllib.parse import quote
 
 import requests
 from flask import Blueprint, Response, abort, render_template, request, stream_with_context
 
 from api import Pan123APIError
 from .utils import get_client
-from .preview_types import PREVIEW_TYPES, TEXT_EXTENSIONS, mimetype_for
+from .zip_browser import PREVIEW_TYPES, TEXT_EXTENSIONS
 
 preview_bp = Blueprint("preview", __name__)
+MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    ".mov": "video/quicktime",
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".ogg": "audio/ogg",
+    ".m4a": "audio/mp4",
+}
+
 
 @preview_bp.route("/file/<int:file_id>/content")
 def content(file_id):
@@ -37,7 +47,7 @@ def content(file_id):
             if status == 416:
                 return Response(status=416, headers={"Content-Range": content_range} if content_range else {})
             return render_template("error.html", error="文件读取失败，请刷新重试"), 502
-        mimetype = mimetype_for(file.filename)
+        mimetype = PREVIEW_TYPES.get(suffix) or MEDIA_TYPES.get(suffix)
         if text:
             with upstream:
                 data = bytearray()

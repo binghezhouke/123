@@ -6,7 +6,7 @@ from api import Pan123APIError
 from api.split_archive import SPLIT_7Z
 from .utils import get_client, folder_breadcrumbs
 from pathlib import PurePosixPath
-from .preview_types import TEXT_EXTENSIONS, PREVIEW_TYPES, classify
+from routes.zip_browser import TEXT_EXTENSIONS, PREVIEW_TYPES
 from .listing import options, directory_snapshot, order_files
 
 main_bp = Blueprint('main', __name__)
@@ -118,7 +118,10 @@ def file_detail(file_id):
             suffix = PurePosixPath(file_info.filename).suffix.lower()
             if suffix in ('.zip', '.7z', '.rar') or SPLIT_7Z.fullmatch(file_info.filename):
                 return redirect(url_for('zip.browse', file_id=file_id))
-            kind = classify(file_info.filename)
+            media = {'.mp4': 'video', '.webm': 'video', '.mov': 'video',
+                     '.mp3': 'audio', '.wav': 'audio', '.ogg': 'audio', '.m4a': 'audio'}
+            kind = ('image' if PREVIEW_TYPES.get(suffix, '').startswith('image/') else
+                    'pdf' if suffix == '.pdf' else 'text' if suffix in TEXT_EXTENSIONS else media.get(suffix))
             if kind:
                 return render_template('file_preview.html', file=file_info, kind=kind,
                                        breadcrumbs=folder_breadcrumbs(client, file_info.get('parentFileId', 0)),

@@ -5,7 +5,7 @@ import zipfile
 
 from .zip_preview import ZipPreviewError
 
-VIDEO_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".mkv": "video/x-matroska"}
+VIDEO_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime"}
 
 
 def can_stream(entry, kind):
