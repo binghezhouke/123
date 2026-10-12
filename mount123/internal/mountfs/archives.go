@@ -562,6 +562,42 @@ func extractArchiveMember(ctx context.Context, reader io.ReaderAt, size int64, m
 		}
 		stream = rc
 	} else {
+		// Solid RAR members must be decoded in archive order.  Use the
+		// stateful session so the decoder is retained across preceding members
+		// and each member is fully verified before its cache fill completes.
+		if m.rarLocator != nil && m.rarLocator.Solid() {
+			options := append(rarOptions(password), rardecode.FileSystem(singleArchiveFS{reader, size}))
+			session, err := rardecode.OpenSolidSessionContext(ctx, "archive.rar", options...)
+			if err != nil {
+				return err
+			}
+			defer session.Close()
+			var sm *rardecode.SolidMember
+			for i := 0; i <= m.ordinal; i++ {
+				sm, err = session.Next()
+				if err != nil {
+					return err
+				}
+				if i < m.ordinal {
+					continue
+				}
+				if sm.Header.Name != m.name || sm.Header.UnPackedSize < 0 || uint64(sm.Header.UnPackedSize) != m.size {
+					return syscall.ESTALE
+				}
+			}
+			hash := crc32.NewIEEE()
+			count, err := io.CopyBuffer(io.MultiWriter(w, hash), io.LimitReader(&contextReader{ctx: ctx, r: sm}, int64(m.size)+1), make([]byte, 64<<10))
+			if err != nil {
+				return err
+			}
+			if count != int64(m.size) {
+				return syscall.EIO
+			}
+			if m.crc != 0 && hash.Sum32() != m.crc {
+				return errArchiveIntegrity
+			}
+			return sm.Close()
+		}
 		rr, err := rardecode.NewReader(io.NewSectionReader(reader, 0, size), rarOptions(password)...)
 		if err != nil {
 			return err
