@@ -18,7 +18,9 @@ body { letter-spacing: -.012em; }
 .sidebar-item { margin: 4px 0; padding: 10px 12px; min-height: 40px; }
 .sidebar-item.active { background: #e2e8f2; color: #234a87; }
 .sidebar-item.active .sidebar-icon { color: #2764df; }
-.sidebar-footer { margin-top: auto; padding: 20px 12px 0; font-size: 12px; color: #727a87; display: flex; align-items: center; gap: 7px; }
+.sidebar-footer { margin-top: auto; padding: 20px 12px 0; font-size: 12px; color: #727a87; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.sidebar-connection { display: flex; align-items: center; gap: 7px; }
+.build-commit { color: #9aa1ad; font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; }
 .connection-dot { width: 6px; height: 6px; background: #8a97ae; border-radius: 50%; }
 .finder-toolbar { padding: 14px 28px; min-height: 66px; gap: 20px; background: #fff; backdrop-filter: none; }
 .toolbar-left { min-width: 0; gap: 4px; }

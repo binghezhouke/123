@@ -31,7 +31,7 @@
             <div class="sidebar-header">收藏</div>
             <a href="/favorites" class="sidebar-item"><span class="sidebar-icon" aria-hidden="true">☆</span><span>所有收藏</span></a>
         </div>
-        <div class="sidebar-footer"><span class="connection-dot"></span>123 云盘</div>
+        <div class="sidebar-footer"><div class="sidebar-connection"><span class="connection-dot"></span>123 云盘</div>{{if .Commit}}<code class="build-commit" title="当前运行提交">{{.Commit}}</code>{{end}}</div>
     </aside>
 
     <div class="finder-content">
