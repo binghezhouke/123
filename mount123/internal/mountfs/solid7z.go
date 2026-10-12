@@ -46,6 +46,13 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 	if err != nil {
 		return err
 	}
+	if t.solidRARCacheable(m) {
+		if err := t.extractSolidRARMember(ctx, source, a, m, password, identity, w); err == nil {
+			return nil
+		} else if !errors.Is(err, syscall.ENOSPC) {
+			return err
+		}
+	}
 	if t.solid7zCacheable(m) {
 		group, err := t.acquireSolid7z(ctx, source, a, m, password, identity)
 		if err == nil {

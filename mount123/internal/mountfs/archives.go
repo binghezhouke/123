@@ -11,6 +11,7 @@ import (
 	iofs "io/fs"
 	"log"
 	"math"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,54 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/nwaples/rardecode/v2"
 )
+
+const maxSolidRARCacheBytes int64 = 1 << 30
+
+func finalizeRARGroups(idx *zipIndex, capacity int64) {
+	if idx == nil || capacity <= 0 {
+		return
+	}
+	maxSize := min(maxSolidRARCacheBytes, capacity/4)
+	if maxSize <= 0 {
+		return
+	}
+	members := make([]*member, 0, len(idx.members))
+	for _, m := range idx.members {
+		if m.rarLocator != nil {
+			members = append(members, m)
+		}
+	}
+	sort.Slice(members, func(i, j int) bool { return members[i].ordinal < members[j].ordinal })
+	for i := 0; i < len(members); {
+		start := i
+		for i+1 < len(members) && members[i+1].ordinal == members[i].ordinal+1 && members[i+1].rarSolid {
+			i++
+		}
+		end := i
+		if end == start {
+			i++
+			continue
+		}
+		var total uint64
+		for j := start; j <= end; j++ {
+			if ^uint64(0)-total < members[j].size {
+				total = 0
+				break
+			}
+			total += members[j].size
+		}
+		if total > 0 && total <= uint64(maxSize) {
+			var off uint64
+			for j := start; j <= end; j++ {
+				members[j].rarGroupStart = members[start].ordinal
+				members[j].rarGroupOffset = off
+				members[j].rarGroupSize = total
+				off += members[j].size
+			}
+		}
+		i++
+	}
+}
 
 // 7z does not expose whether an uncompressed member uses encryption. A CRC
 // mismatch can therefore mean a missing/wrong password or damaged ciphertext.
@@ -61,6 +110,7 @@ type archiveMember struct {
 	directory   bool
 	ordinal     int
 	rarLocator  *rardecode.MemberLocator
+	rarSolid    bool
 	sevenStream *sevenStreamLocation
 	zipFile     *zip.File
 }
@@ -174,7 +224,7 @@ func scanArchiveFrom(ctx context.Context, kind string, reader io.ReaderAt, size 
 		if f.UnKnownSize || f.UnPackedSize < 0 || (!f.IsDir && !f.Mode().IsRegular()) {
 			return syscall.EOPNOTSUPP
 		}
-		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator}, nextOffset)
+		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator, rarSolid: f.Solid}, nextOffset)
 		i++
 		return err
 	}
@@ -445,7 +495,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 						idx.mu.Unlock()
 						return syscall.EIO
 					}
-					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, sevenStream: f.sevenStream, format: a.kind()}
+					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, sevenStream: f.sevenStream, format: a.kind()}
 					dir.order = append(dir.order, part)
 					dir.files[part] = m
 					idx.members[f.name] = m
@@ -479,6 +529,9 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 		idx.mu.Lock()
 		idx.complete = err == nil
 		idx.scanErr = archiveReadError(ctx, err, password)
+		if err == nil && a.kind() == ".rar" && t.cache != nil {
+			finalizeRARGroups(idx, t.cache.Capacity())
+		}
 		close(idx.changed)
 		idx.mu.Unlock()
 		if err != nil {
