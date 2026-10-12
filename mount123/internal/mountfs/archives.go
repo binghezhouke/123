@@ -297,7 +297,16 @@ func (t *Tree) waitArchiveIndex(ctx context.Context, key string, wait time.Durat
 		partial, updated := call.partial, call.updated
 		t.mu.Unlock()
 		if len(progressive) > 0 && progressive[0] && partial != nil {
-			return partial, nil
+			// The task publishes an empty snapshot before scanning starts. Do
+			// not return that placeholder; wait for the first verified member
+			// (or completion) so an interactive request has something useful to
+			// render while the remaining index continues in the background.
+			partial.mu.RLock()
+			ready := len(partial.members) > 0 || partial.complete
+			partial.mu.RUnlock()
+			if ready {
+				return partial, nil
+			}
 		}
 		select {
 		case <-call.done:

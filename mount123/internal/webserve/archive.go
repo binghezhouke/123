@@ -93,7 +93,10 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := strings.Trim(r.URL.Query().Get("path"), "/")
-	members, err := s.service.ListArchive(r.Context(), fileID, prefix)
+	// Archive scans can be expensive for remote solid RARs. Use the same
+	// progressive index path as FUSE so the first safe batch renders without
+	// waiting for the complete archive.
+	members, err := s.service.ListArchiveProgressive(r.Context(), fileID, prefix)
 	if err != nil {
 		if err == syscall.EACCES {
 			http.Error(w, "压缩包已加密：请先在密码管理页为它设置密码。", http.StatusForbidden)
