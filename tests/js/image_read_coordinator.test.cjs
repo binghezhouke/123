@@ -33,3 +33,24 @@ test('foreground and background scheduling hints share one read', async () => {
     ]);
     assert.equal(calls, 1);
 });
+test('queued foreground work starts before queued background work', async () => {
+    const calls = [];
+    const coordinator = load((url, options) => new Promise(resolve => calls.push({url, options, resolve})));
+    const background = Array.from({length: 11}, (_, i) => coordinator.fetch(`/background-${i}`, {priority: 'low'}).catch(() => null));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(coordinator.active, 9); assert.equal(coordinator.queued, 2);
+    const foreground = coordinator.fetch('/foreground', {priority: 'high'}).catch(() => null);
+    await new Promise(resolve => setImmediate(resolve));
+    calls[0].resolve(response());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(calls[9].url, '/foreground');
+    coordinator.clear(); await Promise.all([...background, foreground]);
+});
+test('clearing the coordinator aborts every active transport', async () => {
+    const signals = [];
+    const coordinator = load((url, options) => { signals.push(options.signal); return new Promise(() => {}); });
+    const reads = [coordinator.fetch('/one').catch(() => null), coordinator.fetch('/two').catch(() => null)];
+    await new Promise(resolve => setImmediate(resolve));
+    coordinator.clear(); await Promise.all(reads);
+    assert.equal(signals.length, 2); assert.ok(signals.every(signal => signal.aborted));
+});
