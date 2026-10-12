@@ -266,6 +266,11 @@ func (n *Node) IOStats() iostats.Snapshot {
 		snapshot.SetIndexQueue(q.Limit, q.Active, q.Background, q.Waiting, uint64(q.Requests))
 	}
 	snapshot.SetScan(n.tree.scanState())
+	if profiled, ok := n.tree.api.(interface {
+		APIProfile() iostats.APIProfileSummary
+	}); ok {
+		snapshot.APIProfile = profiled.APIProfile()
+	}
 	return snapshot
 }
 
@@ -311,6 +316,11 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 		ctx = context.Background()
 	}
 	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}, indexStatuses: newIndexStatusTracker()}
+	if cache != nil {
+		if profiled, ok := api.(interface{ SetIOStats(*iostats.Tracker) }); ok {
+			profiled.SetIOStats(cache.IOStats())
+		}
+	}
 	t.scan = newScanGuard(t.applyScanShedding)
 	if identity, ok := api.(interface{ CacheIdentity() string }); ok {
 		t.cacheScope = identity.CacheIdentity()

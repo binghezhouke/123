@@ -30,6 +30,52 @@ type Tracker struct {
 	readAheadWasted     counter
 	stages              [stageCount]duration
 	operations          [operationCount]operation
+	api                 [APIEndpointCount]apiEndpoint
+}
+
+// APIEndpoint identifies a fixed, low-cardinality API family.
+type APIEndpoint uint8
+
+const (
+	APIList APIEndpoint = iota
+	APIFileInfo
+	APIDownloadURL
+	APIAccessToken
+	APIOther
+	APIEndpointCount
+)
+
+type apiEndpoint struct {
+	requests, successes, errors, retries, throttleWaits atomic.Uint64
+	latency                                             duration
+}
+
+func (t *Tracker) ObserveAPI(category APIEndpoint, latency time.Duration, success bool) {
+	if category >= APIEndpointCount {
+		category = APIOther
+	}
+	a := &t.api[category]
+	a.requests.Add(1)
+	if success {
+		a.successes.Add(1)
+	} else {
+		a.errors.Add(1)
+	}
+	a.latency.observe(latency)
+}
+
+func (t *Tracker) AddAPIRetry(category APIEndpoint) {
+	if category >= APIEndpointCount {
+		category = APIOther
+	}
+	t.api[category].retries.Add(1)
+}
+
+func (t *Tracker) AddAPIThrottleWait(category APIEndpoint) {
+	if category >= APIEndpointCount {
+		category = APIOther
+	}
+	t.api[category].throttleWaits.Add(1)
 }
 
 // Operation identifies a FUSE metadata operation. The set is deliberately
@@ -162,6 +208,24 @@ type DurationSummary struct {
 	MaxNanos   *uint64 `json:"max_nanos"`
 }
 
+type APIEndpointSummary struct {
+	Status        string          `json:"status"`
+	Requests      uint64          `json:"requests"`
+	Successes     uint64          `json:"successes"`
+	Errors        uint64          `json:"errors"`
+	Retries       uint64          `json:"retries"`
+	ThrottleWaits uint64          `json:"throttle_waits"`
+	Latency       DurationSummary `json:"latency"`
+}
+
+type APIProfileSummary struct {
+	List        APIEndpointSummary `json:"list"`
+	FileInfo    APIEndpointSummary `json:"file_info"`
+	DownloadURL APIEndpointSummary `json:"download_url"`
+	AccessToken APIEndpointSummary `json:"access_token"`
+	Other       APIEndpointSummary `json:"other"`
+}
+
 // CounterSummary distinguishes an observed zero from a metric with no hook.
 type CounterSummary struct {
 	Status string  `json:"status"`
@@ -203,6 +267,7 @@ type Snapshot struct {
 	Open                  OperationSummary     `json:"open"`
 	IndexQueue            QueueSummary         `json:"index_queue"`
 	Scan                  ScanSummary          `json:"scan"`
+	APIProfile            APIProfileSummary    `json:"api_profile"`
 }
 
 func (s *Snapshot) SetIndexQueue(limit, active, background, waiting int, requests uint64) {
@@ -343,7 +408,7 @@ func (t *Tracker) RecordForegroundRead(n uint64, elapsed time.Duration) {
 // Individual counters can advance during the snapshot.
 func (t *Tracker) Snapshot() Snapshot {
 	now := time.Now()
-	return Snapshot{
+	s := Snapshot{
 		StartedAt:             t.startedAt.UTC(),
 		CollectedAt:           now.UTC(),
 		UptimeSeconds:         max(0, now.Sub(t.startedAt).Seconds()),
@@ -383,6 +448,23 @@ func (t *Tracker) Snapshot() Snapshot {
 		Getattr:            t.operations[OperationGetattr].snapshot(),
 		Open:               t.operations[OperationOpen].snapshot(),
 	}
+	for i := range t.api {
+		a := &t.api[i]
+		out := APIEndpointSummary{Status: "measured", Requests: a.requests.Load(), Successes: a.successes.Load(), Errors: a.errors.Load(), Retries: a.retries.Load(), ThrottleWaits: a.throttleWaits.Load(), Latency: a.latency.snapshot()}
+		switch APIEndpoint(i) {
+		case APIList:
+			s.APIProfile.List = out
+		case APIFileInfo:
+			s.APIProfile.FileInfo = out
+		case APIDownloadURL:
+			s.APIProfile.DownloadURL = out
+		case APIAccessToken:
+			s.APIProfile.AccessToken = out
+		default:
+			s.APIProfile.Other = out
+		}
+	}
+	return s
 }
 
 func (o *operation) snapshot() OperationSummary {
