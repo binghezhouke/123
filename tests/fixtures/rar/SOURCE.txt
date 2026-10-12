@@ -1,3 +1,4 @@
 Fixtures copied from https://github.com/markokr/rarfile/tree/master/test/files
 rar5-crc.rar, rar3-solid.rar, rar5-psw.rar and rar5-hpsw.rar.
 Encrypted fixtures use the test password "password". Copyright and permission: LICENSE.
+rar5-solid.rar added from the same repository at d2f7df6fc843dae356fd6b0a85971dc36fd6e757.
