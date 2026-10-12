@@ -37,6 +37,10 @@ func ImportLocator(record LocatorRecord, archiveSize int64) (MemberLocator, erro
 
 func (l MemberLocator) Direct() bool { return l.valid && !l.solid }
 
+// Solid reports whether this member depends on the preceding solid decoder
+// state and therefore must be read through SolidSession.
+func (l MemberLocator) Solid() bool { return l.solid }
+
 // Walk visits headers without decoding member data or retaining all headers.
 func Walk(name string, visit func(*FileHeader) error, opts ...Option) error {
 	return WalkMembers(name, func(h *FileHeader, _ MemberLocator) error { return visit(h) }, opts...)
