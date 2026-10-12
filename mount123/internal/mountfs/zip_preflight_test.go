@@ -151,6 +151,26 @@ func TestPreflightZIPAcceptsSelfExtractingPrefixAndRejectsTruncation(t *testing.
 	}
 }
 
+func TestPreflightZIPAcceptsTrailingDataBeforeEndRecord(t *testing.T) {
+	original := makeZIPFixture(t, "one", "two")
+	eocd := eocdOffset(original)
+	if eocd < 0 {
+		t.Fatal("fixture has no EOCD")
+	}
+	data := append(append([]byte(nil), original[:eocd]...), make([]byte, 76)...)
+	data = append(data, original[eocd:]...)
+	if err := preflightZIP(bytes.NewReader(data), int64(len(data)), 10, 1024); err != nil {
+		t.Fatal(err)
+	}
+	offsets, err := zipLocalHeaderOffsets(bytes.NewReader(data), int64(len(data)), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(offsets) != 2 {
+		t.Fatalf("local header offsets = %d, want 2", len(offsets))
+	}
+}
+
 func TestPreflightZIPPreservesContextCancellation(t *testing.T) {
 	data := makeZIPFixture(t, "one")
 	r := &cancelAfterFirstRead{reader: bytes.NewReader(data)}

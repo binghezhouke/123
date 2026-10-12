@@ -16,6 +16,37 @@
         pane.querySelector('#preview-meta')?.setAttribute('hidden', '');
         pane.querySelector('#preview-actions')?.setAttribute('hidden', '');
     };
+    const positionKey = url => {
+        const copy = new URL(url, location.href);
+        for (const name of ['offset', 'cursor', 'refresh', 'snapshot', 'last_file_id']) copy.searchParams.delete(name);
+        copy.searchParams.sort();
+        return `cloudarchive.nav-position:${copy.pathname}?${copy.searchParams.toString()}`;
+    };
+    const positionElements = () => [document.querySelector('.finder-main'), document.querySelector('.browse-files')].filter(Boolean);
+    const savePosition = url => {
+        try {
+            const values = positionElements().map(element => [element.scrollTop, element.scrollLeft]);
+            sessionStorage.setItem(positionKey(url), JSON.stringify(values));
+        } catch (_) { /* Storage may be disabled. */ }
+    };
+    const restorePosition = url => {
+        try {
+            const saved = JSON.parse(sessionStorage.getItem(positionKey(url)) || 'null');
+            if (!Array.isArray(saved)) return;
+            requestAnimationFrame(() => positionElements().forEach((element, index) => {
+                const value = saved[index];
+                if (Array.isArray(value)) {
+                    element.scrollTop = Number(value[0]) || 0;
+                    element.scrollLeft = Number(value[1]) || 0;
+                }
+            }));
+        } catch (_) {}
+    };
+    let saveTimer = null;
+    const saveCurrentPositionSoon = () => {
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(() => savePosition(location.href), 150);
+    };
     const apply = (documentRoot, url, push) => {
         const current = document.querySelector('.finder-main');
         const incoming = documentRoot.querySelector('.finder-main');
@@ -56,7 +87,7 @@
         try { if (typeof switchView === 'function') switchView(localStorage.getItem('finderViewMode') || 'icons'); } catch (_) {}
         window.updateStatusBar?.();
         if (push) history.pushState({partial: true}, '', url.href);
-        window.scrollTo({top: 0, left: 0, behavior: 'instant'});
+        restorePosition(url);
         document.dispatchEvent(new CustomEvent('cloudarchive:navigated', {detail: {url: url.href}}));
         document.dispatchEvent(new CustomEvent('files:appended', {detail: {url: url.href}}));
         return true;
@@ -84,7 +115,9 @@
         if (!link || event.defaultPrevented || link.hasAttribute('download') || link.target === '_blank') return;
         if (event.target.closest('[data-gallery-image], .zip-image, .favorite-marker')) return;
         const url = targetURL(link); if (!url) return;
-        event.preventDefault(); navigate(url);
+        event.preventDefault(); savePosition(location.href); navigate(url);
     }, true);
+    document.addEventListener('scroll', saveCurrentPositionSoon, {capture: true, passive: true});
+    window.addEventListener('pagehide', () => savePosition(location.href));
     window.addEventListener('popstate', () => navigate(new URL(location.href), false));
 })();

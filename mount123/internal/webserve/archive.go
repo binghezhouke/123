@@ -106,6 +106,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	// waiting for the complete archive.
 	members, complete, err := s.service.ListArchiveProgressiveStatus(r.Context(), fileID, prefix)
 	if err != nil {
+		s.logger.Printf("web archive list failed file_id=%d path=%q err=%v", fileID, prefix, err)
 		if err == syscall.EACCES {
 			http.Error(w, "压缩包已加密：请先在密码管理页为它设置密码。", http.StatusForbidden)
 			return
@@ -196,6 +197,7 @@ func (s *Server) handleArchiveEntries(w http.ResponseWriter, r *http.Request) {
 	prefix := strings.Trim(r.URL.Query().Get("path"), "/")
 	members, complete, err := s.service.ListArchiveProgressiveStatus(r.Context(), fileID, prefix)
 	if err != nil {
+		s.logger.Printf("web archive entries failed file_id=%d path=%q cursor=%q err=%v", fileID, prefix, r.URL.Query().Get("cursor"), err)
 		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
 		return
 	}

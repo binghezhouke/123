@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -130,7 +131,7 @@ func preflightZIP(r io.ReaderAt, size int64, maxEntries int, maxIndexBytes int64
 	if uint64(directoryEnd) < cdOffset || uint64(directoryEnd)-cdOffset < cdSize {
 		return errors.New("ZIP directory is out of bounds")
 	}
-	baseOffset := uint64(directoryEnd) - cdOffset - cdSize
+	baseOffset := zipCentralBaseOffset(r, size, directoryEnd, cdOffset, cdSize)
 	if baseOffset > uint64(size) || cdOffset > uint64(size)-baseOffset || cdSize > uint64(size)-baseOffset-cdOffset {
 		return errors.New("ZIP directory is out of bounds")
 	}
@@ -172,7 +173,7 @@ func scanZIPDirectory(r io.ReaderAt, start, limit int64, entries uint64, maxEntr
 			return zipPreflightReadError(err, "ZIP central directory is truncated")
 		}
 		if binary.LittleEndian.Uint32(header[:]) != zipCentralSignature {
-			return errors.New("ZIP central directory record is invalid")
+			return fmt.Errorf("ZIP central directory record is invalid at offset %d", start+indexedBytes)
 		}
 		nameLen := int64(binary.LittleEndian.Uint16(header[28:]))
 		extraLen := int64(binary.LittleEndian.Uint16(header[30:]))
@@ -269,7 +270,7 @@ func zipLocalHeaderOffsets(r io.ReaderAt, size int64, maxEntries int) ([]int64, 
 	if entries > uint64(maxEntries) || cdOffset > uint64(^uint64(0)>>1) || cdSize > uint64(^uint64(0)>>1) || uint64(directoryEnd) < cdOffset+cdSize {
 		return nil, errors.New("ZIP central directory offsets are invalid")
 	}
-	base := uint64(directoryEnd) - cdOffset - cdSize
+	base := zipCentralBaseOffset(r, size, directoryEnd, cdOffset, cdSize)
 	start := int64(base + cdOffset)
 	limit := start + int64(cdSize)
 	if limit > size {
@@ -311,6 +312,23 @@ func zipLocalHeaderOffsets(r io.ReaderAt, size int64, maxEntries int) ([]int64, 
 		return nil, errors.New("ZIP central directory size does not match entries")
 	}
 	return offsets, nil
+}
+
+// zipCentralBaseOffset follows archive/zip's self-extracting ZIP heuristic.
+// Some writers append a record between the central directory and EOCD while
+// leaving the central-directory offset absolute. In that case the arithmetic
+// base is positive, but the directory header at the recorded offset is valid;
+// use an absolute offset instead of treating the trailing record as a prefix.
+func zipCentralBaseOffset(r io.ReaderAt, size, directoryEnd int64, cdOffset, cdSize uint64) uint64 {
+	base := uint64(directoryEnd) - cdOffset - cdSize
+	if base == 0 || cdOffset >= uint64(size) {
+		return base
+	}
+	var signature [4]byte
+	if zipReadAt(r, signature[:], int64(cdOffset)) == nil && binary.LittleEndian.Uint32(signature[:]) == zipCentralSignature {
+		return 0
+	}
+	return base
 }
 
 func zip64LocalHeaderOffset(extra []byte, needUncompressed, needCompressed bool) (uint64, error) {
