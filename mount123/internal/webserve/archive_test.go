@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -109,6 +111,40 @@ func TestArchiveListRendersMembers(t *testing.T) {
 	imagePage := authenticatedGET(t, server.Handler(), "/archive/1?path=pics", nil)
 	if imagePage.Code != http.StatusOK || !strings.Contains(imagePage.Body.String(), `class="browse-layout"`) || !strings.Contains(imagePage.Body.String(), `data-gallery-image`) || !strings.Contains(imagePage.Body.String(), `id="preview-pane"`) {
 		t.Fatalf("archive image browser controls are missing:\n%s", imagePage.Body.String())
+	}
+}
+
+func TestArchiveRowsRenderVersionedFavoriteIdentityAndStableURL(t *testing.T) {
+	memberName := "章节:一/封面 图.jpg"
+	rows := archiveRows(42, "漫画/第一:卷", []mountfs.ArchiveEntry{{Name: memberName, Size: 12}})
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	memberPath := "漫画/第一:卷/" + memberName
+	wantKey := "zip:v2:42:" + base64.RawURLEncoding.EncodeToString([]byte(memberPath))
+	if rows[0].FavoriteKey != wantKey {
+		t.Fatalf("favorite key = %q, want %q", rows[0].FavoriteKey, wantKey)
+	}
+	if rows[0].MemberPath != memberPath {
+		t.Fatalf("member path = %q, want %q", rows[0].MemberPath, memberPath)
+	}
+	if rows[0].Href != "/archive/42/member?path="+url.QueryEscape(memberPath) {
+		t.Fatalf("href = %q", rows[0].Href)
+	}
+
+	var rendered bytes.Buffer
+	page, err := archiveTemplate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := page.ExecuteTemplate(&rendered, "grid-item", rows[0]); err != nil {
+		t.Fatal(err)
+	}
+	body := rendered.String()
+	for _, value := range []string{`data-favorite-key="` + wantKey + `"`, `data-favorite-member-path="漫画/第一:卷/章节:一/封面 图.jpg"`, `data-favorite-url="/archive/42/member?path=`} {
+		if !strings.Contains(body, value) {
+			t.Fatalf("rendered archive row missing %q:\n%s", value, body)
+		}
 	}
 }
 

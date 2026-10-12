@@ -101,6 +101,7 @@
             }, {root, rootMargin: `${Math.round(root.clientHeight / 2)}px 0px`});
             this.observe();
             document.addEventListener('files:appended', () => this.observe());
+            document.addEventListener('cloudarchive:navigated', () => this.reset());
             window.addEventListener('pagehide', () => this.close());
         }
         key(item) {
@@ -200,6 +201,13 @@
             const lines = [`视口附近 ${this.near.size} · 驻留缩略图 ${this.urls.size} · 工作 ${this.active}/2 · 本地命中 ${this.hits}`];
             for (const item of this.near) lines.push(`${this.urls.has(item) ? '缩略图驻留' : this.jobs.get(item)?.state || '等待'} · ${item.dataset.favoriteName}`);
             this.output.textContent = lines.join('\n');
+        }
+        reset() {
+            if (this.closed) return;
+            this.observer.disconnect(); this.queue = [];
+            for (const item of [...this.jobs.keys()]) this.release(item);
+            for (const item of [...this.urls.keys()]) this.release(item);
+            this.near.clear(); this.observed = new WeakSet(); this.observe(); this.render();
         }
         close() { this.closed = true; this.observer.disconnect(); this.queue = []; for (const item of [...this.jobs.keys()]) this.release(item); for (const item of [...this.urls.keys()]) this.release(item); }
     }

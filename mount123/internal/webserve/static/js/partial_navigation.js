@@ -22,6 +22,7 @@
         const currentBrowse = current?.querySelector('.browse-files');
         const incomingBrowse = incoming?.querySelector('.browse-files');
         if (!current || !incoming || !currentBrowse || !incomingBrowse) return false;
+        document.dispatchEvent(new CustomEvent('cloudarchive:before-navigate', {detail: {url: url.href}}));
         const incomingPath = incoming.querySelector('.browser-path');
         // The base layout moves the live breadcrumb into the toolbar during
         // the first paint, so it is no longer inside .finder-main on later
@@ -35,6 +36,13 @@
             else currentPath.replaceChildren(...[...incomingPath.childNodes].map(node => document.importNode(node, true)));
         }
         currentBrowse.replaceChildren(...[...incomingBrowse.childNodes].map(node => document.importNode(node, true)));
+        const currentGallery = document.getElementById('zip-gallery');
+        const incomingGallery = incoming.querySelector('#zip-gallery');
+        if (currentGallery && incomingGallery) {
+            currentGallery.dataset.galleryScope = incomingGallery.dataset.galleryScope || '';
+            if (incomingGallery.dataset.galleryIndexUrl) currentGallery.dataset.galleryIndexUrl = incomingGallery.dataset.galleryIndexUrl;
+            else delete currentGallery.dataset.galleryIndexUrl;
+        }
         const incomingHeading = incoming.querySelector('.directory-heading h1');
         const currentHeading = document.querySelector('.toolbar-directory-title h1');
         if (incomingHeading && currentHeading) currentHeading.textContent = incomingHeading.textContent;
@@ -50,7 +58,6 @@
         if (push) history.pushState({partial: true}, '', url.href);
         window.scrollTo({top: 0, left: 0, behavior: 'instant'});
         document.dispatchEvent(new CustomEvent('cloudarchive:navigated', {detail: {url: url.href}}));
-        document.dispatchEvent(new CustomEvent('files:appended', {detail: {url: url.href}}));
         return true;
     };
     async function navigate(url, push = true) {

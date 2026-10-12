@@ -2,6 +2,7 @@ package webserve
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"html/template"
 	"io"
@@ -133,6 +134,10 @@ func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []
 	rows := make([]archiveRow, 0, len(members))
 	for _, member := range members {
 		kind := classifyEntry(member.Name, member.IsDir)
+		memberPath := member.Name
+		if prefix != "" {
+			memberPath = prefix + "/" + member.Name
+		}
 		row := archiveRow{
 			Name:        member.Name,
 			IsDir:       member.IsDir,
@@ -141,11 +146,7 @@ func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []
 			Kind:        kind.label,
 			Icon:        kind.class,
 			FAIcon:      faIconFor(kind),
-			FavoriteKey: fmt.Sprintf("zip:%d:%s:%s", fileID, prefix, member.Name),
-		}
-		memberPath := member.Name
-		if prefix != "" {
-			memberPath = prefix + "/" + member.Name
+			FavoriteKey: archiveFavoriteKey(fileID, memberPath),
 		}
 		row.MemberPath = memberPath
 		if member.IsDir || (!member.IsDir && isArchiveName(member.Name)) {
@@ -160,6 +161,13 @@ func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+// archiveFavoriteKey is deliberately independent of a member's position in an
+// archive listing. Raw URL-safe base64 keeps separators and Unicode member
+// names unambiguous while remaining safe in an HTML data attribute.
+func archiveFavoriteKey(fileID int64, memberPath string) string {
+	return fmt.Sprintf("zip:v2:%d:%s", fileID, base64.RawURLEncoding.EncodeToString([]byte(memberPath)))
 }
 
 func (s *Server) handleArchiveMember(w http.ResponseWriter, r *http.Request) {

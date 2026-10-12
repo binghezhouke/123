@@ -6,14 +6,18 @@
     const MAX_SAVED_LOCATIONS = 50;
     const MAX_PAGES = 100;
     const MAX_AGE = 24 * 60 * 60 * 1000;
-    const locationKey = new URL(location.href);
-    for (const name of ['refresh', 'snapshot', 'offset', 'last_file_id']) locationKey.searchParams.delete(name);
-    locationKey.searchParams.sort();
-    const key = `${PREFIX}${locationKey.pathname}${locationKey.search}`;
+    function storageKey(value = location.href) {
+        const url = new URL(value, location.href);
+        for (const name of ['refresh', 'snapshot', 'offset', 'last_file_id']) url.searchParams.delete(name);
+        url.searchParams.sort();
+        return `${PREFIX}${url.pathname}${url.search}`;
+    }
+    let key = storageKey();
     let selected = null;
     let restoring = false;
     let restorePromise = null;
     let loadedPages = 0;
+    let pageGeneration = 0;
 
     const scrollElement = () => document.querySelector('.finder-main') || document.scrollingElement;
     function pruneStoredLocations() {
@@ -104,7 +108,8 @@
     }
     async function restore() {
         if (restorePromise) return restorePromise;
-        restorePromise = (async () => {
+        const generation = pageGeneration;
+        const work = (async () => {
             if (new URL(location.href).searchParams.has('refresh')) return;
             const state = readState();
             if (!state) return;
@@ -112,15 +117,20 @@
             const button = document.querySelector('[data-load-more][href]');
             for (let page = loadedPages; page < state.pages; page++) {
                 if (!button || !await loadCurrentPage(button)) break;
+                if (generation !== pageGeneration) return;
             }
+            if (generation !== pageGeneration) return;
             markSelection(state.selected);
             requestAnimationFrame(() => {
+                if (generation !== pageGeneration) return;
                 const scroller = scrollElement();
                 if (scroller) scroller.scrollTop = state.top;
                 restoring = false;
                 save();
             });
-        })().finally(() => { restorePromise = null; });
+        })();
+        const tracked = work.finally(() => { if (restorePromise === tracked) restorePromise = null; });
+        restorePromise = tracked;
         return restorePromise;
     }
 
@@ -131,4 +141,14 @@
         restore();
     }
     window.addEventListener('pageshow', event => { if (event.persisted) restore(); });
+    document.addEventListener('cloudarchive:before-navigate', save);
+    document.addEventListener('cloudarchive:navigated', event => {
+        pageGeneration++;
+        key = storageKey(event.detail?.url);
+        selected = null;
+        loadedPages = 0;
+        restoring = false;
+        restorePromise = null;
+        restore();
+    });
 })();

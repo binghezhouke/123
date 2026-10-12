@@ -394,6 +394,18 @@
     el('stage').addEventListener('touchstart', event => { touchStart = !viewport?.isZoomed() && event.touches.length === 1 ? event.touches[0].clientX : undefined; }, {passive:true});
     el('stage').addEventListener('touchend', event => { if (viewport?.isZoomed()) {touchStart=undefined; return;} if (touchStart === undefined) return; const dx=event.changedTouches[0].clientX-touchStart; touchStart=undefined; if (Math.abs(dx)>60) show(selected+(dx<0?1:-1)); }, {passive:true});
     el('stage').addEventListener('touchcancel',()=>{touchStart=undefined;},{passive:true});
-    dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; const panel=el('exif-panel'); el('stage').replaceChildren(); if(panel) el('stage').append(panel); renderExif(null); const debug=el('debug-output'); if(debug) debug.hidden=true; const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false'); });
+    function resetPageState() {
+        viewport?.close(); thumbController?.abort(); thumbController=null; thumbQueue=[];
+        if(indexController) indexController.abort();
+        indexGeneration++; indexController=null; indexPromise=null; indexComplete=false; el('index').replaceChildren();
+        touchStart=undefined; ++generation; prefetchReady=false; attempted.clear();
+        for (const task of pending.values()) task.controller.abort(); pending.clear();
+        for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0;
+        const panel=el('exif-panel'); el('stage').replaceChildren(); if(panel) el('stage').append(panel); renderExif(null);
+        const debug=el('debug-output'); if(debug) debug.hidden=true;
+        const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false');
+    }
+    dialog.addEventListener('close', resetPageState);
+    document.addEventListener('cloudarchive:navigated', resetPageState);
     // Restore exact progress by stable identity when the dialog opens with an explicit resume action.
 })();

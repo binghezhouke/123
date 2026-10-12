@@ -170,29 +170,6 @@ function refreshFiles() {
 <script src="/static/js/favorites.js?v={{.Version}}" defer></script>
 <script src="/static/js/column_resize.js?v={{.Version}}" defer></script>
 <script src="/static/js/partial_navigation.js?v={{.Version}}" defer></script>
-<script>
-(() => {
-    const menu = document.getElementById('context-menu');
-    const favorite = menu?.querySelector('[data-cm-action="favorite"]');
-    const divider = menu?.querySelector('[data-cm-favorite-separator]');
-    if (!menu || !favorite || !divider) return;
-    let item = null;
-    document.addEventListener('contextmenu', event => {
-        const candidate = event.target.closest('.file-item[data-favorite-key]');
-        if (!candidate) { item = null; favorite.hidden = true; divider.hidden = true; return; }
-        event.preventDefault();
-        item = candidate;
-        menu.hidden = false;
-        menu.style.left = event.clientX + 'px';
-        menu.style.top = event.clientY + 'px';
-        favorite.hidden = false; divider.hidden = false;
-        favorite.textContent = candidate.querySelector('.favorite-marker.is-favorite') ? '修改收藏颜色…' : '收藏到颜色…';
-    }, true);
-    favorite.addEventListener('click', () => {
-        menu.hidden = true;
-        if (item) window.openFavoritePicker?.(item);
-    });
-})();
-</script>
+<script src="/static/js/context_menu.js?v={{.Version}}" defer></script>
 </body>
 </html>{{end}}

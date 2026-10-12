@@ -56,7 +56,9 @@ function setup({count = 5, blobSize = 1, viewport = null, indexPages = null, del
     get('gallery-resume').dataset.galleryResume = '';
     if (indexPages) get('zip-gallery').dataset.galleryIndexUrl = '/api/images';
     for (const button of buttons) button.handlers.click = () => (documentHandlers.click || []).forEach(handler => handler({target:button, preventDefault() {}}));
-    return {images, buttons, get, requests, revoked, storage, indexRequests, dispatchClick:target=>(documentHandlers.click||[]).forEach(handler=>handler({target,preventDefault(){}}))};
+    return {images, buttons, get, requests, revoked, storage, indexRequests,
+        dispatchClick:target=>(documentHandlers.click||[]).forEach(handler=>handler({target,preventDefault(){}})),
+        dispatchDocument:(name, detail={})=>(documentHandlers[name]||[]).forEach(handler=>handler({detail}))};
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -79,4 +81,20 @@ test('Go gallery keeps encoded blobs and only creates an Image for the selected 
     assert.equal(requests.length,count, 'back navigation reuses encoded blob');
     get('zip-gallery-close').onclick(); await tick();
     assert.ok(revoked.length >= 2);
+});
+
+test('Go gallery drops the previous page cache and uses the updated scope after partial navigation', async () => {
+    const {buttons,get,requests,revoked,storage,dispatchDocument}=setup({count:2});
+    buttons[0].handlers.click(); requests[0].resolve(); await tick();
+    assert.deepEqual(JSON.parse(storage.get('galleryProgress:directory:0')), {identity:'0',name:'0.jpg'});
+
+    get('zip-gallery').dataset.galleryScope='archive:9:pictures';
+    dispatchDocument('cloudarchive:navigated', {url:'http://localhost/archive/9'});
+    assert.deepEqual(revoked, ['blob:1']);
+
+    const before = requests.filter(request => request.url === '/member/1').length;
+    buttons[1].handlers.click();
+    assert.equal(requests.filter(request => request.url === '/member/1').length, before + 1,
+        'the new page must not reuse an index-based blob from the old page');
+    assert.deepEqual(JSON.parse(storage.get('galleryProgress:archive:9:pictures')), {identity:'1',name:'1.jpg'});
 });

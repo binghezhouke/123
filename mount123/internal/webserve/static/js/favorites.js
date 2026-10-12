@@ -20,7 +20,9 @@
         } catch { return false; }
     }
     function validKey(key) {
-        return typeof key === 'string' && (/^file:\d+$/.test(key) || /^zip:\d+:[^:]{1,512}:\d+$/.test(key));
+        return typeof key === 'string' && (/^file:\d+$/.test(key) ||
+            /^zip:v2:\d+:[A-Za-z0-9_-]{1,5462}$/.test(key) ||
+            /^zip:\d+:[^:]{1,512}:\d+$/.test(key));
     }
     function validRecord(key, item) {
         return validKey(key) && item && typeof item === 'object' && !Array.isArray(item) &&
@@ -108,6 +110,11 @@
 
     function openURL(key, item) {
         const url = new URL(item.url, location.href);
+        // v2 Go archive identities store the full member path in the key and
+        // the rendered URL is already the canonical route for opening it.
+        if (/^zip:v2:\d+:[A-Za-z0-9_-]{1,5462}$/.test(key)) return url.href;
+        // Keep the original index-based archive identity as an explicit legacy
+        // format. Its saved URL needs the historical route reconstruction.
         const match = /^zip:(\d+):([^:]+):(\d+)$/.exec(key);
         if (!match) return url.href;
         // The version query is checked by the archive route before it resolves the member index.
