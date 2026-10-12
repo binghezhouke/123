@@ -72,6 +72,10 @@ func archiveEntriesFromIndex(idx *zipIndex, memberPath string) ([]ArchiveEntry, 
 
 // outerArchiveIndex resolves one cloud archive into its parsed index.
 func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipIndex, *archiveDescriptor, *storage.Remote, []byte, error) {
+	return s.outerArchiveIndexMode(ctx, fileID, false)
+}
+
+func (s *Service) outerArchiveIndexMode(ctx context.Context, fileID int64, progressive bool) (*zipIndex, *archiveDescriptor, *storage.Remote, []byte, error) {
 	file, err := s.File(ctx, fileID)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -108,13 +112,13 @@ func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipInde
 		// Try without a password first so unencrypted archives skip password
 		// discovery entirely. Only fetch a password when the decoder says one
 		// is required.
-		idx, err = s.tree.otherIndex(ctx, source, archive, nil)
+		idx, err = s.tree.otherIndexMode(ctx, source, archive, nil, progressive)
 		if err != nil && (needsPassword(err) || errors.Is(err, syscall.EACCES)) {
 			password, err = s.tree.otherPassword(ctx, archive)
 			if err != nil {
 				return nil, nil, nil, nil, err
 			}
-			idx, err = s.tree.otherIndex(ctx, source, archive, password)
+			idx, err = s.tree.otherIndexMode(ctx, source, archive, password, progressive)
 		}
 	}
 	if err != nil {
