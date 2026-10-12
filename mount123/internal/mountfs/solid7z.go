@@ -49,9 +49,12 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 	if t.solidRARCacheable(m) {
 		if err := t.extractSolidRARMember(ctx, source, a, m, password, identity, w); err == nil {
 			return nil
-		} else if !errors.Is(err, syscall.ENOSPC) {
+		} else if ctx.Err() != nil {
 			return err
 		}
+		// The group cache is an optimization. Any cache reservation, fill, or
+		// validation failure must fall back to the established member path so
+		// a cache problem cannot make a readable archive unavailable.
 	}
 	if t.solid7zCacheable(m) {
 		group, err := t.acquireSolid7z(ctx, source, a, m, password, identity)
