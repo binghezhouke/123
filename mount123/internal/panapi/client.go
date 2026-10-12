@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/binghezhouke/123/mount123/internal/faults"
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
 
@@ -59,6 +60,29 @@ type Client struct {
 	token     string
 	expires   time.Time
 	scheduler *apiScheduler
+	stats     *iostats.Tracker
+}
+
+// SetIOStats attaches the mount's bounded API profiler.
+func (c *Client) SetIOStats(t *iostats.Tracker) { c.stats = t }
+func apiProfileCategory(endpoint string) iostats.APIEndpoint {
+	switch endpoint {
+	case "/api/v2/file/list", "/api/v1/file/list":
+		return iostats.APIList
+	case "/api/v1/file/detail", "/api/v1/file/infos":
+		return iostats.APIFileInfo
+	case "/api/v1/file/download_info":
+		return iostats.APIDownloadURL
+	case "/api/v1/access_token":
+		return iostats.APIAccessToken
+	default:
+		return iostats.APIOther
+	}
+}
+func (c *Client) observeAPI(endpoint string, started time.Time, success bool) {
+	if c.stats != nil {
+		c.stats.ObserveAPI(apiProfileCategory(endpoint), time.Since(started), success)
+	}
 }
 
 type tokenCache struct {
@@ -86,7 +110,7 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
 		return nil, errors.New("panapi: invalid base URL")
 	}
-	c := &Client{config: cfg, baseURL: strings.TrimRight(cfg.BaseURL, "/"), http: &http.Client{Timeout: 20 * time.Second}, scheduler: newAPIScheduler()}
+	c := &Client{config: cfg, baseURL: strings.TrimRight(cfg.BaseURL, "/"), http: &http.Client{Timeout: 20 * time.Second}, scheduler: newAPIScheduler(), stats: iostats.New()}
 	if cfg.AccessToken != "" {
 		c.token = cfg.AccessToken
 		c.expires = time.Now().Add(24 * time.Hour)
@@ -94,6 +118,14 @@ func New(cfg Config) (*Client, error) {
 		c.loadTokenCache()
 	}
 	return c, nil
+}
+
+// APIProfile exposes bounded aggregate API timings for mount diagnostics.
+func (c *Client) APIProfile() iostats.APIProfileSummary {
+	if c == nil || c.stats == nil {
+		return iostats.APIProfileSummary{}
+	}
+	return c.stats.Snapshot().APIProfile
 }
 
 // CacheIdentity returns an opaque account/API namespace for private on-disk
@@ -371,7 +403,7 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 	return c.requestJSON(ctx, http.MethodGet, endpoint, query, nil, out)
 }
 
-func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query url.Values, payload []byte, out any) error {
+func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query url.Values, payload []byte, out any) (err error) {
 	const maxReadRetries = 4
 	const maxThrottleRetries = 4
 	const maxCompletionRetries = 5
@@ -383,6 +415,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 	defer cancel()
 	readRetries, throttleRetries, completionRetries, authRetried := 0, 0, 0, false
 	for {
+		attemptStarted := time.Now()
 		token, err := c.accessToken(requestCtx)
 		if err != nil {
 			return err
@@ -409,6 +442,9 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				return requestCtx.Err()
 			}
 			if readOnly && isTransientTransportError(err) && readRetries < maxReadRetries {
+				if c.stats != nil {
+					c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+				}
 				readRetries++
 				if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
 					return err
@@ -416,6 +452,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				continue
 			}
 			message := "panapi: request failed: " + safeError(err.Error(), c.config)
+			c.observeAPI(endpoint, attemptStarted, false)
 			return &faults.Error{Kind: faults.Network, Message: message, Retryable: isTransientTransportError(err)}
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -443,6 +480,10 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 		}
 		statusErr := apiHTTPError(resp.StatusCode)
 		if resp.StatusCode == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries && (!readOnly || readRetries < maxReadRetries) {
+			if c.stats != nil {
+				c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+				c.stats.AddAPIThrottleWait(apiProfileCategory(endpoint))
+			}
 			throttleRetries++
 			if readOnly {
 				readRetries++
@@ -457,6 +498,9 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			continue
 		}
 		if readOnly && faults.IsTransient(statusErr) && readRetries < maxReadRetries {
+			if c.stats != nil {
+				c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+			}
 			readRetries++
 			if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
 				return err
@@ -464,10 +508,12 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			c.observeAPI(endpoint, attemptStarted, false)
 			return statusErr
 		}
 		var envelope apiEnvelope
 		if err := json.Unmarshal(data, &envelope); err != nil {
+			c.observeAPI(endpoint, attemptStarted, false)
 			return errors.New("panapi: malformed API response")
 		}
 		if envelope.Code != 0 {
@@ -477,6 +523,10 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				continue
 			}
 			if envelope.Code == http.StatusTooManyRequests && throttleRetries < maxThrottleRetries && (!readOnly || readRetries < maxReadRetries) {
+				if c.stats != nil {
+					c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+					c.stats.AddAPIThrottleWait(apiProfileCategory(endpoint))
+				}
 				throttleRetries++
 				if readOnly {
 					readRetries++
@@ -491,6 +541,9 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				continue
 			}
 			if readOnly && apiCodeRetryable(envelope.Code) && readRetries < maxReadRetries {
+				if c.stats != nil {
+					c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+				}
 				readRetries++
 				if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
 					return err
@@ -498,6 +551,9 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				continue
 			}
 			if envelope.Code == 20103 && endpoint == "/upload/v2/file/upload_complete" && completionRetries < maxCompletionRetries {
+				if c.stats != nil {
+					c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+				}
 				completionRetries++
 				if err := waitCompletionRetry(requestCtx, completionRetries); err != nil {
 					return err
@@ -508,6 +564,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			if msg == "" {
 				return &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: API error code %d", envelope.Code), Retryable: apiCodeRetryable(envelope.Code)}
 			}
+			c.observeAPI(endpoint, attemptStarted, false)
 			return &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: API error code %d: %s", envelope.Code, msg), Retryable: apiCodeRetryable(envelope.Code)}
 		}
 		if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
@@ -516,6 +573,7 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 		if err := json.Unmarshal(envelope.Data, out); err != nil {
 			return errors.New("panapi: malformed API data")
 		}
+		c.observeAPI(endpoint, attemptStarted, true)
 		return nil
 	}
 }
@@ -627,6 +685,13 @@ func (c *Client) accessToken(ctx context.Context) (string, error) {
 }
 
 func (c *Client) fetchToken(ctx context.Context) (string, error) {
+	started := time.Now()
+	completed := false
+	defer func() {
+		if c.stats != nil {
+			c.stats.ObserveAPI(iostats.APIAccessToken, time.Since(started), completed)
+		}
+	}()
 	if err := c.waitRateLimit(ctx, categoryAccessToken); err != nil {
 		return "", err
 	}
@@ -692,6 +757,7 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 	}
 	c.token, c.expires = envelope.Data.Token, expires
 	c.saveTokenCache(expires)
+	completed = true
 	return c.token, nil
 }
 
