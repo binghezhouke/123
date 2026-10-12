@@ -30,6 +30,7 @@
     globalThis.__cloudFilePreviewInstalled = true;
 
     const generation = createGeneration();
+    let previewObjectURL = null;
     const viewportOutput = document.getElementById('preview-debug-output');
     const viewport = globalThis.CloudViewportImages && document.querySelector('.browse-files')
         ? new globalThis.CloudViewportImages(document.querySelector('.browse-files'), viewportOutput)
@@ -75,6 +76,7 @@
         const {stage, title, meta, actions, empty, open, download} = parts;
         if (!stage || !title || !meta || !actions || !empty || !open) return;
         const request = generation.next();
+        if (previewObjectURL) { URL.revokeObjectURL(previewObjectURL); previewObjectURL = null; }
         const name = item.dataset.favoriteName || item.dataset.name || '';
         const isFolder = item.dataset.fileType === 'folder';
         const kind = mediaType(name);
@@ -90,7 +92,14 @@
         if (isFolder) {
             stage.append(icon(item.dataset.kind === '压缩包' ? 'fas fa-file-archive' : 'fas fa-folder', '#76a9e6'));
         } else if (kind === 'image') {
-            const image = document.createElement('img'); image.alt = name; image.src = previewURL;
+            const image = document.createElement('img'); image.alt = name;
+            const read = globalThis.imageReadCoordinator?.fetch;
+            if (read) read(previewURL, {cache: 'force-cache', signal: request.signal}).then(response => response.blob()).then(blob => {
+                if (!generation.current(request.token) || !image.isConnected) return;
+                previewObjectURL = URL.createObjectURL(blob);
+                image.src = previewObjectURL;
+            }).catch(error => { if (error.name !== 'AbortError' && generation.current(request.token)) image.src = previewURL; });
+            else image.src = previewURL;
             image.onload = () => {
                 if (!generation.current(request.token) || !image.isConnected) return;
                 if (image.naturalWidth && image.naturalHeight) setMeta(meta, [...metaValues, `分辨率：${image.naturalWidth} × ${image.naturalHeight}`]);
@@ -129,7 +138,10 @@
         if (!item?.closest('.browse-files') || item.dataset.fileType === 'folder' || event.target.closest?.('.favorite-marker')) return;
         const url = item.dataset.favoriteUrl || item.dataset.url; if (url) location.href = url;
     });
-    document.addEventListener('cloudarchive:navigated', () => generation.cancel());
+    document.addEventListener('cloudarchive:navigated', () => {
+        generation.cancel();
+        if (previewObjectURL) { URL.revokeObjectURL(previewObjectURL); previewObjectURL = null; }
+    });
     document.addEventListener('click', event => {
         if (!event.target.closest?.('#preview-fullscreen')) return;
         const pane = currentParts()?.pane;

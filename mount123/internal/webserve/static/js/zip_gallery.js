@@ -171,15 +171,15 @@
                 let response, responseWasDirect = false;
                 if (useDirect) {
                     try {
-                        response = await fetch(directUrl, {signal: task.controller.signal, cache: 'force-cache'});
+                        response = await (globalThis.imageReadCoordinator?.fetch || fetch)(directUrl, {signal: task.controller.signal, cache: 'force-cache'});
                         if (!response.ok) throw new Error('直链读取失败');
                         responseWasDirect = true;
                     } catch (error) {
                         if (error.name === 'AbortError') throw error;
-                        response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
+                        response = await (globalThis.imageReadCoordinator?.fetch || fetch)(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
                     }
                 } else {
-                    response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
+                    response = await (globalThis.imageReadCoordinator?.fetch || fetch)(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
                 }
                 if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
                 const contentType = response.headers.get('Content-Type') || '';

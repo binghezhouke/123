@@ -161,7 +161,7 @@
                 let response, lastError;
                 for (const source of sources) {
                     try {
-                        response = await fetch(source, {cache:'force-cache', priority:'low', signal:job.controller.signal});
+                        response = await (globalThis.imageReadCoordinator?.fetch || fetch)(source, {cache:'force-cache', priority:'low', signal:job.controller.signal});
                         if (!response.ok) throw Error(`HTTP ${response.status}`);
                         break;
                     } catch (error) {
