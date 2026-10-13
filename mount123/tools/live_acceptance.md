@@ -9,6 +9,16 @@ python3 -m unittest discover -s mount123/tools/tests -v
 
 第一条输出 `skipped/live_not_enabled` 并以 0 退出。第二条使用临时普通目录及本地 HTTP fixture，不需要网盘账号、FUSE、运行中的 mount123 或额外 Python 包。它不是 FUSE 内核集成测试。
 
+具备 FUSE 和 Python 3 的 Linux 环境还可运行渐进目录的内核回归：
+
+```sh
+cd mount123
+MOUNT123_FUSE_TEST=1 go test -race ./internal/mountfs \
+  -run '^TestActualFUSELiveAcceptanceProgressiveRARConverges$' -count=1 -timeout=45s
+```
+
+该测试使用合成 RAR、本机 Range 服务和独立临时挂载，先让真实 CLI 扫描部分目录，再释放后续索引并重新打开目录验证完整集合。Web entries 使用本机协议 fixture，不是 webserve；测试不连接网盘或使用生产挂载。默认不设置环境变量时跳过。它覆盖部分目录收敛，`EAGAIN` 分支仍由离线边界测试覆盖。
+
 ## 准备样本
 
 复制 `live_acceptance.example.json` 到仓库外的私有文件，替换其中的**虚构** ID、相对挂载路径、成员路径、精确文件大小及预期目录数量。不要将真实账号目录、凭证、密码、Cookie、Authorization、下载直链或签名 URL 放进仓库。`name` 是报告中唯一的样本身份，使用不包含隐私的 ASCII 别名。
@@ -45,6 +55,12 @@ python3 mount123/tools/live_acceptance.py --live \
 localhost/loopback 请求单独禁用环境代理；内网 HTTP 和远程 HTTPS 均可配置，非 loopback 地址保留标准环境代理行为。不修改全局代理设置。HTTP 重定向一律拒绝，避免将会话头转发给 CDN 或登录地址，也不记录 Location。当前阶段检验的是 mount123 的代理成员 Range；**尚未**覆盖真实 CDN 重定向与直链过期恢复。
 
 ## READDIRPLUS、顺序与缓存解释
+
+档案的首次 FUSE 目录句柄可能冻结尚未完成的目录，也可能暂时返回 `EAGAIN`。脚本仍先执行这一轮 FUSE 触发，再等待 Web 分页完整结束；不会先用 Web 暖索引。只有 `kind=archive` 的 FUSE `EAGAIN` 或相对完整 Web 名称集的严格子集才允许重新打开目录：每步最多追加 8 次 fresh `os.scandir`，每次前等待 0.1 秒，不复用旧目录句柄，也不重新请求 Web。扫描与等待共享原来的总时间和操作预算，不重置任何预算。固定次数内仍缺项报 `directory_mismatch`，仍为 `EAGAIN` 报 `budget/fuse_pending_budget`；全局预算先耗尽则保留对应预算错误。额外名称、重复名称、其他 errno、操作超时和无法回收的 worker 均立即失败，不用后续正确结果覆盖。`browse` 不使用这项渐进协调。
+
+每个目录步在成功或失败时均保存 `first_fuse`、`fuse_attempts`、`fuse_attempt_count` 和 `fuse_wait_seconds`。每次尝试仅保存固定状态、数量、名称集合摘要、耗时及白名单错误字段，不保存原名称和路径。状态 `observed` 表示已取得快照但 Web 尚未核实完整结果；`pending` 表示 `EAGAIN`；Web 完整后才可判定 `partial`、`complete` 或 `mismatch`，重复项为 `duplicate`，其他扫描错误为 `failed`。因此 Web 失败时首轮可以保留 `observed` 或 `pending`，不能宣称目录完整。`fuse_attempts[].seconds` 是包含 worker 启动的墙钟尝试时间；成功步的 `fuse_seconds` 仍是最终成功 worker 的目录 I/O 操作时间，不包含 worker 启动。`fuse_wait_seconds` 是追加扫描的累计计划等待秒数。
+
+首次 `partial` 或 `pending` 后通过只证明有界最终一致，不能证明首次扫描完整。FUSE 名称快照没有 `complete` 标记，客户端不能单靠严格子集区分正常目录增长和真实漏项；首轮证据必须保留。离线临时目录测试通过 HTTP 完成响应前新增文件验证 fresh scan 路径，模拟 `EAGAIN` 的测试不是内核 FUSE 证据；现有 Go 冻结目录句柄测试是独立契约证据。
 
 每步先启动真实 `os.scandir`，并对枚举项执行 `entry.stat(follow_symlinks=False)`，然后请求 Web 分页。这样在进入下一层前已走过 FUSE 的目录枚举和 inode 属性路径，能够触发曾经的“先列外层，内层重复外层内容”问题。是否发送 READDIRPLUS 由挂载能力及内核决定，脚本不能凭 `os.scandir` 断言线级 opcode；需要精确确认时使用已有 FUSE 诊断设施。
 

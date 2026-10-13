@@ -27,6 +27,8 @@ import urllib.request
 VERSION = 1
 READ_SIZE = 65536
 MAX_PENDING_RETRIES = 8
+MAX_FUSE_RESCANS = 8
+FUSE_RESCAN_DELAY = 0.1
 
 # Fixed exporter schema: iostats/{stats,cache,recovery}.go. Inventory, active
 # counts, limits and latency percentiles remain snapshots, never counter deltas.
@@ -506,19 +508,76 @@ class Runner:
             cursor = next_cursor
         raise Failure("page_budget", "budget")
 
-    def compare_directory(self, case, step):
-        # FUSE first is essential: web indexing must not mask the outer-first trigger.
+    def compare_directory(self, case, step, evidence=None):
+        # Publish evidence before I/O so failures retain the original trigger.
+        result = evidence if evidence is not None else {}
+        attempts = []
+        result.update(fuse_attempts=attempts, fuse_attempt_count=0, fuse_wait_seconds=0.0)
         path = case["mount_path"] + (("/" + step["path"]) if step["path"] else "")
-        fuse = self.scan(path)
+
+        def scan():
+            attempt = {"status": "running"}
+            attempts.append(attempt)
+            result["fuse_attempt_count"] = len(attempts)
+            if len(attempts) == 1:
+                result["first_fuse"] = attempt
+            started = time.monotonic()
+            try:
+                fuse = self.scan(path)
+                actual = [e["name"] for e in fuse["entries"]]
+                attempt.update(status="observed", count=len(actual),
+                               names_sha256=digest(json.dumps(sorted(actual), ensure_ascii=False).encode()))
+                if len(actual) != len(set(actual)):
+                    attempt["status"] = "duplicate"
+                    raise Failure("duplicate_fuse_entries")
+                return set(actual), fuse["seconds"]
+            except Failure as exc:
+                attempt["status"] = "failed" if attempt["status"] == "running" else attempt["status"]
+                # Fixed error fields only; never copy arbitrary exception facts.
+                attempt["error"] = {"code": exc.code, "category": exc.category}
+                if type(exc.facts.get("errno")) is int:
+                    attempt["error"]["errno"] = exc.facts["errno"]
+                if (case["kind"] == "archive" and exc.code == "os_error" and
+                        exc.category == "mount" and exc.facts.get("errno") == errno.EAGAIN):
+                    attempt["status"] = "pending"
+                    return None, None
+                raise
+            finally:
+                attempt["seconds"] = round(time.monotonic() - started, 6)
+
+        # FUSE first is essential: web indexing must not mask the outer-first trigger.
+        actual, fuse_seconds = scan()
         web, pages = self.listing(case, step)
-        actual = [e["name"] for e in fuse["entries"]]
-        need(len(actual) == len(set(actual)), "duplicate_fuse_entries")
-        need(set(actual) == set(web), "directory_mismatch", web_count=len(web), fuse_count=len(actual),
-             missing_count=len(set(web) - set(actual)), extra_count=len(set(actual) - set(web)))
+        result["pages"] = pages
+        expected = set(web)
+        for rescan in range(MAX_FUSE_RESCANS + 1):
+            attempt = attempts[-1]
+            if actual is not None:
+                extra = actual - expected
+                missing = expected - actual
+                attempt.update(status="mismatch" if extra else "partial" if missing else "complete",
+                               missing_count=len(missing), extra_count=len(extra))
+                need(not extra, "directory_mismatch", web_count=len(web), fuse_count=len(actual),
+                     missing_count=len(missing), extra_count=len(extra))
+                if not missing:
+                    break
+                need(case["kind"] == "archive" and rescan < MAX_FUSE_RESCANS,
+                     "directory_mismatch", web_count=len(web), fuse_count=len(actual),
+                     missing_count=len(missing), extra_count=0)
+            else:
+                need(rescan < MAX_FUSE_RESCANS, "fuse_pending_budget", "budget")
+            # A rescan opens a fresh directory handle, not the frozen old one.
+            # All operations and waits share the original suite budgets.
+            need(FUSE_RESCAN_DELAY < self.deadline - time.monotonic(), "suite_deadline", "budget")
+            need(self.operations < self.args.max_operations, "operation_budget", "budget")
+            time.sleep(FUSE_RESCAN_DELAY)
+            result["fuse_wait_seconds"] = round(result["fuse_wait_seconds"] + FUSE_RESCAN_DELAY, 6)
+            actual, fuse_seconds = scan()
         if "count" in step:
             need(len(web) == step["count"], "expected_count_mismatch", actual=len(web), expected=step["count"])
-        fingerprint = digest(json.dumps(sorted(web), ensure_ascii=False).encode())
-        return {"count": len(web), "names_sha256": fingerprint, "pages": pages, "fuse_seconds": fuse["seconds"]}
+        result.update(count=len(web), names_sha256=digest(json.dumps(sorted(web), ensure_ascii=False).encode()),
+                      fuse_seconds=fuse_seconds)
+        return result
 
     def read_member(self, case, sample):
         size = sample["size"]
@@ -561,8 +620,9 @@ class Runner:
             record["stats_before"] = self.stats()
             for index, step in enumerate(case["directories"]):
                 record.update(phase="directory", active_index=index)
-                result = self.compare_directory(case, step)
-                record["steps"].append({"index": index, **result})
+                result = {"index": index}
+                record["steps"].append(result)
+                self.compare_directory(case, step, result)
             for index, sample in enumerate(case.get("reads", [])):
                 record.update(phase="read", active_index=index)
                 record["reads"].append({"index": index, "ranges": self.read_member(case, sample)})
