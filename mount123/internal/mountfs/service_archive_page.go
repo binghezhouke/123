@@ -94,20 +94,18 @@ func (s *Service) listArchivePage(ctx context.Context, fileID int64, memberPath,
 	// Bind the cursor to the metadata used to build this index, even if the
 	// detail cache changed since the initial ISO format check above.
 	scope = fmt.Sprintf("%d:%s:%d:%s", fileID, archive.version, archive.size, memberPath)
-	first, rest := splitArchivePath(memberPath)
-	if first != "" {
-		idx.mu.RLock()
-		m := idx.members[first]
-		idx.mu.RUnlock()
-		if m != nil && archiveKind(m.name) != "" {
-			nested, err := s.nestedArchiveFrom(ctx, source, archive, idx, first, m)
-			if err != nil {
-				return ArchivePage{}, err
-			}
-			defer nested.Close()
-			idx, memberPath = nested.index, rest
-		}
+	root, err := s.tree.rootArchiveView(ctx, source, archive, idx, password)
+	if err != nil {
+		return ArchivePage{}, err
 	}
+	view, localPath, _, err := s.tree.resolveArchivePath(ctx, root, memberPath, true)
+	if err != nil {
+		return ArchivePage{}, err
+	}
+	defer view.Close()
+	idx, memberPath = view.index, localPath
+	scope += ":" + view.identity
+
 	return archivePageFromIndex(idx, memberPath, scope, cursor, limit)
 }
 

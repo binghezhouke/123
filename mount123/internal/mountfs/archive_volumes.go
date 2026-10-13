@@ -25,6 +25,10 @@ type volumeReaderAt struct {
 }
 
 func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
+	return r.ReadAtContext(r.ctx, p, off)
+}
+
+func (r *volumeReaderAt) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -41,11 +45,11 @@ func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
 		if amount > size-off {
 			amount = size - off
 		}
-		source, err := r.sourceAt(r.ctx, i)
+		source, err := r.sourceAt(ctx, i)
 		if err != nil {
 			return total, err
 		}
-		n, err := source.ReadAtContext(r.ctx, p[:amount], off)
+		n, err := source.ReadAtContext(ctx, p[:amount], off)
 		total += n
 		p = p[n:]
 		if err != nil && !(err == io.EOF && int64(n) == amount) {

@@ -249,26 +249,19 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	if err != nil {
 		return nil, 0, err
 	}
-	first, rest := splitArchivePath(memberPath)
-	if rest != "" {
-		idx.mu.RLock()
-		m := idx.members[first]
-		idx.mu.RUnlock()
-		if m != nil && archiveKind(m.name) != "" {
-			nested, nestedErr := s.nestedArchiveFrom(ctx, source, archive, idx, first, m)
-			if nestedErr != nil {
-				return nil, 0, nestedErr
-			}
-			nested.index.mu.RLock()
-			inner := nested.index.members[rest]
-			nested.index.mu.RUnlock()
-			if inner == nil {
-				_ = nested.Close()
-				return nil, 0, syscall.ENOENT
-			}
-			return s.openNestedMember(ctx, nested, inner)
-		}
+	root, err := s.tree.rootArchiveView(ctx, source, archive, idx, password)
+	if err != nil {
+		return nil, 0, err
 	}
+	view, _, nestedMember, err := s.tree.resolveArchivePath(ctx, root, memberPath, false)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer view.Close()
+	if view.depth > 0 {
+		return s.tree.openNestedArchiveMember(ctx, view, nestedMember)
+	}
+
 	kind := archive.kind()
 	if kind == "" {
 		return nil, 0, syscall.ENOTSUP

@@ -177,7 +177,7 @@ Range 请求遇到连接中断、429、502/503/504 会有限重试；每次探�
 
 支持普通文件、单卷 ZIP（Store / Deflate，包括标准库支持的 ZIP64）以及采用 AES 或 ZipCrypto 加密成员的 ZIP。另支持 7z、7z 分卷（从 `.7z.001` 进入）、单卷 RAR，包括加密目录、加密成员和固实压缩。传统加密使用 [yeka/zip](https://github.com/yeka/zip) 的分块解密状态机，AES 使用 Go 标准密码库和 PBKDF2，支持 128/192/256 位、AE-1/AE-2。压缩成员的打开和逐段读取行为见“读取和缓存”：大成员可以在解压过程中先交付已生成的明文，完整校验通过后才发布完整缓存。ZIP 加密中央目录、ZIP 的其他压缩算法、分卷 ZIP、分卷 RAR 暂不支持。
 
-嵌套目前支持外层 7z 中的一级内包：Web 可进入 ZIP/7z/RAR，FUSE 可进入 7z/RAR，内层 `.7z.001` 可拼接同目录分卷。更深层嵌套和 ZIP/RAR 作为外层的通用组合仍由 [#77](https://github.com/binghezhouke/123/issues/77) 跟进；ZIP 内部的另一个 ZIP 目前作为普通成员读取。按需块读取、取消和递归解码额度的合同见[嵌套归档读取设计](../docs/design/nested-archive-reading.md)。
+Web 与 FUSE 均支持 ZIP、7z、RAR 的内外层组合和多层进入，默认云端归档内最多再展开 8 层。内层 `.7z.001` 拼接同目录连续分卷；ZIP 多磁盘分卷尚未支持。仅在进入内包时读取索引，压缩成员按需缓存解压块；固实压缩首次读取靠后内容仍需解码此前缀。普通目录、同名目录和归档层不会被折叠。密码沿用侧车和递归共享密码。读取、缓存、取消和递归解码额度的合同见[嵌套归档读取设计](../docs/design/nested-archive-reading.md)。
 
 7z 使用纯 Go 库 [bodgit/sevenzip 的维护 fork](https://github.com/binghezhouke/sevenzip)，基于上游 `v1.6.1` 增加组级读取与成员偏移接口，固定版本和扩展边界见[维护说明](../docs/sevenzip-fork.md)。RAR 使用 [nwaples/rardecode](https://github.com/nwaples/rardecode)，运行时无需 `7z` / `unrar` 命令。7z/RAR 从同级 `文件名.7z.pwd` / `文件名.rar.pwd` 读取密码；7z 分卷共用 `文件名.7z.pwd`，要求所有卷在同一网盘目录、从 001 连续编号，最多 1000 卷。只有 `.7z.001` 映射为目录，后续卷保留为普通文件。分卷按需获取直链和读取，缓存键包含整组分卷版本。
 

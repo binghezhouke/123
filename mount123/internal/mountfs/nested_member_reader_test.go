@@ -133,13 +133,13 @@ func TestNestedMemberTailDemandStopsAtRequestedBlock(t *testing.T) {
 }
 
 func TestNestedConcatDoesNotOpenUntouchedVolume(t *testing.T) {
-	parts := []io.ReaderAt{bytes.NewReader([]byte("head")), untouchedNestedPart{t}, bytes.NewReader([]byte("tail"))}
-	r := &nestedConcatReader{parts: parts, sizes: []int64{4, 4, 4}, total: 12}
+	parts := []archiveReaderAt{archivePlainInput{bytes.NewReader([]byte("head"))}, archivePlainInput{untouchedNestedPart{t}}, archivePlainInput{bytes.NewReader([]byte("tail"))}}
+	r := archiveConcatInput{parts: parts, sizes: []int64{4, 4, 4}}
 	b := make([]byte, 4)
-	if _, err := r.ReadAt(b, 0); err != nil || string(b) != "head" {
+	if _, err := r.ReadAtContext(context.Background(), b, 0); err != nil || string(b) != "head" {
 		t.Fatalf("head %q %v", b, err)
 	}
-	if _, err := r.ReadAt(b, 8); err != nil || string(b) != "tail" {
+	if _, err := r.ReadAtContext(context.Background(), b, 8); err != nil || string(b) != "tail" {
 		t.Fatalf("tail %q %v", b, err)
 	}
 }

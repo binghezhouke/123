@@ -257,7 +257,7 @@ func (p *imagePrefetch) plan(n *Node, entries map[string]*entry) []*entry {
 		count = p.tree.opts.PrefetchFiles
 	}
 	solid7z := n.item.member != nil && p.tree.cache != nil && p.tree.solid7zCacheable(n.item.member)
-	if n.item.member != nil && n.item.member.format != "" && !solid7z && count > 1 {
+	if n.item.member != nil && n.item.member.format != "" && n.item.member.format != ".zip" && !solid7z && count > 1 {
 		count = 1
 	}
 	budget := p.tree.opts.PrefetchBytes

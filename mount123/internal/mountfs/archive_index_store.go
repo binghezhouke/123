@@ -10,7 +10,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/nwaples/rardecode/v2"
 )
 
@@ -340,7 +339,7 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 	return idx, nil
 }
 
-func (z *zipIndex) attachZIPReader(source *storage.Remote) {
+func (z *zipIndex) attachZIPReader(source archiveReaderAt) {
 	reader := &contextZIPReaderAt{source: source, gate: make(chan struct{}, 1)}
 	for _, m := range z.members {
 		m.reader = reader

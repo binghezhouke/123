@@ -202,12 +202,7 @@ func TestArchiveMemberStreamPartialCloseDoesNotDrain(t *testing.T) {
 			}
 			input := &archiveStreamCountedInput{Reader: bytes.NewReader(data)}
 			if kind == "zip" {
-				zr, err := zip.NewReader(input, int64(len(data)))
-				if err != nil {
-					t.Fatal(err)
-				}
-				f := zr.File[0]
-				m = &member{format: ".zip", name: f.Name, size: f.UncompressedSize64, crc: f.CRC32, file: f}
+				m = archiveZIPTestMember(t, input, int64(len(data)))
 			}
 			r, err := openArchiveMemberStream(context.Background(), input, int64(len(data)), m, nil)
 			if err != nil {
@@ -281,7 +276,7 @@ func TestArchiveMemberStreamFullReadRejectsChecksumFailure(t *testing.T) {
 					t.Fatal(err)
 				}
 				data[offset] ^= 1
-				m = &member{format: ".zip", name: f.Name, size: f.UncompressedSize64, crc: f.CRC32, file: f}
+				m = archiveZIPTestMember(t, bytes.NewReader(data), int64(len(data)))
 			}
 			if m.format == ".rar" {
 				offset := rardecode.ExportLocator(*m.rarLocator).Offset
@@ -320,31 +315,6 @@ func TestArchiveMemberStreamFullReadRejectsChecksumFailure(t *testing.T) {
 			}
 			if !errors.Is(err, want) {
 				t.Fatalf("full member checksum failure: got %v, want %v", err, want)
-			}
-		})
-	}
-}
-
-func TestArchiveMemberStreamRejectsEncryptedZIPWithoutReading(t *testing.T) {
-	for _, fixture := range []string{"zipcrypto-deflate.zip", "aes256-ae2-store.zip"} {
-		t.Run(fixture, func(t *testing.T) {
-			data, err := os.ReadFile(filepath.Join("testdata/encrypted", fixture))
-			if err != nil {
-				t.Fatal(err)
-			}
-			input := &archiveStreamCountedInput{Reader: bytes.NewReader(data)}
-			zr, err := zip.NewReader(input, int64(len(data)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			f := zr.File[0]
-			m := &member{format: ".zip", name: f.Name, size: f.UncompressedSize64, file: f}
-			before := input.readBytes
-			if _, err := openArchiveMemberStream(context.Background(), input, int64(len(data)), m, []byte("mount-test-password")); !errors.Is(err, syscall.EOPNOTSUPP) {
-				t.Fatalf("encrypted ZIP error: %v", err)
-			}
-			if input.readBytes != before {
-				t.Fatal("unsupported encrypted ZIP touched payload")
 			}
 		})
 	}

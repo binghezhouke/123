@@ -3,14 +3,12 @@ package mountfs
 
 import (
 	"archive/zip"
-	"compress/flate"
 	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
-	"hash/crc32"
 	"hash/fnv"
 	"io"
 	"log"
@@ -66,6 +64,7 @@ type Options struct {
 	MaxZIPEntries           int
 	MaxExpandedNodes        int
 	MaxDepth                int
+	MaxArchiveDepth         int
 	MaxNameBytes            int
 	MaxConcurrentBuilds     int
 	RefreshFileMetadata     bool
@@ -84,6 +83,9 @@ type Options struct {
 }
 
 func defaults(o Options) Options {
+	if o.MaxArchiveDepth <= 0 {
+		o.MaxArchiveDepth = 8
+	}
 	if o.StreamMemberThreshold <= 0 {
 		o.StreamMemberThreshold = 8 << 20
 	}
@@ -883,7 +885,7 @@ func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int
 }
 
 type contextZIPReaderAt struct {
-	source   *storage.Remote
+	source   archiveReaderAt
 	gate     chan struct{}
 	ctx      context.Context
 	bounded  bool
@@ -943,11 +945,11 @@ func (m *member) dataOffset(ctx context.Context) (int64, error) {
 	return offset, err
 }
 
-func buildZIP(ctx context.Context, t *Tree, source *storage.Remote, size int64) (*zipIndex, error) {
+func buildZIP(ctx context.Context, t *Tree, source archiveReaderAt, size int64) (*zipIndex, error) {
 	return buildZIPWithProgress(ctx, t, source, size, nil)
 }
 
-func buildZIPWithProgress(ctx context.Context, t *Tree, source *storage.Remote, size int64, progress func(int64)) (*zipIndex, error) {
+func buildZIPWithProgress(ctx context.Context, t *Tree, source archiveReaderAt, size int64, progress func(int64)) (*zipIndex, error) {
 	started := time.Now()
 	defer t.observeStage(iostats.StageArchiveIndex, started)
 	adapter := &contextZIPReaderAt{source: source, ctx: ctx, gate: make(chan struct{}, 1), progress: progress}
@@ -1051,7 +1053,7 @@ func buildZIPWithProgress(ctx context.Context, t *Tree, source *storage.Remote, 
 				if !f.Mode().IsRegular() || f.UncompressedSize64 > math.MaxInt64 {
 					return nil, errors.New("unsupported ZIP entry type or size")
 				}
-				m := &member{file: f, reader: adapter, name: f.Name, headerOffset: localOffsets[fileIndex], modifiedTime: f.ModifiedTime, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
+				m := &member{format: ".zip", ordinal: fileIndex, file: f, reader: adapter, name: f.Name, headerOffset: localOffsets[fileIndex], modifiedTime: f.ModifiedTime, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
 				if hasAES {
 					m.aes = &aesInfo
 					m.method = aesInfo.method
@@ -1155,6 +1157,10 @@ func (n *Node) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs
 	if !ok {
 		return nil, syscall.ENOENT
 	}
+	e, err = n.expandNested(ctx, e)
+	if err != nil {
+		return nil, toErrno(err)
+	}
 	if e.cloud != nil && n.tree.opts.RefreshFileMetadata {
 		fresh, err := n.tree.lookupCloudMetadata(ctx, e.cloud)
 		if errors.Is(err, errInfoNotFound) {
@@ -1196,6 +1202,13 @@ func stableAttrForEntry(parentIno uint64, e *entry) fs.StableAttr {
 	}
 	if e.source != nil {
 		fmt.Fprint(hash, ":", e.source.Key())
+	}
+	if e.nested != nil {
+		identity := e.nested.identity
+		if identity == "" {
+			identity = e.nested.cachePrefix
+		}
+		fmt.Fprintf(hash, ":nested:%s:%s", identity, e.zipPath)
 	}
 	if e.member != nil {
 		fmt.Fprintf(hash, ":%s:%d:%d", e.member.name, e.member.crc, e.member.size)
@@ -1243,7 +1256,7 @@ func (n *Node) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 	result := make([]fuse.DirEntry, 0, len(names))
 	for _, name := range names {
 		mode := uint32(fuse.S_IFREG)
-		if entries[name].directory {
+		if entries[name].directory || isExpandableArchiveMember(entries[name]) {
 			mode = fuse.S_IFDIR
 		}
 		result = append(result, fuse.DirEntry{Name: name, Mode: mode})
@@ -1298,7 +1311,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		return n.newRemoteHandle(source, 0, uint64(n.item.cloud.Size)), fuse.FOPEN_DIRECT_IO, 0
 	}
-	if n.item.member.format != "" {
+	if n.item.member.format != "" && n.item.member.format != ".zip" {
 		return n.openOtherArchive(ctx)
 	}
 	m := n.item.member
@@ -1494,26 +1507,14 @@ type contextRemote struct {
 func (r contextRemote) ReadAt(p []byte, off int64) (int, error) {
 	return r.source.ReadAtContext(r.ctx, p, off)
 }
-func inflateMember(ctx context.Context, src *storage.Remote, m *member, w io.Writer) error {
-	if m.compressed > math.MaxInt64 || m.size > math.MaxInt64 {
-		return errors.New("ZIP member size exceeds supported range")
-	}
-	offset, err := m.dataOffset(ctx)
+func inflateMember(ctx context.Context, src archiveReaderAt, m *member, w io.Writer) error {
+	r, err := openZIPMemberStream(ctx, src, m, nil)
 	if err != nil {
 		return err
 	}
-	section := io.NewSectionReader(contextRemote{ctx: ctx, source: src}, offset, int64(m.compressed))
-	zr := flate.NewReader(section)
-	defer zr.Close()
-	h := crc32.NewIEEE()
-	written, err := io.Copy(io.MultiWriter(w, h), &contextReader{ctx: ctx, r: zr})
-	if err != nil {
-		return err
-	}
-	if written != int64(m.size) || h.Sum32() != m.crc {
-		return errors.New("ZIP member size or CRC mismatch")
-	}
-	return ctx.Err()
+	defer r.Close()
+	_, err = io.Copy(w, r)
+	return err
 }
 
 type contextReader struct {
@@ -1562,6 +1563,8 @@ func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 		n, err = h.remote.ReadAtContext(ctx, dest, h.base+off)
 	} else if h.growing != nil {
 		n, err = h.growing.ReadAt(ctx, dest, off)
+	} else if reader, ok := h.reader.(archiveReaderAt); ok {
+		n, err = reader.ReadAtContext(ctx, dest, off)
 	} else {
 		n, err = h.reader.ReadAt(dest, off)
 	}

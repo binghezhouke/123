@@ -1,7 +1,6 @@
 package mountfs
 
 import (
-	"archive/zip"
 	"bytes"
 	"context"
 	"github.com/bodgit/sevenzip"
@@ -13,33 +12,6 @@ import (
 
 	"github.com/binghezhouke/123/mount123/internal/storage"
 )
-
-func TestIndexNestedZIPExplicitSeam(t *testing.T) {
-	var data bytes.Buffer
-	zw := zip.NewWriter(&data)
-	f, err := zw.Create("folder/hello.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := f.Write([]byte("hello")); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	reader := bytes.NewReader(data.Bytes())
-	members, err := indexNestedZIP(reader, int64(reader.Len()), defaultNestedArchivePolicy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	idx, err := nestedIndexFromMembers(members, defaultNestedArchivePolicy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if idx.members["folder/hello.txt"] == nil {
-		t.Fatalf("nested ZIP member missing: %#v", idx.members)
-	}
-}
 
 func TestIndexNested7zExplicitSeam(t *testing.T) {
 	data, err := os.ReadFile("testdata/encrypted/plain.7z")
@@ -60,7 +32,7 @@ func TestNestedArchivePolicyBoundsExpansion(t *testing.T) {
 	if err := p.allow(1, 4<<30); err != nil {
 		t.Fatalf("allowed nested archive: %v", err)
 	}
-	if err := p.allow(2, 1); err != syscall.ELOOP {
+	if err := p.allow(p.MaxDepth+1, 1); err != syscall.ELOOP {
 		t.Fatalf("depth error = %v", err)
 	}
 	if err := p.allow(1, p.MaxBytes+1); err != syscall.EFBIG {
@@ -138,16 +110,13 @@ func TestNested7zVolumesConcatenateOnExplicitLookup(t *testing.T) {
 		t.Fatal("volume member was not expanded")
 	}
 	innerFile := lookup(t, inner, "plain.7z")
-	if !innerFile.item.directory {
-		// The fixture intentionally keeps one extra archive layer to validate
-		// that the volume reader returns the complete inner bytes.
-		if len(readNode(t, innerFile, 0, 64)) == 0 {
-			t.Fatal("volume nested member is empty")
-		}
-		return
+	if !innerFile.item.directory || innerFile.item.nested == nil {
+		t.Fatal("archive inside concatenated volumes was not expanded")
 	}
-	if got := lookup(t, lookup(t, innerFile, "folder"), "hello.txt"); len(readNode(t, got, 0, 64)) == 0 {
-		t.Fatal("volume nested member is empty")
+	file := lookup(t, lookup(t, innerFile, "folder"), "hello.txt")
+	want := bytes.Repeat([]byte("mount 7z fixture contents\n"), 200)
+	if got := readNode(t, file, 0, len(want)+1); !bytes.Equal(got, want) {
+		t.Fatalf("nested volume member content = %q, want %q", got, want)
 	}
 }
 
@@ -163,25 +132,6 @@ func TestSplit7zVolumeIsDirectoryEntryBeforeExpansion(t *testing.T) {
 	}
 	if entries["inner.7z.002"].directory {
 		t.Fatal("non-entry split volume must remain a regular file")
-	}
-}
-
-func TestNestedSplitVolumeCycleIsHidden(t *testing.T) {
-	if !repeatedSplitVolume("NO.002.7z.001", "NO.002.7z.001") {
-		t.Fatal("same split volume path must be treated as a cycle")
-	}
-	if repeatedSplitVolume("NO.002.7z.001", "NO.002.7z.002") {
-		t.Fatal("different split volume must remain visible")
-	}
-}
-
-func TestNestedSplitVolumeChainCollapsesToLeaf(t *testing.T) {
-	leaf := &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{"001.jpg": {name: "001.jpg"}}}
-	second := &zipDir{dirs: map[string]*zipDir{"inner.7z.001": leaf}, files: map[string]*member{}}
-	root := &zipDir{dirs: map[string]*zipDir{"inner.7z.001": second}, files: map[string]*member{}}
-	got := nestedSplitLeafPath(root, "", "inner.7z.001")
-	if got != "inner.7z.001/inner.7z.001" {
-		t.Fatalf("leaf path = %q", got)
 	}
 }
 
@@ -233,28 +183,62 @@ func TestNestedCopyMemberReaderUsesPackedRange(t *testing.T) {
 	}
 }
 
-func TestNestedCopyMemberReaderSkipsPasswordProtectedMapping(t *testing.T) {
-	data, err := os.ReadFile("testdata/encrypted/nested-vol-outer.7z")
+func TestNestedCopyMemberReaderPasswordMetadata(t *testing.T) {
+	plain := []byte("independent plaintext Copy bytes with a shared password")
+	encrypted, err := os.ReadFile("testdata/encrypted/copy.7z")
 	if err != nil {
 		t.Fatal(err)
 	}
-	zr, err := sevenzip.NewReader(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	f := zr.File[0]
-	off, ok := f.StreamOffset()
-	if !ok {
-		t.Fatal("fixture member has no stream")
-	}
-	streams := zr.Streams()
-	member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0, sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
-	_, direct, err := nestedCopyMemberReader(bytes.NewReader(data), int64(len(data)), member, 0, []byte("shared-password"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if direct {
-		t.Fatal("password-protected outer stream was mapped as raw packed bytes")
+	for _, fixture := range []struct {
+		name, password string
+		data, want     []byte
+		direct         bool
+	}{
+		{"plaintext_copy_with_shared_password", "shared-password", copy7zFixture(plain), plain, true},
+		{"aes_copy_with_correct_password", "mount-test-password", encrypted, bytes.Repeat([]byte("mount 7z fixture contents\n"), 200), false},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			zr, err := sevenzip.NewReaderWithPassword(bytes.NewReader(fixture.data), int64(len(fixture.data)), fixture.password)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f := zr.File[0]
+			off, ok := f.StreamOffset()
+			if !ok {
+				t.Fatal("fixture member has no stream")
+			}
+			streams := zr.Streams()
+			ranges, err := zr.PackedRanges(f.Stream)
+			if err != nil || len(ranges) != 1 || ranges[0].Size != int64(streams[f.Stream].UncompressedSize) {
+				t.Fatalf("fixture must have one equal-sized packed range: %+v, %v", ranges, err)
+			}
+			if streams[f.Stream].Stored != fixture.direct {
+				t.Fatalf("fixture Stored = %v, want %v", streams[f.Stream].Stored, fixture.direct)
+			}
+			r, err := f.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			decoded, err := io.ReadAll(r)
+			_ = r.Close()
+			if err != nil || !bytes.Equal(decoded, fixture.want) {
+				t.Fatalf("fixture does not decode to independent golden bytes: %v", err)
+			}
+			member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0,
+				sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
+			mapped, direct, err := nestedCopyMemberReader(bytes.NewReader(fixture.data), int64(len(fixture.data)), member, 0, []byte(fixture.password))
+			if err != nil || direct != fixture.direct {
+				t.Fatalf("direct mapping = %v, %v; want %v", direct, err, fixture.direct)
+			}
+			if direct {
+				got := make([]byte, len(fixture.want))
+				if n, err := mapped.ReadAt(got, 0); n != len(got) || err != nil || !bytes.Equal(got, fixture.want) {
+					t.Fatalf("direct plaintext read = %d, %v; golden bytes differ", n, err)
+				}
+			} else if mapped != nil {
+				t.Fatal("AES Copy exposed a raw packed reader")
+			}
+		})
 	}
 }
 

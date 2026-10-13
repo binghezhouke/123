@@ -14,6 +14,19 @@ import (
 
 const nestedMemberBlockBytes int64 = 1 << 20
 
+// Ancestors fill synchronously while a child block is reserved. Budget those
+// reservations across the maximum chain, leaving half for remote range reads.
+// Normal caches retain 1 MiB blocks; small caches use power-of-two blocks.
+func (t *Tree) nestedBlockBytes() int64 {
+	depth := int64(defaults(t.opts).MaxArchiveDepth)
+	budget := t.cache.Capacity() / 2 / (depth + 1)
+	block := nestedMemberBlockBytes
+	for block > budget && block > 1 {
+		block /= 2
+	}
+	return block
+}
+
 // nestedMemberReader persists only demanded decompressed blocks. The live
 // decoder and position form a forward continuation point; no codec snapshot is
 // serialized. A backward cache miss (or idle expiry) replays the stream. Solid
@@ -21,52 +34,29 @@ const nestedMemberBlockBytes int64 = 1 << 20
 // Partial blocks are not full-member CRC verified; they are isolated from the
 // verified full-member cache. The inner parser validates its header CRCs.
 type nestedMemberReader struct {
-	mu        sync.Mutex
-	serial    sync.Once
-	turn      chan struct{}
-	owner     *Tree
-	operation *nestedReadContext
-	ctx       context.Context
-	cache     *storage.Cache
-	key       string
-	size      int64
-	open      func(context.Context) (io.ReadCloser, error)
-	gate      func(context.Context) (func(), error)
-	stream    io.ReadCloser
-	position  int64
-	idle      *time.Timer
-	closed    atomic.Bool
+	mu         sync.Mutex
+	serial     sync.Once
+	turn       chan struct{}
+	owner      *Tree
+	operation  *nestedReadContext
+	ctx        context.Context
+	cache      *storage.Cache
+	key        string
+	size       int64
+	blockBytes int64
+	open       func(context.Context) (io.ReadCloser, error)
+	gate       func(context.Context) (func(), error)
+	stream     io.ReadCloser
+	position   int64
+	idle       *time.Timer
+	closed     atomic.Bool
 }
 
-func (t *Tree) newNestedMemberReader(ctx context.Context, source *storage.Remote, a *archiveDescriptor, identity string, m *member, password []byte) (*nestedMemberReader, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
+func (r *nestedMemberReader) blockSize() int64 {
+	if r.blockBytes > 0 {
+		return r.blockBytes
 	}
-	key := t.diskCacheScope() + ":" + identity + fmt.Sprintf(":nested-range-v3:%q:%d:%08x:", m.name, m.size, m.crc) + t.passwordTag(a, password)
-	protected, err := t.encryptPassword(key, password)
-	if err != nil {
-		return nil, err
-	}
-	lifetime := t.ctx
-	if lifetime == nil {
-		lifetime = context.Background()
-	}
-	return &nestedMemberReader{ctx: lifetime, owner: t, cache: t.cache, key: key, size: int64(m.size), gate: t.acquireBuild, open: func(readCtx context.Context) (io.ReadCloser, error) {
-		pw, err := t.decryptPassword(key, protected)
-		if err != nil {
-			return nil, err
-		}
-		defer clear(pw)
-		reader, size, current, err := t.archiveSource(readCtx, source, a)
-		if err != nil {
-			return nil, err
-		}
-		if current != identity {
-			return nil, syscall.ESTALE
-		}
-		stream, err := openArchiveMemberStream(readCtx, reader, size, m, pw)
-		return stream, archiveReadError(readCtx, err, pw)
-	}}, nil
+	return nestedMemberBlockBytes
 }
 
 func (r *nestedMemberReader) reset() {
@@ -136,8 +126,9 @@ func (r *nestedMemberReader) readCached(ctx context.Context, p []byte, off int64
 		if err := r.ctx.Err(); err != nil {
 			return total, err
 		}
-		start := off / nestedMemberBlockBytes * nestedMemberBlockBytes
-		length := min(nestedMemberBlockBytes, r.size-start)
+		blockBytes := r.blockSize()
+		start := off / blockBytes * blockBytes
+		length := min(blockBytes, r.size-start)
 		h, err := r.cache.OpenCached(fmt.Sprintf("%s:block:%d", r.key, start), length)
 		if err != nil || h == nil {
 			return total, err
@@ -214,8 +205,9 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		start := off / nestedMemberBlockBytes * nestedMemberBlockBytes
-		length := min(nestedMemberBlockBytes, r.size-start)
+		blockBytes := r.blockSize()
+		start := off / blockBytes * blockBytes
+		length := min(blockBytes, r.size-start)
 		handle, err := r.cache.Acquire(ctx, fmt.Sprintf("%s:block:%d", r.key, start), length, func(ctx context.Context, w io.Writer) error {
 			var err error
 			if r.stream != nil && start < r.position {

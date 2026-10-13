@@ -2,20 +2,16 @@ package mountfs
 
 import (
 	"archive/zip"
-	"compress/flate"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha1"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"hash"
-	"hash/crc32"
 	"io"
 	"strings"
 	"syscall"
@@ -23,7 +19,6 @@ import (
 
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	yzip "github.com/yeka/zip"
-	"golang.org/x/crypto/pbkdf2"
 )
 
 const maxPasswordBytes = 4096
@@ -265,7 +260,7 @@ func (t *Tree) passwordTag(archive *archiveDescriptor, password []byte) string {
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-func readAtFull(ctx context.Context, source *storage.Remote, p []byte, off int64) error {
+func readAtFull(ctx context.Context, source archiveReaderAt, p []byte, off int64) error {
 	for len(p) > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -285,50 +280,14 @@ func readAtFull(ctx context.Context, source *storage.Remote, p []byte, off int64
 	return nil
 }
 
-func encryptedMember(ctx context.Context, src *storage.Remote, m *member, password []byte, dst io.Writer) error {
-	if m.reader == nil {
-		return errors.New("ZIP member index is unavailable")
-	}
-	if m.compressed > uint64(^uint64(0)>>1) || m.size > uint64(^uint64(0)>>1) {
-		return syscall.EFBIG
-	}
-	offset, err := m.dataOffset(ctx)
+func encryptedMember(ctx context.Context, src archiveReaderAt, m *member, password []byte, dst io.Writer) error {
+	r, err := openZIPMemberStream(ctx, src, m, password)
 	if err != nil {
 		return err
 	}
-	if m.aes != nil {
-		return decryptAESMember(ctx, src, m, *m.aes, password, offset, dst)
-	}
-	if m.compressed < 12 {
-		return ErrWrongZIPPassword
-	}
-	var header [12]byte
-	if err := readAtFull(ctx, src, header[:], offset); err != nil {
-		return err
-	}
-	crypto := yzip.NewZipCrypto(password)
-	plainHeader := crypto.Decrypt(header[:])
-	check := byte(m.crc >> 24)
-	if m.flags&8 != 0 {
-		check = byte(m.modifiedTime >> 8)
-	}
-	if plainHeader[11] != check {
-		return ErrWrongZIPPassword
-	}
-	compressed := io.NewSectionReader(encryptedReadAt{ctx: ctx, source: src}, offset+12, int64(m.compressed)-12)
-	decrypted := &zipCryptoReader{ctx: ctx, r: compressed, z: crypto}
-	var plain io.Reader = decrypted
-	var closer io.Closer
-	if m.method == zip.Deflate {
-		zr := flate.NewReader(decrypted)
-		plain, closer = zr, zr
-	} else if m.method != zip.Store {
-		return syscall.EOPNOTSUPP
-	}
-	if closer != nil {
-		defer closer.Close()
-	}
-	return copyAndCheckMember(ctx, plain, m, dst)
+	defer r.Close()
+	_, err = io.Copy(dst, r)
+	return err
 }
 
 type zipCryptoReader struct {
@@ -348,64 +307,16 @@ func (r *zipCryptoReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func decryptAESMember(ctx context.Context, src *storage.Remote, m *member, info aesMemberInfo, password []byte, offset int64, dst io.Writer) error {
-	keyLen := 16
-	if info.strength == 2 {
-		keyLen = 24
-	}
-	if info.strength == 3 {
-		keyLen = 32
-	}
-	saltLen := keyLen / 2
-	overhead := saltLen + 2 + 10
-	if m.compressed < uint64(overhead) {
-		return ErrWrongZIPPassword
-	}
-	var prefix [34]byte
-	if err := readAtFull(ctx, src, prefix[:saltLen+2], offset); err != nil {
-		return err
-	}
-	derived := pbkdf2.Key(password, prefix[:saltLen], 1000, 2*keyLen+2, sha1.New)
-	if subtle.ConstantTimeCompare(derived[2*keyLen:], prefix[saltLen:saltLen+2]) != 1 {
-		return ErrWrongZIPPassword
-	}
-	cipherLen := int64(m.compressed) - int64(overhead)
-	block, err := aes.NewCipher(derived[:keyLen])
+func decryptAESMember(ctx context.Context, src archiveReaderAt, m *member, info aesMemberInfo, password []byte, offset int64, dst io.Writer) error {
+	copy := *m
+	copy.aes, copy.encrypted = &info, true
+	r, err := openZIPMemberStreamAt(ctx, src, &copy, password, offset)
 	if err != nil {
 		return err
 	}
-	stream := newWinZipCTR(block)
-	mac := hmac.New(sha1.New, derived[keyLen:2*keyLen])
-	ciphertext := io.NewSectionReader(encryptedReadAt{ctx: ctx, source: src}, offset+int64(saltLen+2), cipherLen)
-	tee := &hmacReader{ctx: ctx, r: ciphertext, mac: mac}
-	plain := &aesCTRReader{ctx: ctx, r: tee, stream: stream}
-	var decoded io.Reader = plain
-	var closer io.Closer
-	if info.method == zip.Deflate {
-		zr := flate.NewReader(plain)
-		decoded, closer = zr, zr
-	} else if info.method != zip.Store {
-		return syscall.EOPNOTSUPP
-	}
-	if closer != nil {
-		defer closer.Close()
-	}
-	if err := copyAndCheckMember(ctx, decoded, m, dst); err != nil {
-		return err
-	}
-	// Deflate may stop before the section ends. Drain the unread ciphertext so
-	// the MAC authenticates every byte that belongs to this member.
-	if _, err := io.Copy(io.Discard, &contextReader{ctx: ctx, r: tee}); err != nil {
-		return err
-	}
-	var auth [10]byte
-	if err := readAtFull(ctx, src, auth[:], offset+int64(m.compressed)-10); err != nil {
-		return err
-	}
-	if subtle.ConstantTimeCompare(mac.Sum(nil)[:10], auth[:]) != 1 {
-		return ErrWrongZIPPassword
-	}
-	return ctx.Err()
+	defer r.Close()
+	_, err = io.Copy(dst, r)
+	return err
 }
 
 type aesCTR struct {
@@ -462,7 +373,7 @@ func (r *hmacReader) Read(p []byte) (int, error) {
 
 type encryptedReadAt struct {
 	ctx    context.Context
-	source *storage.Remote
+	source archiveReaderAt
 }
 type encryptedSourceError struct{ err error }
 
@@ -489,62 +400,13 @@ func (r *aesCTRReader) Read(p []byte) (int, error) {
 	return n, e
 }
 
-func copyAndCheckMember(ctx context.Context, r io.Reader, m *member, dst io.Writer) error {
-	crc := crc32.NewIEEE()
-	limited := io.LimitReader(&contextReader{ctx: ctx, r: r}, int64(m.size)+1)
-	buf := make([]byte, 64<<10)
-	var n int64
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		got, readErr := limited.Read(buf)
-		if got > 0 {
-			written, writeErr := dst.Write(buf[:got])
-			if writeErr != nil {
-				return writeErr
-			}
-			if written != got {
-				return io.ErrShortWrite
-			}
-			_, _ = crc.Write(buf[:got])
-			n += int64(got)
-			if n > int64(m.size) {
-				return ErrWrongZIPPassword
-			}
-		}
-		if readErr == io.EOF {
-			break
-		}
-		if readErr != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			var sourceErr encryptedSourceError
-			if errors.As(readErr, &sourceErr) {
-				return sourceErr.err
-			}
-			return ErrWrongZIPPassword
-		}
-	}
-	if n != int64(m.size) {
-		return ErrWrongZIPPassword
-	}
-	if m.aes == nil || m.aes.version == 1 {
-		if crc.Sum32() != m.crc {
-			return ErrWrongZIPPassword
-		}
-	}
-	return ctx.Err()
-}
-
 // ValidateZIPPassword verifies the password against the smallest encrypted
 // member and returns only after its complete size, CRC/HMAC, and stream checks.
 func ValidateZIPPassword(ctx context.Context, source *storage.Remote, size int64, password []byte) error {
 	return validateZIPPassword(ctx, source, size, password, 0)
 }
 
-func validateZIPPassword(ctx context.Context, source *storage.Remote, size int64, password []byte, limit uint64) error {
+func validateZIPPassword(ctx context.Context, source archiveReaderAt, size int64, password []byte, limit uint64) error {
 	if len(password) == 0 || len(password) > maxPasswordBytes || !utf8.Valid(password) {
 		return syscall.EACCES
 	}

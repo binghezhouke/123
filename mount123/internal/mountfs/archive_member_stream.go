@@ -119,14 +119,7 @@ func openArchiveMemberStream(ctx context.Context, reader io.ReaderAt, size int64
 		_ = session.Close()
 		return nil, syscall.ESTALE
 	case ".zip":
-		if m.file == nil || m.encrypted || m.flags&1 != 0 || m.file.Flags&1 != 0 {
-			return nil, syscall.EOPNOTSUPP
-		}
-		r, err := m.file.Open()
-		if err != nil {
-			return nil, err
-		}
-		return wrap(r, r), nil
+		return openZIPMemberStream(ctx, zipStreamReaderAt{reader: reader, size: size, bounded: true}, m, password)
 	default:
 		return nil, syscall.EOPNOTSUPP
 	}

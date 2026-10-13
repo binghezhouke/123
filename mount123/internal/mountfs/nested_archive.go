@@ -1,15 +1,11 @@
 package mountfs
 
 import (
-	"archive/zip"
 	"context"
 	"errors"
-	"fmt"
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/bodgit/sevenzip"
-	"github.com/hanwen/go-fuse/v2/fs"
 	"io"
-	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,38 +16,71 @@ import (
 // Compressed outer members use the bounded cache fallback; neither path is
 // activated by Readdir, only by explicit Lookup.
 type nestedArchive struct {
-	mu          sync.Mutex
-	reader      io.ReaderAt
-	size        int64
-	format      string
-	index       *zipIndex
-	password    []byte
-	cachePrefix string
-	// handles pins fallback members in the cache while the virtual archive is
-	// reachable. Copy/Store members do not need a pin because they read from the
-	// outer source directly. The finalizer is a last-resort cleanup for FUSE
-	// inode lifetimes, which do not expose a corresponding Go release hook.
-	handles     []*storage.Handle
-	lazyReaders []*nestedMemberReader
-	closed      bool
+	mu            sync.Mutex
+	passwordMu    sync.Mutex
+	reader        io.ReaderAt // legacy fixture input; live views use input below
+	input         archiveReaderAt
+	size          int64
+	format        string
+	index         *zipIndex
+	password      []byte // legacy fixtures only; live passwords are protected
+	protected     protectedPassword
+	protectedSet  bool
+	archive       *archiveDescriptor
+	identity      string
+	depth         int
+	indexBytes    int64
+	cachePrefix   string
+	handles       []*storage.Handle
+	lazyReaders   []*nestedMemberReader
+	parent        *nestedArchive
+	parentRelease func()
+	refs          int
+	ownerOnce     sync.Once
+	closed        bool
 }
 
-// Close releases cache pins held by compressed outer members. It is
-// deliberately idempotent so callers and the finalizer can both invoke it.
+// Close releases the creator's reference once. Descendants and open handles
+// retain independent references, so releasing a listing cannot close ancestors
+// that are still serving a child.
 func (n *nestedArchive) Close() error {
 	if n == nil {
 		return nil
 	}
+	var err error
+	n.ownerOnce.Do(func() { err = n.release() })
+	return err
+}
+
+func (n *nestedArchive) retain() (func(), error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return nil, storage.ErrClosed
+	}
+	if n.refs == 0 {
+		n.refs = 1
+	} // legacy fixture owner
+	n.refs++
+	var once sync.Once
+	return func() { once.Do(func() { _ = n.release() }) }, nil
+}
+
+func (n *nestedArchive) release() error {
 	n.mu.Lock()
 	if n.closed {
 		n.mu.Unlock()
 		return nil
 	}
+	if n.refs > 1 {
+		n.refs--
+		n.mu.Unlock()
+		return nil
+	}
+	n.refs = 0
 	n.closed = true
-	handles := n.handles
-	n.handles = nil
-	password := n.password
-	n.password = nil
+	handles, readers, parentRelease := n.handles, n.lazyReaders, n.parentRelease
+	n.handles, n.lazyReaders, n.parentRelease = nil, nil, nil
 	n.mu.Unlock()
 	var first error
 	for _, h := range handles {
@@ -59,49 +88,21 @@ func (n *nestedArchive) Close() error {
 			first = err
 		}
 	}
-	for _, r := range n.lazyReaders {
+	for _, r := range readers {
 		if err := r.Close(); err != nil && first == nil {
 			first = err
 		}
 	}
-	clear(password)
+	n.passwordMu.Lock()
+	clear(n.password)
+	n.password = nil
+	clear(n.protected.ciphertext)
+	n.protected = protectedPassword{}
+	n.passwordMu.Unlock()
+	if parentRelease != nil {
+		parentRelease()
+	}
 	return first
-}
-
-type nestedConcatReader struct {
-	parts []io.ReaderAt
-	sizes []int64
-	total int64
-}
-
-func (r *nestedConcatReader) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 {
-		return 0, syscall.EINVAL
-	}
-	if off >= r.total {
-		return 0, io.EOF
-	}
-	if int64(len(p)) > r.total-off {
-		p = p[:int(r.total-off)]
-	}
-	read := 0
-	for i, size := range r.sizes {
-		if off >= size {
-			off -= size
-			continue
-		}
-		n, err := r.parts[i].ReadAt(p, off)
-		read += n
-		p = p[n:]
-		if err != nil && !(err == io.EOF && n > 0) {
-			return read, err
-		}
-		if len(p) == 0 {
-			return read, nil
-		}
-		off = 0
-	}
-	return read, io.EOF
 }
 
 // nestedOffsetReader maps a member's uncompressed stream to its packed bytes.
@@ -131,14 +132,9 @@ func (r nestedOffsetReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func nestedCopyMemberReader(reader io.ReaderAt, size int64, outer *member, ordinal int, password []byte) (io.ReaderAt, bool, error) {
-	// PackedRanges points at the encrypted packed bytes when the outer 7z
-	// uses 7zAES. They look like a valid Copy stream, but mapping them
-	// directly would expose ciphertext. Keep the decoder path whenever a
-	// password is involved; it also remains correct for shared-password
-	// metadata on an otherwise unencrypted archive.
-	if len(password) > 0 {
-		return nil, false, nil
-	}
+	// Stored metadata below proves the stream has no encryption or filters.
+	// A shared password may also cover a plaintext archive, so password presence
+	// alone does not determine whether its packed bytes can be mapped directly.
 	zr, err := sevenzip.NewReaderWithPassword(reader, size, string(password))
 	if err != nil {
 		return nil, false, err
@@ -162,7 +158,7 @@ func nestedCopyMemberReader(reader io.ReaderAt, size int64, outer *member, ordin
 		return nil, false, nil
 	}
 	stream := streams[outer.sevenStream.Stream]
-	if ranges[0].Size != int64(stream.UncompressedSize) || outer.sevenStream.Size != int64(stream.UncompressedSize) {
+	if !stream.Stored || ranges[0].Size != int64(stream.UncompressedSize) || outer.sevenStream.Size != int64(stream.UncompressedSize) {
 		return nil, false, nil
 	}
 	start := ranges[0].Offset + outer.sevenStream.Offset
@@ -183,7 +179,7 @@ type nestedArchivePolicy struct {
 }
 
 var defaultNestedArchivePolicy = nestedArchivePolicy{
-	MaxDepth: 1, MaxBytes: 64 << 30, MaxMembers: 100000, MaxIndexBytes: 64 << 20,
+	MaxDepth: 8, MaxBytes: 64 << 30, MaxMembers: 100000, MaxIndexBytes: 64 << 20,
 }
 
 func (p nestedArchivePolicy) allow(depth int, size int64) error {
@@ -268,36 +264,6 @@ func indexNestedRAR(ctx context.Context, reader io.ReaderAt, size int64, passwor
 	return result, nil
 }
 
-func indexNestedZIP(reader io.ReaderAt, size int64, policy nestedArchivePolicy) ([]archiveMember, error) {
-	if err := policy.allow(1, size); err != nil {
-		return nil, err
-	}
-	zr, err := zip.NewReader(reader, size)
-	if err != nil {
-		return nil, err
-	}
-	if len(zr.File) > policy.MaxMembers {
-		return nil, syscall.EFBIG
-	}
-	result := make([]archiveMember, 0, len(zr.File))
-	for i, f := range zr.File {
-		name, err := zipName(f)
-		if err != nil {
-			return nil, err
-		}
-		name = strings.TrimSuffix(name, "/")
-		if name == "" {
-			continue
-		}
-		result = append(result, archiveMember{
-			name: name, size: f.UncompressedSize64, crc: f.CRC32,
-			directory: f.FileInfo().IsDir(), ordinal: i, zipFile: f,
-			encrypted: f.Flags&1 != 0,
-		})
-	}
-	return result, nil
-}
-
 func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy) (*zipIndex, error) {
 	idx := &zipIndex{root: &zipDir{dirs: map[string]*zipDir{}, files: map[string]*member{}}, members: map[string]*member{}, bytes: 256, complete: true, changed: make(chan struct{})}
 	for _, f := range members {
@@ -333,7 +299,7 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 			if f.rarLocator != nil {
 				format = ".rar"
 			}
-			m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, format: format, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
+			m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, format: format, encrypted: f.encrypted, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
 			if f.zipFile != nil {
 				m.format = ".zip"
 				m.file = f.zipFile
@@ -348,67 +314,4 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 	}
 	close(idx.changed)
 	return idx, nil
-}
-
-func isExpandableArchiveMember(e *entry) bool {
-	if e == nil || e.member == nil || e.nested != nil {
-		return false
-	}
-	kind := archiveKind(e.member.name)
-	return kind == ".7z" || kind == ".rar"
-}
-
-func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
-	if !isExpandableArchiveMember(e) {
-		return e, nil
-	}
-	if n.item == nil {
-		return e, nil
-	}
-	archive := n.item.archive
-	if archive == nil {
-		archive = e.archive
-	}
-	if archive == nil {
-		return e, nil
-	}
-	source := n.item.source
-	if source == nil {
-		source = e.source
-	}
-	if source == nil || n.tree.cache == nil {
-		return e, nil
-	}
-	na, err := n.tree.buildNestedArchive(ctx, source, archive, nil, e.member.name, e.member)
-	if err != nil {
-		return nil, err
-	}
-	// Nodes are owned by the FUSE inode tree and may not receive a Go-level
-	// release callback. Keep the readers alive until the archive becomes
-	// unreachable during unmount or inode reclamation.
-	runtime.SetFinalizer(na, func(a *nestedArchive) { _ = a.Close() })
-	copy := *e
-	copy.directory = true
-	copy.member = nil
-	copy.nested = na
-	copy.archiveSize = na.size
-	return &copy, nil
-}
-
-func (n *Node) openNestedMember(ctx context.Context) (fs.FileHandle, uint32, syscall.Errno) {
-	na, m := n.item.nested, n.item.member
-	if na == nil || m == nil || na.reader == nil {
-		return nil, 0, syscall.EIO
-	}
-	if n.tree.cache == nil {
-		return nil, 0, syscall.EIO
-	}
-	key := n.item.nested.cachePrefix + ":" + m.name + fmt.Sprintf(":%d:%08x", m.size, m.crc)
-	cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(fillCtx context.Context, w io.Writer) error {
-		return archiveReadError(fillCtx, extractArchiveMember(fillCtx, na.reader, na.size, m, na.password, w), na.password)
-	})
-	if err != nil {
-		return nil, 0, toErrno(err)
-	}
-	return &handle{reader: cached, closer: cached, size: m.size}, n.tree.archiveCacheOpenFlags(), 0
 }

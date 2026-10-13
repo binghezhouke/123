@@ -79,7 +79,7 @@ type nestedReaddirCase struct {
 
 func nestedReaddirCases() []nestedReaddirCase {
 	return []nestedReaddirCase{
-		{"split", "nested-vol-outer.7z", "inner.7z.001", []string{"plain.7z"}, []string{"plain.7z"}, []byte{'7', 'z', 0xbc, 0xaf, 0x27, 0x1c}},
+		{"split", "nested-vol-outer.7z", "inner.7z.001", []string{"plain.7z"}, []string{"plain.7z", "folder", "hello.txt"}, []byte("mount 7z fixture contents\n")},
 		{"plain", "nested-outer.7z", "inner.7z", []string{"folder"}, []string{"folder", "hello.txt"}, []byte("mount 7z fixture contents\n")},
 	}
 }

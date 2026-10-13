@@ -103,11 +103,11 @@ func indexEntryNested(d *zipDir, path, name string, nested *nestedArchive) *entr
 	if d == nil || nested == nil {
 		return nil
 	}
-	if repeatedSplitVolume(path, name) {
-		return nil
-	}
 	if d.dirs[name] != nil {
-		childPath := nestedSplitLeafPath(d, path, name)
+		childPath := name
+		if path != "" {
+			childPath = path + "/" + name
+		}
 		return &entry{name: name, directory: true, zipPath: childPath, nested: nested, archiveSize: nested.size}
 	}
 	if m := d.files[name]; m != nil {
@@ -117,41 +117,8 @@ func indexEntryNested(d *zipDir, path, name string, nested *nestedArchive) *entr
 	return nil
 }
 
-func nestedSplitLeafPath(d *zipDir, path, name string) string {
-	childPath := name
-	if path != "" {
-		childPath = path + "/" + name
-	}
-	current := d.dirs[name]
-	for current != nil && len(current.dirs) == 1 {
-		var nextName string
-		var next *zipDir
-		for candidate, candidateDir := range current.dirs {
-			nextName, next = candidate, candidateDir
-		}
-		if !isSplit7zEntry(nextName) {
-			break
-		}
-		childPath += "/" + nextName
-		current = next
-	}
-	return childPath
-}
-
-// Some uploaded split archives contain another copy of their own .001/.002
-// set. Do not expose a same-named .001 directory below an existing .001 path;
-// otherwise shell navigation appears to recurse forever.
-func repeatedSplitVolume(path, name string) bool {
-	if !isSplit7zEntry(name) || path == "" {
-		return false
-	}
-	for _, part := range strings.Split(path, "/") {
-		if strings.EqualFold(part, name) {
-			return true
-		}
-	}
-	return false
-}
+// lookupEntries resolves metadata only. Expanding archive members belongs to
+// explicit Node.Lookup; diagnostics and directory enumeration must stay cheap.
 func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entry, bool, error) {
 	if !n.item.directory {
 		return nil, false, syscall.ENOTDIR
@@ -246,12 +213,6 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 	index.mu.RUnlock()
 	if e == nil {
 		return nil, false, nil
-	}
-	if e.member != nil {
-		e, err = n.expandNested(ctx, e)
-		if err != nil {
-			return nil, false, err
-		}
 	}
 	return map[string]*entry{name: e}, false, nil
 }

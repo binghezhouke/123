@@ -2,7 +2,7 @@
 
 挂载器使用 [binghezhouke/sevenzip](https://github.com/binghezhouke/sevenzip)，上游是 [bodgit/sevenzip](https://github.com/bodgit/sevenzip)，许可证为 BSD-3-Clause。
 
-当前依赖固定为 fork 的 `v1.6.2-0.20261009015905-27404139df14`，基于上游 `v1.6.1`。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 从上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8` 开始维护，不直接跟随上游 `main` 升级。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
+当前依赖固定为 fork 的 `v1.6.2-0.20261013043956-da5d82f8efce`，基于上游 `v1.6.1`。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 从上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8` 开始维护，不直接跟随上游 `main` 升级。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
 
 ## 扩展边界
 
@@ -10,7 +10,7 @@
 
 fork 已提供：
 
-- `Reader.Streams()`：各组编号与解压后大小，调用本身不打开解码器。
+- `Reader.Streams()`：各组编号、解压后大小及 `Stored` 标志，调用本身不打开解码器。`Stored` 只在单一无属性 Copy 编码器、单输入输出、无绑定且长度一致时成立；压缩前后大小相等不能单独证明可直接映射（例如 Delta + Copy）。
 - `File.StreamOffset()`：成员在组内的解压偏移，并区分没有数据流的目录和空文件。
 - `Reader.OpenStream(index)`：独立拥有的组级解码流；读取到 EOF 检查长度和可用的非零组 CRC，显式 Close 直接释放解码器，不进入 `File.Open` 的池。
 - `Reader.PackedRanges(index)`：所选组各压缩输入在原始 ReaderAt 上的绝对区间，包含归档前缀和起始头，校验长度与溢出。
