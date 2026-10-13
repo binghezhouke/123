@@ -391,7 +391,7 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 			if f.rarLocator != nil {
 				format = ".rar"
 			}
-			m := &member{name: f.name, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, ordinal: f.ordinal, format: format, encrypted: f.encrypted, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
+			m := &member{sevenHeadersEncrypted: f.sevenHeadersEncrypted, name: f.name, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, ordinal: f.ordinal, format: format, encrypted: f.encrypted, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
 			if f.zipFile != nil {
 				m.format = ".zip"
 				m.file = f.zipFile

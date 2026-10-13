@@ -249,11 +249,10 @@ func TestRootSolid7zSplitColdSourceSingleSlot(t *testing.T) {
 			f := newRootSolid7zSplitFixture(t)
 			f.run(t, stage, func(ctx context.Context) error {
 				if stage == "password-fact" {
-					encrypted, err := f.tree.root7zReadNeedsPassword(ctx, f.source, f.a, f.idx, "member-b.bin")
-					if err == nil && encrypted {
+					if f.idx.pathNeedsPassword("member-b.bin") {
 						return fmt.Errorf("plain group incorrectly classified as encrypted")
 					}
-					return err
+					return nil
 				}
 				plan, err := f.tree.rootSolid7zPlan(ctx, f.view, f.idx.members["member-b.bin"], nil)
 				if err == nil && plan == nil {

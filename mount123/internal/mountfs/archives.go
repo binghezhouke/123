@@ -73,8 +73,8 @@ func finalizeRARGroups(idx *zipIndex, capacity int64) {
 	}
 }
 
-// 7z does not expose whether an uncompressed member uses encryption. A CRC
-// mismatch can therefore mean a missing/wrong password or damaged ciphertext.
+// A decoded checksum mismatch may indicate damaged content or an incorrect
+// password when the format cannot authenticate it independently.
 var errArchiveIntegrity = errors.New("archive password or integrity check failed")
 
 func archiveKind(name string) string {
@@ -108,18 +108,19 @@ func (a *archiveDescriptor) kind() string {
 // Only immutable member metadata enters the shared index. Readers, passwords,
 // and decompressor state are scoped to one fill operation.
 type archiveMember struct {
-	encrypted       bool
-	name            string
-	size            uint64
-	crc             uint32
-	sevenCRCDefined bool
-	directory       bool
-	ordinal         int
-	rarLocator      *rardecode.MemberLocator
-	rarSolid        bool
-	rarStartable    bool
-	sevenStream     *sevenStreamLocation
-	zipFile         *zip.File
+	encrypted             bool
+	name                  string
+	size                  uint64
+	crc                   uint32
+	sevenCRCDefined       bool
+	sevenHeadersEncrypted bool
+	directory             bool
+	ordinal               int
+	rarLocator            *rardecode.MemberLocator
+	rarSolid              bool
+	rarStartable          bool
+	sevenStream           *sevenStreamLocation
+	zipFile               *zip.File
 }
 
 type budgetReaderAt struct {
@@ -207,16 +208,18 @@ func scanArchiveFrom(ctx context.Context, kind string, reader io.ReaderAt, size 
 				return syscall.EOPNOTSUPP
 			}
 			var location *sevenStreamLocation
+			encrypted := false
 			if offset, ok := f.StreamOffset(); ok {
 				if f.Stream < 0 || f.Stream >= len(streams) || streams[f.Stream].UncompressedSize > math.MaxInt64 {
 					return syscall.EFBIG
 				}
+				encrypted = streams[f.Stream].Encrypted
 				location = &sevenStreamLocation{Stream: f.Stream, Offset: offset, Size: int64(streams[f.Stream].UncompressedSize)}
 				if !location.valid(f.UncompressedSize) {
 					return syscall.EIO
 				}
 			}
-			if err := visit(archiveMember{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, sevenCRCDefined: f.Checksum().Defined, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}, 0); err != nil {
+			if err := visit(archiveMember{encrypted: encrypted, sevenHeadersEncrypted: zr.HeadersEncrypted(), name: f.Name, size: f.UncompressedSize, crc: f.CRC32, sevenCRCDefined: f.Checksum().Defined, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}, 0); err != nil {
 				return err
 			}
 		}
@@ -518,7 +521,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 						idx.mu.Unlock()
 						return syscall.EIO
 					}
-					m := &member{name: f.name, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, rarGroupStartable: f.rarStartable, sevenStream: f.sevenStream, format: a.kind()}
+					m := &member{encrypted: f.encrypted, sevenHeadersEncrypted: f.sevenHeadersEncrypted, name: f.name, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, rarGroupStartable: f.rarStartable, sevenStream: f.sevenStream, format: a.kind()}
 					dir.order = append(dir.order, part)
 					dir.files[part] = m
 					idx.members[f.name] = m
@@ -691,9 +694,13 @@ func extractArchiveMember(ctx context.Context, reader io.ReaderAt, size int64, m
 
 func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, syscall.Errno) {
 	t, a, m := n.tree, n.item.archive, n.item.member
-	password, err := t.otherPassword(ctx, a)
-	if err != nil {
-		return nil, 0, toErrno(err)
+	var password []byte
+	var err error
+	if a.kind() != ".7z" || m.needsPassword() {
+		password, err = t.otherPassword(ctx, a)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
 	}
 	defer clear(password)
 	_, _, identity, err := t.archiveSource(ctx, n.item.source, a)

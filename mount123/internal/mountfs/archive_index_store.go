@@ -22,6 +22,10 @@ const archiveIndexFormatVersion = 1
 // this is a schema migration, not content expiration.
 const sevenZIPCRCMetadataVersion = 3
 
+// Earlier 7z snapshots did not preserve body/header encryption requirements.
+// Rebuild those indexes once; verified content blobs keep their identities.
+const sevenZIPEncryptionMetadataVersion = 1
+
 // Checkpoint version is separate from the completed index format. Older
 // checkpoints recorded only an HTTP high-water mark and cannot be resumed
 // safely, while completed indexes remain backwards compatible.
@@ -40,40 +44,42 @@ func (b *boundedJSONBuffer) Write(p []byte) (int, error) {
 }
 
 type archiveIndexDTO struct {
-	Version         int                    `json:"version"`
-	Kind            string                 `json:"kind"`
-	ArchiveSize     int64                  `json:"archive_size"`
-	IdentityDigest  string                 `json:"identity_digest"`
-	Entries         []archiveIndexEntryDTO `json:"entries"`
-	Complete        bool                   `json:"complete"`
-	ScanOffset      int64                  `json:"scan_offset,omitempty"`
-	ScanVersion     int                    `json:"scan_version,omitempty"`
-	ScanOrdinal     int                    `json:"scan_ordinal,omitempty"`
-	SevenCRCVersion int                    `json:"seven_crc_version,omitempty"`
+	Version                int                    `json:"version"`
+	Kind                   string                 `json:"kind"`
+	ArchiveSize            int64                  `json:"archive_size"`
+	IdentityDigest         string                 `json:"identity_digest"`
+	Entries                []archiveIndexEntryDTO `json:"entries"`
+	Complete               bool                   `json:"complete"`
+	ScanOffset             int64                  `json:"scan_offset,omitempty"`
+	ScanVersion            int                    `json:"scan_version,omitempty"`
+	ScanOrdinal            int                    `json:"scan_ordinal,omitempty"`
+	SevenEncryptionVersion int                    `json:"seven_encryption_version,omitempty"`
+	SevenCRCVersion        int                    `json:"seven_crc_version,omitempty"`
 }
 
 type archiveIndexEntryDTO struct {
-	Path              string                   `json:"path"`
-	Name              string                   `json:"name,omitempty"`
-	Directory         bool                     `json:"directory,omitempty"`
-	Ordinal           int                      `json:"ordinal,omitempty"`
-	Size              uint64                   `json:"size,omitempty"`
-	Compressed        uint64                   `json:"compressed,omitempty"`
-	SevenCRCDefined   *bool                    `json:"seven_crc_defined,omitempty"`
-	CRC               uint32                   `json:"crc,omitempty"`
-	Method            uint16                   `json:"method,omitempty"`
-	Flags             uint16                   `json:"flags,omitempty"`
-	Encrypted         *bool                    `json:"encrypted,omitempty"`
-	ModifiedTime      uint16                   `json:"modified_time,omitempty"`
-	HeaderOffset      int64                    `json:"header_offset,omitempty"`
-	AES               *archiveAESDTO           `json:"aes,omitempty"`
-	RARLocator        *rardecode.LocatorRecord `json:"rar_locator,omitempty"`
-	RARSolid          bool                     `json:"rar_solid,omitempty"`
-	RARGroupStart     int                      `json:"rar_group_start,omitempty"`
-	RARGroupOffset    uint64                   `json:"rar_group_offset,omitempty"`
-	RARGroupSize      uint64                   `json:"rar_group_size,omitempty"`
-	RARGroupStartable bool                     `json:"rar_group_startable,omitempty"`
-	SevenStream       *sevenStreamLocation     `json:"seven_stream,omitempty"`
+	Path                  string                   `json:"path"`
+	Name                  string                   `json:"name,omitempty"`
+	Directory             bool                     `json:"directory,omitempty"`
+	Ordinal               int                      `json:"ordinal,omitempty"`
+	Size                  uint64                   `json:"size,omitempty"`
+	Compressed            uint64                   `json:"compressed,omitempty"`
+	SevenHeadersEncrypted bool                     `json:"seven_headers_encrypted,omitempty"`
+	SevenCRCDefined       *bool                    `json:"seven_crc_defined,omitempty"`
+	CRC                   uint32                   `json:"crc,omitempty"`
+	Method                uint16                   `json:"method,omitempty"`
+	Flags                 uint16                   `json:"flags,omitempty"`
+	Encrypted             *bool                    `json:"encrypted,omitempty"`
+	ModifiedTime          uint16                   `json:"modified_time,omitempty"`
+	HeaderOffset          int64                    `json:"header_offset,omitempty"`
+	AES                   *archiveAESDTO           `json:"aes,omitempty"`
+	RARLocator            *rardecode.LocatorRecord `json:"rar_locator,omitempty"`
+	RARSolid              bool                     `json:"rar_solid,omitempty"`
+	RARGroupStart         int                      `json:"rar_group_start,omitempty"`
+	RARGroupOffset        uint64                   `json:"rar_group_offset,omitempty"`
+	RARGroupSize          uint64                   `json:"rar_group_size,omitempty"`
+	RARGroupStartable     bool                     `json:"rar_group_startable,omitempty"`
+	SevenStream           *sevenStreamLocation     `json:"seven_stream,omitempty"`
 }
 
 type archiveAESDTO struct {
@@ -115,7 +121,7 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 		_ = t.cache.Remove(cacheKey)
 		return nil, false
 	}
-	if kind == ".7z" && dto.SevenCRCVersion != sevenZIPCRCMetadataVersion {
+	if kind == ".7z" && (dto.SevenCRCVersion != sevenZIPCRCMetadataVersion || dto.SevenEncryptionVersion != sevenZIPEncryptionMetadataVersion) {
 		_ = t.cache.Remove(cacheKey)
 		return nil, false
 	}
@@ -167,6 +173,7 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity, Complete: true, ScanOffset: size}
 	if kind == ".7z" {
 		dto.SevenCRCVersion = sevenZIPCRCMetadataVersion
+		dto.SevenEncryptionVersion = sevenZIPEncryptionMetadataVersion
 	}
 	var walk func(*zipDir, string)
 	walk = func(dir *zipDir, prefix string) {
@@ -195,7 +202,7 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 				path = prefix + "/" + key
 			}
 			encrypted := m.encrypted
-			item := archiveIndexEntryDTO{Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize, RARGroupStartable: m.rarGroupStartable}
+			item := archiveIndexEntryDTO{SevenHeadersEncrypted: m.sevenHeadersEncrypted, Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize, RARGroupStartable: m.rarGroupStartable}
 			if kind == ".7z" {
 				defined := m.sevenCRCDefined
 				item.SevenCRCDefined = &defined
@@ -327,14 +334,15 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 			m := &member{name: record.Name, format: memberFormat, ordinal: record.Ordinal, headerOffset: record.HeaderOffset, modifiedTime: record.ModifiedTime, method: record.Method, flags: record.Flags, crc: record.CRC, compressed: record.Compressed, size: record.Size, encrypted: record.Flags&1 != 0}
 			if record.Encrypted != nil {
 				m.encrypted = *record.Encrypted || m.encrypted
-			} else if kind == ".rar" {
-				return nil, errors.New("persisted RAR encryption state is missing")
+			} else if kind == ".rar" || kind == ".7z" {
+				return nil, errors.New("persisted archive encryption state is missing")
 			}
 			if kind == ".7z" {
 				if record.SevenCRCDefined == nil || (!*record.SevenCRCDefined && record.CRC != 0) {
 					return nil, errors.New("persisted 7z CRC presence is missing or inconsistent")
 				}
 				m.sevenCRCDefined = *record.SevenCRCDefined
+				m.sevenHeadersEncrypted = record.SevenHeadersEncrypted
 				// Old 7z indexes lack the stream locations needed for direct
 				// nested member reads and must be rebuilt.
 				if record.Size > 0 && (record.SevenStream == nil || !record.SevenStream.valid(record.Size) || record.SevenStream.Stream >= t.opts.MaxZIPEntries) {

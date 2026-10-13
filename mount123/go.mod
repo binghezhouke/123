@@ -32,7 +32,7 @@ require (
 replace github.com/nwaples/rardecode/v2 => ./third_party/rardecode
 
 // Maintained fork: owned streams, stored-coder metadata, and AES+Copy range reads.
-replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.20261013150138-7dde2a75e60d
+replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.20261013155049-e235e12854e3
 
 // Local fix: iterative expansion of long UDF allocation-descriptor chains.
 replace golift.io/udf => ./third_party/udf

@@ -206,12 +206,7 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 	} else if archive.kind() == ".zip" {
 		index, err = n.tree.getZIP(ctx, packedSource, archive.size, archive)
 	} else {
-		password, passwordErr := n.tree.otherPassword(ctx, archive)
-		if passwordErr != nil {
-			return nil, false, passwordErr
-		}
-		index, err = n.tree.otherIndex(ctx, packedSource, archive, password)
-		clear(password)
+		index, err = n.tree.mountArchiveIndex(ctx, packedSource, archive)
 	}
 	if err != nil {
 		return nil, false, err
@@ -343,12 +338,7 @@ func (n *Node) archiveDirectoryIndex(ctx context.Context) (*zipIndex, *storage.R
 	} else if archive.kind() == ".zip" {
 		idx, err = n.tree.getZIP(ctx, source, archive.size, archive)
 	} else {
-		password, passwordErr := n.tree.otherPassword(ctx, archive)
-		if passwordErr != nil {
-			return nil, nil, nil, passwordErr
-		}
-		idx, err = n.tree.otherIndex(ctx, source, archive, password)
-		clear(password)
+		idx, err = n.tree.mountArchiveIndex(ctx, source, archive)
 	}
 	return idx, source, archive, err
 }

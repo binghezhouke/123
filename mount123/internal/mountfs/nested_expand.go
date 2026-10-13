@@ -55,13 +55,7 @@ func (t *Tree) buildNestedArchive(ctx context.Context, source *storage.Remote, a
 		if a.kind() == ".zip" {
 			idx, err = t.getZIP(ctx, source, a.size, a)
 		} else {
-			idx, err = t.otherIndex(ctx, source, a, nil)
-			if needsPassword(err) || errors.Is(err, syscall.EACCES) {
-				password, err = t.otherPassword(ctx, a)
-				if err == nil {
-					idx, err = t.otherIndex(ctx, source, a, password)
-				}
-			}
+			idx, password, err = t.otherIndexWithPassword(ctx, source, a, false)
 		}
 		if err != nil {
 			clear(password)
@@ -144,9 +138,7 @@ func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *
 	if err != nil {
 		return nil, nil, err
 	}
-	// 7z metadata does not expose per-stream encryption. Retain the existing
-	// sidecar discovery for that format; ZIP and RAR expose encrypted members.
-	password, err := t.viewPassword(ctx, n, m.encrypted || n.format == ".7z")
+	password, err := t.viewPassword(ctx, n, m.needsPassword())
 	if err != nil {
 		return nil, nil, err
 	}
@@ -416,9 +408,9 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 	}
 	// Resolve possible parent secrets before an index decoder permit is held.
 	// Lazy volume mapping then only decrypts this already-discovered value.
-	discoverPassword := parent.format == ".7z"
+	discoverPassword := false
 	for _, part := range parts {
-		discoverPassword = discoverPassword || part.encrypted
+		discoverPassword = discoverPassword || part.needsPassword()
 	}
 	knownPassword, err := t.viewPassword(ctx, parent, discoverPassword)
 	if err != nil {

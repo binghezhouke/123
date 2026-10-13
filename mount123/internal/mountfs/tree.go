@@ -191,28 +191,34 @@ type entry struct {
 	index       *zipIndex
 }
 type member struct {
-	sevenStream       *sevenStreamLocation
-	sevenCRCDefined   bool
-	rarLocator        *rardecode.MemberLocator
-	rarSolid          bool
-	rarGroupStart     int
-	rarGroupOffset    uint64
-	rarGroupSize      uint64
-	rarGroupStartable bool
-	format            string
-	ordinal           int
-	file              *zip.File
-	reader            *contextZIPReaderAt
-	name              string
-	headerOffset      int64
-	modifiedTime      uint16
-	method            uint16
-	flags             uint16
-	crc               uint32
-	compressed, size  uint64
-	encrypted         bool
-	aes               *aesMemberInfo
+	sevenStream           *sevenStreamLocation
+	sevenCRCDefined       bool
+	sevenHeadersEncrypted bool
+	rarLocator            *rardecode.MemberLocator
+	rarSolid              bool
+	rarGroupStart         int
+	rarGroupOffset        uint64
+	rarGroupSize          uint64
+	rarGroupStartable     bool
+	format                string
+	ordinal               int
+	file                  *zip.File
+	reader                *contextZIPReaderAt
+	name                  string
+	headerOffset          int64
+	modifiedTime          uint16
+	method                uint16
+	flags                 uint16
+	crc                   uint32
+	compressed, size      uint64
+	encrypted             bool
+	aes                   *aesMemberInfo
 }
+
+// needsPassword includes header encryption: readers reopen 7z metadata even
+// when the selected body stream itself is clear.
+func (m *member) needsPassword() bool { return m.encrypted || m.sevenHeadersEncrypted }
+
 type archiveDescriptor struct {
 	format        string
 	id, parentID  int64
@@ -788,12 +794,7 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 		if idx != nil {
 			// Directory descendants retain the same index and frozen volumes.
 		} else if archive != nil && archive.kind() != ".zip" {
-			password, e := n.tree.otherPassword(ctx, archive)
-			if e != nil {
-				return nil, e
-			}
-			defer clear(password)
-			idx, err = n.tree.otherIndex(ctx, source, archive, password)
+			idx, err = n.tree.mountArchiveIndex(ctx, source, archive)
 		} else {
 			idx, err = n.tree.getZIP(ctx, source, size, archive)
 		}

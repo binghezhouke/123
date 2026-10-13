@@ -1,75 +1,10 @@
 package mountfs
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"io"
-	"strings"
-	"syscall"
-
-	"github.com/binghezhouke/123/mount123/internal/storage"
-	"github.com/bodgit/sevenzip"
 )
-
-// A clear header may describe both clear and encrypted body groups. Inspect
-// only the selected outer member (possibly an ancestor of a nested path).
-// Cache the immutable group fact, never a password or discovery failure.
-func (t *Tree) root7zReadNeedsPassword(ctx context.Context, source *storage.Remote, a *archiveDescriptor, idx *zipIndex, memberPath string) (bool, error) {
-	memberPath = strings.Trim(memberPath, "/")
-	idx.mu.RLock()
-	m := idx.members[memberPath]
-	for m == nil {
-		end := strings.LastIndexByte(memberPath, '/')
-		if end < 0 {
-			break
-		}
-		memberPath = memberPath[:end]
-		m = idx.members[memberPath]
-	}
-	idx.mu.RUnlock()
-	if m == nil || m.size == 0 {
-		return false, nil
-	}
-	if !m.sevenStream.valid(m.size) {
-		return true, nil // Older/unsupported metadata retains password discovery.
-	}
-	prepared, err := t.prepareCloudArchiveInput(ctx, source, a)
-	if err != nil {
-		return false, err
-	}
-	key := fmt.Sprintf("7z-body-encryption:%s:%d", prepared.identity, m.sevenStream.Stream)
-	value, err := t.loadMeta(ctx, key, 0, func(ctx context.Context) (any, int64, error) {
-		input := &nestedSourceReader{ReaderAt: archiveRequestReader{ctx: ctx, input: prepared.input}}
-		zr, err := sevenzip.NewReader(input, prepared.size)
-		if err != nil {
-			if sourceErr := input.sourceError(); sourceErr != nil {
-				return nil, 0, sourceErr
-			}
-			if needsPassword(err) {
-				return true, int64(len(key) + 128), nil
-			}
-			return nil, 0, archiveReadError(ctx, err, nil)
-		}
-		if m.ordinal < 0 || m.ordinal >= len(zr.File) || zr.File[m.ordinal].Name != m.name || zr.File[m.ordinal].Stream != m.sevenStream.Stream {
-			return nil, 0, syscall.ESTALE
-		}
-		layout, err := zr.StreamLayout(m.sevenStream.Stream)
-		if err != nil {
-			return nil, 0, err
-		}
-		for _, coder := range layout.Coders {
-			if bytes.Equal(coder.ID, []byte{0x06, 0xf1, 0x07, 0x01}) {
-				return true, int64(len(key) + 128), nil
-			}
-		}
-		return false, int64(len(key) + 128), nil
-	})
-	if err != nil {
-		return false, err
-	}
-	return value.(bool), nil
-}
 
 // Small groups retain whole-group batching. Larger supported groups use the
 // same demand blocks/cursor as nested 7z. A previously verified complete member

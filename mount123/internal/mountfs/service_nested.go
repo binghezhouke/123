@@ -2,7 +2,6 @@ package mountfs
 
 import (
 	"context"
-	"errors"
 	"syscall"
 
 	"github.com/binghezhouke/123/mount123/internal/storage"
@@ -47,17 +46,7 @@ func (s *Service) outerArchiveIndexMode(ctx context.Context, fileID int64, progr
 	if kind == ".zip" {
 		idx, err = s.tree.getZIP(ctx, source, archive.size, archive)
 	} else {
-		// Try without a password first so unencrypted archives skip password
-		// discovery entirely. Only fetch a password when the decoder says one
-		// is required.
-		idx, err = s.tree.otherIndexMode(ctx, source, archive, nil, progressive)
-		if err != nil && (needsPassword(err) || errors.Is(err, syscall.EACCES)) {
-			password, err = s.tree.otherPassword(ctx, archive)
-			if err != nil {
-				return nil, nil, nil, nil, err
-			}
-			idx, err = s.tree.otherIndexMode(ctx, source, archive, password, progressive)
-		}
+		idx, password, err = s.tree.otherIndexWithPassword(ctx, source, archive, progressive)
 	}
 	if err != nil {
 		clear(password)

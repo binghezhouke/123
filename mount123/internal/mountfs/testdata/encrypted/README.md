@@ -24,3 +24,12 @@ and `writestr("hello.txt", payload)`. Salts and encryption headers are randomize
 repeated 200 times; the solid archive also contains `last solid member\n`.
 RAR fixtures and their license are reused from `tests/fixtures/rar` in the
 repository root. Their expected SHA-256 was independently verified with unrar.
+
+`header-only.7z` wraps `plain.7z` as `inner.7z` with a Copy body and an AES
+encrypted header only. Generate with 7-Zip by storing `plain.7z` as `rename.7z`
+(`7z a -t7z -m0=Copy -mtm=off -mtc=off -mta=off header-only.7z rename.7z`),
+then rewriting only the name/header:
+`7z rn -pmount-test-password -mhe=on header-only.7z rename.7z inner.7z`.
+Verify with `7z x -so -pmount-test-password header-only.7z inner.7z` and compare
+bytes with `plain.7z`. This covers readers that reopen an encrypted header to
+read a clear body or enter an inner archive.

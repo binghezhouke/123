@@ -20,7 +20,7 @@ func TestArchiveIndexCRCMetadataMigration(t *testing.T) {
 		for _, prior := range []struct {
 			nested  bool
 			version int
-		}{{false, 0}, {true, 0}, {false, 1}, {true, 1}, {false, 2}, {true, 2}} {
+		}{{false, 0}, {true, 0}, {false, 1}, {true, 1}, {false, 2}, {true, 2}, {false, 3}, {true, 3}} {
 			t.Run(fmt.Sprintf("%s/nested=%t/revision=%d", kind, prior.nested, prior.version), func(t *testing.T) {
 				ctx := context.Background()
 				cache, err := storage.NewCache(t.TempDir(), 1<<20)
@@ -159,9 +159,10 @@ func TestSevenZIPCRCPresenceRoundTrip(t *testing.T) {
 	}
 	defer cache.Close()
 	tree := New(ctx, indexStoreTestAPI{}, cache, 0, true).tree
+	plain := false
 	for _, defined := range []bool{false, true} {
 		key := tree.archiveIndexCacheKey(".7z", fmt.Sprintf("presence-%t", defined), &archiveDescriptor{id: 77}, nil)
-		dto := archiveIndexDTO{Version: archiveIndexFormatVersion, SevenCRCVersion: sevenZIPCRCMetadataVersion, Kind: ".7z", ArchiveSize: 100, IdentityDigest: "identity", Complete: true, Entries: []archiveIndexEntryDTO{{Path: "b", Name: "b", Ordinal: 0, Size: 4, CRC: 0, SevenCRCDefined: &defined, SevenStream: &sevenStreamLocation{Stream: 0, Offset: 0, Size: 4}}}}
+		dto := archiveIndexDTO{Version: archiveIndexFormatVersion, SevenCRCVersion: sevenZIPCRCMetadataVersion, Kind: ".7z", ArchiveSize: 100, IdentityDigest: "identity", Complete: true, Entries: []archiveIndexEntryDTO{{Path: "b", Name: "b", Ordinal: 0, Size: 4, CRC: 0, SevenCRCDefined: &defined, Encrypted: &plain, SevenStream: &sevenStreamLocation{Stream: 0, Offset: 0, Size: 4}}}}
 		idx, err := tree.indexFromDTO(ctx, ".7z", dto, 100)
 		if err != nil {
 			t.Fatal(err)

@@ -265,11 +265,7 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	// Discover only when the selected group needs it, before creating the
 	// root identity. Plain reads must not depend on unrelated password files.
 	if archive.kind() == ".7z" && len(password) == 0 {
-		needsPassword, err := s.tree.root7zReadNeedsPassword(ctx, source, archive, idx, memberPath)
-		if err != nil {
-			return nil, 0, err
-		}
-		if needsPassword {
+		if idx.pathNeedsPassword(memberPath) {
 			password, err = s.tree.otherPassword(ctx, archive)
 			if err != nil {
 				return nil, 0, err
