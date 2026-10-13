@@ -36,7 +36,7 @@ func TestNestedSolid7zPoolLifetimeAndBudget(t *testing.T) {
 	defer parent.Close()
 	acquire := func(key string, charge int64) *nestedSolid7zEntry {
 		t.Helper()
-		entry, err := pool.acquire(context.Background(), key, charge, parent)
+		entry, err := pool.acquire(context.Background(), key, charge, parent, nil)
 		if err != nil || entry == nil {
 			t.Fatalf("acquire %s: %v", key, err)
 		}
@@ -59,15 +59,15 @@ func TestNestedSolid7zPoolLifetimeAndBudget(t *testing.T) {
 		t.Fatal("LRU eviction closed the wrong decoder")
 	}
 	c.state = &nestedSolid7zState{stream: &solidPoolTestStream{Reader: bytes.NewReader(nil)}}
-	if entry, err := pool.acquire(context.Background(), "d", 1, parent); entry != nil || err != nil {
+	if entry, err := pool.acquire(context.Background(), "d", 1, parent, nil); entry != nil || err != nil {
 		t.Fatal("active entries exceeded budget")
 	}
-	if entry, err := pool.acquire(context.Background(), "oversize", 101, parent); entry != nil || err != nil {
+	if entry, err := pool.acquire(context.Background(), "oversize", 101, parent, nil); entry != nil || err != nil {
 		t.Fatal("oversize was admitted")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { _, err := pool.acquire(ctx, "a", 50, parent); done <- err }()
+	go func() { _, err := pool.acquire(ctx, "a", 50, parent, nil); done <- err }()
 	cancel()
 	select {
 	case err := <-done:
@@ -89,7 +89,7 @@ func TestNestedSolid7zPoolLifetimeAndBudget(t *testing.T) {
 	if streamA.closed.Load() != 0 {
 		t.Fatal("shutdown closed active decoder")
 	}
-	if _, err := pool.acquire(context.Background(), "a", 50, parent); !errors.Is(err, storage.ErrClosed) {
+	if _, err := pool.acquire(context.Background(), "a", 50, parent, nil); !errors.Is(err, storage.ErrClosed) {
 		t.Fatal(err)
 	}
 	pool.release(a, true)
@@ -108,7 +108,7 @@ func TestNestedSolid7zRetiringStateRemainsCharged(t *testing.T) {
 	parent := &nestedArchive{}
 	defer parent.Close()
 	defer pool.Close()
-	entry, err := pool.acquire(context.Background(), "a", 50, parent)
+	entry, err := pool.acquire(context.Background(), "a", 50, parent, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestNestedSolid7zRetiringStateRemainsCharged(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("retirement did not start closing the decoder")
 	}
-	candidate, err := pool.acquire(context.Background(), "b", 50, parent)
+	candidate, err := pool.acquire(context.Background(), "b", 50, parent, nil)
 	finish()
 	select {
 	case <-done:
@@ -134,7 +134,7 @@ func TestNestedSolid7zRetiringStateRemainsCharged(t *testing.T) {
 	if candidate != nil || err != nil {
 		t.Fatal("retiring decoder's memory was reused before Close returned")
 	}
-	candidate, err = pool.acquire(context.Background(), "b", 50, parent)
+	candidate, err = pool.acquire(context.Background(), "b", 50, parent, nil)
 	if candidate == nil || err != nil {
 		t.Fatal("retired charge was not released")
 	}

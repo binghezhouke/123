@@ -167,7 +167,23 @@ func (t *Tree) openNestedSolid7zState(ctx context.Context, plan *nestedSolid7zPl
 // fill borrows the group per demanded block. The block cache still owns
 // publication/singleflight; this layer never publishes discarded prefixes.
 func (t *Tree) fillNestedSolid7z(ctx context.Context, plan *nestedSolid7zPlan, start, length int64, w io.Writer) (handled bool, err error) {
-	e, err := t.nestedSolid7zPool.acquire(ctx, plan.key, plan.charge, plan.parent)
+	if t.nestedSolid7zPool == nil {
+		return false, nil
+	}
+	target := plan.member.sevenStream.Offset + start
+	demand := &nestedSolid7zDemand{start: target, length: length}
+	defer t.nestedSolid7zPool.releaseDemand(demand)
+	e, err := t.nestedSolid7zPool.acquire(ctx, plan.key, plan.charge, plan.parent, demand)
+	if err == nil && demand.ready {
+		if err := ctx.Err(); err != nil {
+			return true, err
+		}
+		n, err := w.Write(demand.buffer)
+		if err == nil && n != len(demand.buffer) {
+			err = io.ErrShortWrite
+		}
+		return true, err
+	}
 	if err != nil || e == nil {
 		return false, err
 	}
@@ -176,7 +192,6 @@ func (t *Tree) fillNestedSolid7z(ctx context.Context, plan *nestedSolid7zPlan, s
 	if err := ctx.Err(); err != nil {
 		return true, err
 	}
-	target := plan.member.sevenStream.Offset + start
 	if e.state != nil && target < e.state.position {
 		return false, nil
 	}
@@ -194,8 +209,9 @@ func (t *Tree) fillNestedSolid7z(ctx context.Context, plan *nestedSolid7zPlan, s
 	s := e.state
 	s.operation.bind(ctx)
 	defer s.operation.bind(nil)
-	if err = s.consume(ctx, target, io.Discard); err == nil {
-		err = s.consume(ctx, target+length, w)
+	capture := &nestedSolid7zCaptureWriter{pool: t.nestedSolid7zPool, entry: e, position: s.position}
+	if err = s.consume(ctx, target, capture); err == nil {
+		err = s.consume(ctx, target+length, io.MultiWriter(w, capture))
 	}
 	healthy = err == nil
 	return true, err

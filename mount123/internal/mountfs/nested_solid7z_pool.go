@@ -18,14 +18,16 @@ import (
 const nestedSolid7zMemoryBytes int64 = 128 << 20
 
 type nestedSolid7zPool struct {
-	mu             sync.Mutex
-	entries        map[string]*nestedSolid7zEntry
-	idle           list.List
-	used, maxBytes int64
-	maxItems       int
-	retiring       int // Still charged until decoder/ancestor Close returns.
-	closed         bool
-	stop           chan struct{}
+	mu              sync.Mutex
+	entries         map[string]*nestedSolid7zEntry
+	idle            list.List
+	used, maxBytes  int64
+	maxItems        int
+	retiring        int   // Still charged until decoder/ancestor Close returns.
+	pendingBytes    int64 // Requested output retained for waiting borrowers.
+	maxPendingBytes int64
+	closed          bool
+	stop            chan struct{}
 }
 
 type nestedSolid7zEntry struct {
@@ -36,16 +38,17 @@ type nestedSolid7zEntry struct {
 	node          *list.Element
 	state         *nestedSolid7zState
 	releaseParent func()
+	demands       []*nestedSolid7zDemand
 }
 
 func newNestedSolid7zPool(items int, bytes int64) *nestedSolid7zPool {
-	return &nestedSolid7zPool{entries: make(map[string]*nestedSolid7zEntry), maxItems: items, maxBytes: bytes, stop: make(chan struct{})}
+	return &nestedSolid7zPool{entries: make(map[string]*nestedSolid7zEntry), maxItems: items, maxBytes: bytes, maxPendingBytes: min(16<<20, bytes/8), stop: make(chan struct{})}
 }
 
 // acquire runs only inside an admitted synchronous nested decode. The producer
 // already owns its permit and lends it to ancestors. Waiting for this turn never
 // holds the pool lock or requires a producer to obtain another permit.
-func (p *nestedSolid7zPool) acquire(ctx context.Context, key string, charge int64, parent *nestedArchive) (*nestedSolid7zEntry, error) {
+func (p *nestedSolid7zPool) acquire(ctx context.Context, key string, charge int64, parent *nestedArchive, demand *nestedSolid7zDemand) (*nestedSolid7zEntry, error) {
 	if p == nil || charge <= 0 || charge > p.maxBytes || p.maxItems <= 0 {
 		return nil, nil
 	}
@@ -58,8 +61,13 @@ func (p *nestedSolid7zPool) acquire(ctx context.Context, key string, charge int6
 			p.mu.Unlock()
 			return nil, storage.ErrClosed
 		}
+		if demand != nil && demand.ready {
+			p.mu.Unlock()
+			return nil, nil
+		}
 		if e := p.entries[key]; e != nil {
 			if e.busy {
+				p.registerDemandLocked(e, demand)
 				ready := e.ready
 				p.mu.Unlock()
 				select {
@@ -124,6 +132,13 @@ func (p *nestedSolid7zPool) reclaim(e *nestedSolid7zEntry) {
 
 func (p *nestedSolid7zPool) release(e *nestedSolid7zEntry, healthy bool) {
 	p.mu.Lock()
+	// A source/checksum failure discards all helped output, even if an earlier
+	// range happened to fill before the error. Waiters can retry normally.
+	for _, demand := range e.demands {
+		demand.owner = nil
+		demand.ready = healthy && demand.filled == int64(len(demand.buffer))
+	}
+	e.demands = nil
 	retire := !healthy || p.closed || e.state == nil || e.state.finished
 	if retire {
 		p.detach(e)
