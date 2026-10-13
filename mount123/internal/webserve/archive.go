@@ -104,7 +104,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	// Archive scans can be expensive for remote solid RARs. Use the same
 	// progressive index path as FUSE so the first safe batch renders without
 	// waiting for the complete archive.
-	members, complete, err := s.service.ListArchiveProgressiveStatus(r.Context(), fileID, prefix)
+	page, err := s.service.ListArchivePage(r.Context(), fileID, prefix, "", archiveInitialPageSize)
 	if err != nil {
 		s.logger.Printf("web archive list failed file_id=%d path=%q err=%v", fileID, prefix, err)
 		if err == syscall.EACCES {
@@ -123,10 +123,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	if parent == "." {
 		parent = ""
 	}
-	rows, nextCursor := archiveMemberPage(fileID, prefix, members, "", archiveInitialPageSize)
-	if !complete && nextCursor == "" && len(rows) > 0 {
-		nextCursor = rows[len(rows)-1].Name
-	}
+	rows := archiveRows(fileID, prefix, page.Items)
 	imageCount := 0
 	for _, row := range rows {
 		if row.IsImage {
@@ -141,31 +138,15 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		Parent:     parent,
 		Rows:       rows,
 		ImageCount: imageCount,
-		Total:      len(members),
-		NextCursor: nextCursor,
+		Total:      page.Total,
+		NextCursor: page.NextCursor,
 		EntriesURL: archiveEntriesURL(fileID, prefix),
-		Complete:   complete,
+		Complete:   page.Complete,
 	})
 }
 
 func archiveEntriesURL(fileID int64, prefix string) string {
 	return "/archive/" + strconv.FormatInt(fileID, 10) + "/entries?path=" + url.QueryEscape(prefix)
-}
-
-func archiveMemberPage(fileID int64, prefix string, members []mountfs.ArchiveEntry, cursor string, limit int) ([]archiveRow, string) {
-	start := 0
-	for start < len(members) && cursor != "" && members[start].Name <= cursor {
-		start++
-	}
-	end := start + limit
-	if end > len(members) {
-		end = len(members)
-	}
-	rows := archiveRows(fileID, prefix, members[start:end])
-	if end == len(members) || end == start {
-		return rows, ""
-	}
-	return rows, members[end-1].Name
 }
 
 type archiveEntryJSON struct {
@@ -195,22 +176,19 @@ func (s *Server) handleArchiveEntries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	prefix := strings.Trim(r.URL.Query().Get("path"), "/")
-	members, complete, err := s.service.ListArchiveProgressiveStatus(r.Context(), fileID, prefix)
+	page, err := s.service.ListArchivePage(r.Context(), fileID, prefix, r.URL.Query().Get("cursor"), archiveEntryPageSize)
 	if err != nil {
 		s.logger.Printf("web archive entries failed file_id=%d path=%q cursor=%q err=%v", fileID, prefix, r.URL.Query().Get("cursor"), err)
 		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
 		return
 	}
-	rows, next := archiveMemberPage(fileID, prefix, members, r.URL.Query().Get("cursor"), archiveEntryPageSize)
-	if !complete && next == "" && len(rows) > 0 {
-		next = rows[len(rows)-1].Name
-	}
+	rows := archiveRows(fileID, prefix, page.Items)
 	items := make([]archiveEntryJSON, 0, len(rows))
 	for _, row := range rows {
 		items = append(items, archiveEntryJSON{Name: row.Name, Size: row.Size, IsDir: row.IsDir, Nested: row.Nested, Encrypted: row.Encrypted, IsImage: row.IsImage, Kind: row.Kind, Icon: row.Icon, FAIcon: row.FAIcon, Href: row.Href, Download: row.Download, FavoriteKey: row.FavoriteKey, MemberPath: row.MemberPath})
 	}
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": next, "total": len(members), "complete": complete})
+	_ = json.NewEncoder(w).Encode(map[string]any{"items": items, "next_cursor": page.NextCursor, "total": page.Total, "complete": page.Complete})
 }
 
 func archiveRows(fileID int64, prefix string, members []mountfs.ArchiveEntry) []archiveRow {

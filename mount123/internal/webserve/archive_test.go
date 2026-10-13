@@ -4,9 +4,11 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -69,7 +71,11 @@ func (a *archiveFixtureAPI) Detail(_ context.Context, id int64) (panapi.File, er
 
 func newArchiveFixture(t *testing.T) (*Server, []byte) {
 	t.Helper()
-	payload := archiveBytes(t)
+	return newArchiveFixtureData(t, archiveBytes(t))
+}
+
+func newArchiveFixtureData(t *testing.T, payload []byte) (*Server, []byte) {
+	t.Helper()
 	download := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id, err := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/"), 10, 64)
 		if err != nil || id != 1 {
@@ -94,6 +100,75 @@ func newArchiveFixture(t *testing.T) (*Server, []byte) {
 		opts.Info.RootID = 0
 	})
 	return server, payload
+}
+
+func TestArchivePagesEnumerateEveryMember(t *testing.T) {
+	var payload bytes.Buffer
+	w := zip.NewWriter(&payload)
+	// Archive order differs from display order, with more than two pages.
+	for i := 236; i >= 0; i-- {
+		f, err := w.Create(fmt.Sprintf("%03d.jpg", i))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.Write([]byte("image")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server, _ := newArchiveFixtureData(t, payload.Bytes())
+	first := authenticatedGET(t, server.Handler(), "/archive/1", nil)
+	if first.Code != http.StatusOK {
+		t.Fatal(first.Body.String())
+	}
+	if got := strings.Count(first.Body.String(), `class="file-grid-item file-item"`); got != 60 {
+		t.Fatalf("initial rows=%d", got)
+	}
+	attr := `data-archive-next-cursor="`
+	_, after, ok := strings.Cut(first.Body.String(), attr)
+	if !ok {
+		t.Fatal("missing initial cursor")
+	}
+	cursor, _, _ := strings.Cut(after, `"`)
+	if cursor == "" {
+		t.Fatal("initial page marked terminal")
+	}
+	count := 60
+	seen := map[string]bool{}
+	for cursor != "" {
+		resp := authenticatedGET(t, server.Handler(), "/archive/1/entries?cursor="+url.QueryEscape(cursor), nil)
+		if resp.Code != http.StatusOK {
+			t.Fatalf("entries: %s", resp.Body.String())
+		}
+		var page struct {
+			Items    []archiveEntryJSON `json:"items"`
+			Next     string             `json:"next_cursor"`
+			Complete bool               `json:"complete"`
+			Total    int                `json:"total"`
+		}
+		if err := json.Unmarshal(resp.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		if page.Total != 237 || !page.Complete || len(page.Items) == 0 || len(page.Items) > 100 {
+			t.Fatalf("bad page: %+v", page)
+		}
+		for _, row := range page.Items {
+			if seen[row.Name] || row.Name != fmt.Sprintf("%03d.jpg", count) {
+				t.Fatalf("duplicate or missing member at %d: %s", count, row.Name)
+			}
+			seen[row.Name] = true
+			count++
+		}
+		cursor = page.Next
+		if count > 237 {
+			t.Fatal("pagination did not terminate")
+		}
+	}
+	if count != 237 {
+		t.Fatalf("only %d members enumerated", count)
+	}
 }
 
 func TestArchiveListRendersMembers(t *testing.T) {

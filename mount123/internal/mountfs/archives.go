@@ -346,14 +346,20 @@ func (t *Tree) waitArchiveIndex(ctx context.Context, key string, wait time.Durat
 		t.mu.Lock()
 		partial, updated := call.partial, call.updated
 		t.mu.Unlock()
+		var changed <-chan struct{}
 		if len(progressive) > 0 && progressive[0] && partial != nil {
 			// The task publishes an empty snapshot before scanning starts. Do
 			// not return that placeholder; wait for the first verified member
 			// (or completion) so an interactive request has something useful to
 			// render while the remaining index continues in the background.
 			partial.mu.RLock()
-			ready := len(partial.members) > 0 || partial.complete
+			ready := len(partial.members) > 0 || (partial.root != nil && len(partial.root.dirs) > 0) || partial.complete
+			changed = partial.changed
+			scanErr := partial.scanErr
 			partial.mu.RUnlock()
+			if scanErr != nil {
+				return nil, scanErr
+			}
 			if ready {
 				return partial, nil
 			}
@@ -362,6 +368,7 @@ func (t *Tree) waitArchiveIndex(ctx context.Context, key string, wait time.Durat
 		case <-call.done:
 			return call.value, call.err
 		case <-updated:
+		case <-changed:
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-t.ctx.Done():

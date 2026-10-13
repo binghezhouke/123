@@ -839,6 +839,7 @@ func (t *Tree) getZIPWithProgress(ctx context.Context, source *storage.Remote, s
 // ZIP index paths are represented by slash-separated components on the Node.
 type zipIndex struct {
 	mu          sync.RWMutex
+	listingID   string
 	changed     chan struct{}
 	complete    bool
 	scanErr     error
@@ -850,9 +851,10 @@ type zipIndex struct {
 	bytes       int64
 }
 type zipDir struct {
-	order []string
-	dirs  map[string]*zipDir
-	files map[string]*member
+	order       []string
+	sortedNames []string
+	dirs        map[string]*zipDir
+	files       map[string]*member
 }
 
 func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int64, archive *archiveDescriptor) map[string]*entry {

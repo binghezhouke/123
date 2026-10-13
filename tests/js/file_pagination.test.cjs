@@ -8,17 +8,18 @@ function setup({go = false} = {}) {
     const grid = {items: [item(1)], querySelectorAll() {return this.items;}, append(fragment) {this.items.push(...fragment.items);}};
     const list = {...grid, items: [item(1)]};
     const button = {
-        href: 'http://test/?last_file_id=1', attrs: {href: 'yes'}, textContent: '',
+        href: 'http://test/?last_file_id=1', attrs: {href: 'yes'}, dataset: {}, textContent: '',
         parentElement: {after(status) {state.status = status;}},
         closest() {return this.parentElement;},
         addEventListener(name, fn) {this.click = fn;},
+        removeEventListener(name, fn) {if (this.click === fn) delete this.click;},
         hasAttribute(name) {return name in this.attrs;},
         setAttribute(name, value) {this.attrs[name] = value;},
         removeAttribute(name) {delete this.attrs[name];},
     };
     const heading = {classList: {contains: () => false}};
     const footer = {};
-    const state = {button, grid, list, heading, footer, calls: [], scroller: {scrollTop: 120, scrollLeft: 0}, response: {ok: true, text: async () => 'page'}, ids: [1, 2], next: null};
+    const state = {button, grid, list, heading, footer, calls: [], signals: [], handlers: {}, scroller: {scrollTop: 120, scrollLeft: 0}, response: {ok: true, text: async () => 'page'}, ids: [1, 2], next: null};
     const document = {
         scrollingElement: state.scroller,
         querySelector: selector => selector === '[data-load-more]' ? button : selector === '[data-file-count]' ? heading : null,
@@ -27,8 +28,8 @@ function setup({go = false} = {}) {
         createElement: () => ({setAttribute() {}}),
         createDocumentFragment: () => ({items: [], append(item) {this.items.push(item);}}),
         importNode: node => item(node.dataset.fileId),
-        addEventListener() {},
-        dispatchEvent() {},
+        addEventListener(name, fn) {(state.handlers[name] ||= []).push(fn);},
+        dispatchEvent(event) {(state.handlers[event.type] || []).forEach(fn => fn(event));},
     };
     class DOMParser {
         parseFromString() {
@@ -46,10 +47,16 @@ function setup({go = false} = {}) {
         unobserve() {}
         disconnect() {intersections.length = 0;}
     }
+    const windowHandlers = {};
+    const window = {IntersectionObserver,
+        addEventListener(name, fn) {(windowHandlers[name] ||= []).push(fn);},
+        dispatchEvent(event) {(windowHandlers[event.type] || []).forEach(fn => fn(event));},
+    };
+    state.window = window; state.document = document;
     vm.runInNewContext(fs.readFileSync(go ? 'mount123/internal/webserve/static/js/file_pagination.js' : 'static/js/file_pagination.js', 'utf8'), {
-        window: {IntersectionObserver}, IntersectionObserver,
+        window, IntersectionObserver, AbortController,
         CustomEvent: class {constructor(type, options) {this.type = type; this.detail = options.detail;}},
-        document, DOMParser, fetch: async url => {state.calls.push(url); return state.response;},
+        document, DOMParser, fetch: async (url, options) => {state.calls.push(url); state.signals.push(options.signal); return state.response;},
     });
     state.click = () => button.click({preventDefault() {}});
     return state;
@@ -142,4 +149,51 @@ test('Go pagination keeps loading while sentinel remains inside preload margin',
     assert.equal(s.calls.length, 2);
     assert.equal(s.grid.items.length, 3);
     assert.equal(s.intersections.length, 0, 'stop observing at final page');
+});
+
+
+test('Go directory pagination aborts and isolates late responses when the mounted directory changes', async () => {
+    const s = setup({go: true});
+    let release;
+    s.response.text = () => new Promise(resolve => {release = resolve;});
+    const oldRequest = s.window.loadNextFilePage();
+    await new Promise(resolve => setImmediate(resolve));
+    s.document.dispatchEvent({type: 'cloudarchive:before-navigate'});
+    assert.equal(s.signals[0].aborted, true);
+    const newButton = {...s.button, dataset: {}, attrs: {href: 'yes'}, href: 'http://test/?offset=40'};
+    const newGrid = {...s.grid, items: [{dataset: {fileId: '10'}}]};
+    const newList = {...s.list, items: [{dataset: {fileId: '10'}}]};
+    s.document.querySelector = selector => selector === '[data-load-more]' ? newButton : null;
+    s.document.querySelectorAll = () => newGrid.items;
+    s.document.getElementById = id => ({fileContainer: newGrid, fileListView: newList})[id];
+    s.document.dispatchEvent({type: 'cloudarchive:navigated'});
+    release('old page');
+    assert.equal(await oldRequest, false);
+    assert.deepEqual(newGrid.items.map(item => item.dataset.fileId), ['10']);
+    assert.deepEqual(s.grid.items.map(item => item.dataset.fileId), ['1']);
+    s.response.text = async () => 'new page';
+    s.ids = [10, 11];
+    assert.equal(await s.window.loadNextFilePage(), true);
+    assert.deepEqual(newGrid.items.map(item => item.dataset.fileId), ['10', '11']);
+    assert.equal(s.window.hasNextFilePage(), false);
+});
+
+
+test('Go directory pagination resumes after a BFcache return without stale binding or cursor reset', async () => {
+    const s = setup({go: true});
+    s.next = 'http://test/?offset=40';
+    assert.equal(await s.window.loadNextFilePage(), true);
+    assert.equal(s.button.href, s.next);
+    s.window.dispatchEvent({type: 'pagehide'});
+    assert.equal(s.window.hasNextFilePage(), false);
+    assert.equal(s.button.dataset.paginationBound, undefined);
+    assert.equal(s.button.click, undefined);
+    s.window.dispatchEvent({type: 'pageshow', persisted: true});
+    assert.equal(s.button.dataset.paginationBound, '1');
+    assert.equal(s.window.hasNextFilePage(), true);
+    s.ids = [3]; s.next = null;
+    assert.equal(await s.window.loadNextFilePage(), true);
+    assert.equal(s.calls[1], 'http://test/?offset=40');
+    assert.deepEqual(s.grid.items.map(item => item.dataset.fileId), ['1', '2', '3']);
+    assert.equal(s.window.hasNextFilePage(), false);
 });

@@ -67,15 +67,61 @@
     }
     function setCounter(text) { el('counter').textContent = text; const fsCounter = document.getElementById('zip-gallery-fs-counter'); if (fsCounter) fsCounter.textContent = text; }
     function findIndex(list, id) { return list.findIndex(item => identity(item) === id); }
+    function hasNextPage() {
+        const pager = globalThis.window;
+        if (pager?.hasNextFilePage) return pager.hasNextFilePage();
+        return Boolean((document.querySelector('[data-archive-sentinel]') && pager?.hasArchiveNextPage?.()) || document.querySelector('[data-load-more][href]'));
+    }
     async function waitForPage() {
-        if (window.loadArchiveNextPage) return await window.loadArchiveNextPage();
+        const pager = globalThis.window;
+        if (pager?.loadNextFilePage) return await pager.loadNextFilePage();
+        if (document.querySelector('[data-archive-sentinel]') && pager?.hasArchiveNextPage?.()) return await pager.loadArchiveNextPage();
+        const more = document.querySelector('[data-load-more][href]');
+        if (!more) return false;
         return new Promise(resolve => {
-            const done = event => { document.removeEventListener('files:load-complete', done); resolve(event.detail?.ok); };
+            let timer;
+            const finish = ok => {
+                clearTimeout(timer);
+                document.removeEventListener('files:load-complete', done);
+                document.removeEventListener('cloudarchive:before-navigate', cancelled);
+                resolve(ok);
+            };
+            const done = event => finish(event.detail?.ok === true);
+            const cancelled = () => finish(false);
             document.addEventListener('files:load-complete', done, {once:true});
-            const more = document.querySelector('[data-load-more][href]'); if (!more) { document.removeEventListener('files:load-complete', done); resolve(false); return; }
+            document.addEventListener('cloudarchive:before-navigate', cancelled, {once:true});
+            timer = setTimeout(() => finish(false), 20000);
             more.click();
-            setTimeout(() => { document.removeEventListener('files:load-complete', done); resolve(false); }, 20000);
         });
+    }
+    function pauseForPage() {
+        return new Promise(resolve => {
+            const finish = () => {
+                clearTimeout(timer);
+                dialog.removeEventListener('close', finish);
+                document.removeEventListener('cloudarchive:before-navigate', finish);
+                resolve();
+            };
+            const timer = setTimeout(finish, 1000);
+            dialog.addEventListener('close', finish, {once:true});
+            document.addEventListener('cloudarchive:before-navigate', finish, {once:true});
+        });
+    }
+    async function loadToImage(index, token) {
+        let emptyPages = 0;
+        while (index >= items().length && hasNextPage()) {
+            const count = items().length;
+            const loaded = await waitForPage();
+            if (token !== generation || !dialog.open) return 'cancelled';
+            if (!loaded) return 'failed';
+            if (index >= items().length && !hasNextPage()) return 'exhausted';
+            if (items().length === count) {
+                if (++emptyPages >= 20) return 'failed';
+                await pauseForPage();
+                if (token !== generation || !dialog.open) return 'cancelled';
+            } else emptyPages = 0;
+        }
+        return index < items().length ? 'ready' : 'exhausted';
     }
     async function populateDirectoryIndex(activeId) {
         if (!dialog.dataset.galleryIndexUrl) return;
@@ -193,6 +239,7 @@
                 if (task.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
                 const url = URL.createObjectURL(blob);
                 const exif = typeof readImageExif === 'function' ? await readImageExif(blob).catch(() => null) : null;
+                if (task.controller.signal.aborted) { URL.revokeObjectURL(url); throw new DOMException('Aborted', 'AbortError'); }
                 touchCache(index, url, blob.size || 0, null, exif);
                 stats.durations.push((typeof performance !== 'undefined' ? performance.now() : Date.now()) - started); if (stats.durations.length > 100) stats.durations.shift();
                 return url;
@@ -221,7 +268,12 @@
         }
     }
     function renderThumbs() {
-        const list = items(), rail = el('thumbs');
+        const list = items(), rail = el('thumbs'), input = el('jump-input');
+        if (input) {
+            if (hasNextPage()) input.removeAttribute('max');
+            else input.max = String(list.length);
+            input.value = String(selected + 1);
+        }
         if (!rail || rail.hidden !== false || !dialog.open || !document.createElement) return;
         thumbController?.abort(); thumbController = new AbortController();
         const start = Math.max(0, selected - 3), end = Math.min(list.length, selected + 4);
@@ -234,7 +286,6 @@
             thumbQueue.push({i, button, image, controller:thumbController});
         }
         pumpThumbQueue();
-        if (el('jump-input')) { el('jump-input').max = String(list.length); el('jump-input').value = String(selected + 1); }
     }
     function pumpThumbQueue() {
         if (!dialog.open || backgroundTasks().length >= settings.concurrency || !thumbQueue.length) return;
@@ -246,19 +297,30 @@
         let list = items();
         if (index < 0) return;
         if (index >= list.length) {
-            const more = document.querySelector('[data-load-more][href]');
-            if (!more) return;
-            const oldCount = list.length; more.click();
+            if (!hasNextPage()) return;
+            // Metadata loading does not replace the selected image yet. Keep
+            // its generation valid until a new slide actually exists.
+            const pageToken = generation, previousStatus = el('status').textContent;
             el('status').textContent = '正在加载下一页…';
-            for (let i = 0; i < 100 && items().length === oldCount; i++) await new Promise(resolve => setTimeout(resolve, 100));
-            list = items(); if (index >= list.length) { el('status').textContent = '下一页加载失败，请先在目录中重试加载'; return; }
+            const result = await loadToImage(index, pageToken);
+            if (pageToken !== generation || !dialog.open) return;
+            if (result !== 'ready') {
+                const count = items().length;
+                el('next').disabled = selected === count - 1 && !hasNextPage();
+                setCounter(`${selected + 1} / ${count}`);
+                if (result === 'failed') el('status').textContent = '下一页加载失败，请先在目录中重试加载';
+                else if (el('status').textContent === '正在加载下一页…') el('status').textContent = previousStatus;
+                return;
+            }
+            list = items();
         }
+        const token = ++generation;
         if (index !== selected) { direction = Math.sign(index - selected) || direction; attempted.clear(); }
-        selected = index; prefetchReady = false; const token = ++generation; cancelOutside(); viewport?.detach();
+        selected = index; prefetchReady = false; cancelOutside(); viewport?.detach();
         const panel = el('exif-panel'); el('stage').replaceChildren(); if (panel) el('stage').append(panel);
         renderExif(null, true); el('title').textContent = title(list[index]); setCounter(`${index + 1} / ${list.length}`);
         const url = source(list[index]); el('download').href = `${url}${url.includes('?') ? '&' : '?'}download=1`;
-        el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !document.querySelector?.('[data-load-more][href]'); el('retry').hidden = true; el('status').textContent = '正在读取图片…';
+        el('prev').disabled = index === 0; el('next').disabled = index === list.length - 1 && !hasNextPage(); el('retry').hidden = true; el('status').textContent = '正在读取图片…';
         try {
             // Start the foreground request before allowing pumpPrefetch() to
             // schedule neighbors. load() installs the priority task
@@ -334,10 +396,14 @@
     el('thumb-toggle')?.addEventListener('click', () => { const rail = el('thumbs'); rail.hidden = !rail.hidden; el('thumb-toggle').setAttribute('aria-expanded', String(!rail.hidden)); if (!rail.hidden) renderThumbs(); else { thumbController?.abort(); thumbQueue=[]; } });
     el('jump-form')?.addEventListener('submit', async event => {
         event.preventDefault(); const value = Number(el('jump-input').value);
+        if (!Number.isInteger(value) || value < 1) { el('jump-message').textContent = `请输入 1 到 ${items().length} 之间的序号`; return; }
+        const token = generation;
         if (dialog.dataset.galleryIndexUrl && !el('index').childElementCount) {
-            try { await populateDirectoryIndex(identity(items()[selected])); } catch (error) { el('jump-message').textContent=error.message; return; }
+            try { await populateDirectoryIndex(identity(items()[selected])); } catch (error) { if (token === generation) el('jump-message').textContent=error.message; return; }
         }
-        while (value > items().length && document.querySelector('[data-load-more][href]')) { if (!await waitForPage()) break; }
+        if (token !== generation || !dialog.open) return;
+        await loadToImage(value - 1, token);
+        if (token !== generation || !dialog.open) return;
         const count = items().length;
         if (!Number.isInteger(value) || value < 1 || value > count) { el('jump-message').textContent = `请输入 1 到 ${count} 之间的序号`; return; }
         el('jump-message').textContent = ''; show(value - 1);
@@ -373,5 +439,11 @@
     el('stage').addEventListener('touchstart', event => { touchStart = !viewport?.isZoomed() && event.touches.length === 1 ? event.touches[0].clientX : undefined; }, {passive:true});
     el('stage').addEventListener('touchend', event => { if (viewport?.isZoomed()) {touchStart=undefined; return;} if (touchStart === undefined) return; const dx=event.changedTouches[0].clientX-touchStart; touchStart=undefined; if (Math.abs(dx)>60) show(selected+(dx<0?1:-1)); }, {passive:true});
     el('stage').addEventListener('touchcancel',()=>{touchStart=undefined;},{passive:true});
+    document.addEventListener('cloudarchive:before-navigate', () => {
+        if (dialog.open) dialog.close();
+        indexGeneration++; indexController?.abort(); indexController=null; indexPromise=null; indexComplete=false;
+        el('index')?.replaceChildren();
+        ++generation;
+    });
     dialog.addEventListener('close', () => { viewport?.close(); thumbController?.abort(); thumbQueue=[]; if(indexController){indexGeneration++;indexController.abort();indexController=null;indexPromise=null;indexComplete=false;el('index').replaceChildren();} touchStart=undefined; ++generation; prefetchReady=false; attempted.clear(); for (const task of pending.values()) task.controller.abort(); pending.clear(); for (const value of cache.values()) URL.revokeObjectURL(value.url); cache.clear(); stats.cacheBytes=0; const panel=el('exif-panel'); el('stage').replaceChildren(); if(panel) el('stage').append(panel); renderExif(null); const debug=el('debug-output'); if(debug) debug.hidden=true; const toggle=el('debug-toggle'); toggle?.setAttribute?.('aria-expanded','false'); });
 })();
