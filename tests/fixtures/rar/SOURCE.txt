@@ -33,3 +33,94 @@ have the second member's declared data CRC changed and header CRC recomputed;
 the original compressed stream and solid continuation remain intact. Split
 stored fixtures have one payload byte changed in part2 (offset 200), with all
 headers unchanged. Missing-volume tests expose only part1 to the session.
+
+Generated compressed solid multipart fixtures (not copied upstream):
+rar3-solid-multipart.part01.rar through part04.rar
+rar5-solid-multipart.part01.rar through part04.rar
+Generator and generated data/archives: LICENSE.generated (BSD-2-Clause).
+No RAR/UNRAR binary or other tool component is distributed with the fixtures.
+
+Creator: official RAR 6.24 Linux x64, 3 October 2023, used temporarily.
+Primary source: https://www.rarlab.com/rar/rarlinux-x64-624.tar.gz
+Tool package SHA256:
+88e22a8e84125c947637bbf28c746e338a0a63279d80f9f9d7373603875db1eb
+RAR executable SHA256 (enforced by the generator):
+71ab9088d575e438d243672fcc6d36d2f9a39f5a8d4d26e998129cea12dbf682
+The package license permits evaluation use for up to 40 days (section 2)
+and states no additional fees for archive/volume creation and distribution
+(section 7). The proprietary tool's license is separate from generated data.
+The official release notes explain that RAR 7 removed RAR4 creation:
+https://www.rarlab.com/rarnew.htm
+
+Reproduce into an empty directory, supplying an external official RAR binary:
+python3 tests/fixtures/rar/generate_solid_multipart.py --rar <RAR-6.24> --out <OUTPUT>
+The generator sets TZ=UTC, LC_ALL=C, mode 0644 and mtime 2000-01-01T00:00:00Z.
+Archive command (FORMAT=4 for the legacy v29 decoder fixture, FORMAT=5 for RAR5):
+rar a -cfg- -maFORMAT -m3 -md256k -s -sv- -v16384b -mt1 -ep -ts- -oi0 -idq rarVERSION-solid-multipart.rar first.bin second.bin
+The tool's manual describes -sv- as disabling solid-statistics reset across
+volumes. -oi0 avoids identical-file references. Legacy archives have the RAR
+1.5/3/4 container signature and v29 compressed data; these are not RAR5.
+
+Input is wholly synthetic: xorshift32 seed 0x86, shifts 13/17/5 with uint32
+arithmetic; take the low byte of each updated state 49152 times and concatenate
+that block twice. Both first.bin and second.bin contain exactly those bytes.
+Each member is 98304 bytes, CRC32 8469b249, SHA256:
+04bdbf62c09c8fe4899c780f22302811a45d787bbfea06df80f7ab642876099e
+Go tests independently implement this byte generator as their content oracle.
+Both versions expand to 196608 bytes each; all eight volumes total 99734 bytes.
+Two generator runs produced identical archive hashes. Independent official
+UNRAR 7.12 (1993-2025 Alexander Roshal) verified both archives with `unrar t`
+and each member's exact bytes with `unrar p -inul -p- ARCHIVE MEMBER`.
+Verifier executable SHA256:
+32a2b4cbdd260f9ecb8a84e5ceae521e078311e6ec610d8804ea5355adf68483
+
+first.bin has a genuinely compressed stream split across all four volumes.
+second.bin starts in volume four, has Solid=true and is only 69 packed bytes
+(legacy v29) or 23 packed bytes (RAR5), depending on preceding dictionary data.
+Skipping the first member's packed blocks without decoding, then constructing
+a fresh decoder for second.bin, yields ErrBadFileChecksum and different bytes
+in both versions. Tests do not simulate solid behavior by changing stored flags.
+These initial generated samples are unencrypted; the encrypted variants below
+demonstrate the encrypted-solid-multipart combination separately.
+
+Generated archive SHA256:
+rar3-solid-multipart.part01.rar 3795ad90bac1094041cefae481db9ff348340bd642dac01c007220282b1a1eec
+rar3-solid-multipart.part02.rar fe0ac39eb2e4306814967b5f4672b2fbd0de2599e78d3f55b92db1df920d21b0
+rar3-solid-multipart.part03.rar beaf8f2b345308e2b04a85ac44d20537302ca4c695bbe08b9822c00d23b03705
+rar3-solid-multipart.part04.rar 77623b3560b3faa757798843ced57a92cf194604aa242327625bd80dea17c67c
+rar5-solid-multipart.part01.rar b6f08d8c18acf05abcaee1d1f8b5888baad0c83a1eaff9c2edb518a7a29a854b
+rar5-solid-multipart.part02.rar e1d829f9bf6942d8da3d8c7a0266875621ddff9308550be43863d36e4acd06b7
+rar5-solid-multipart.part03.rar d7d50ba5fd07a519e2315392bb6f62db23696224cfc472c94b8bf7e1f7a9a712
+rar5-solid-multipart.part04.rar 8a30dfd9b5418f18c1263ee7f62625c91286e434ee266e3e446222fd480d6617
+
+Encrypted solid multipart variants:
+rar3-solid-encrypted-multipart.part01.rar through part04.rar
+rar5-solid-encrypted-multipart.part01.rar through part04.rar
+Same synthetic inputs, official tool and LICENSE.generated as the clear set.
+The public password "password" belongs ONLY to these synthetic test fixtures;
+it is not an account credential or a password for user data.
+Generate with the preceding script plus --encrypted; archive commands add
+the literal fixture switch -ppassword. Headers remain readable, while file
+contents are encrypted. The first member crosses four volumes, and the second
+member in volume four is marked Solid and Encrypted in both versions.
+
+The plaintext is reproducible and has the same fixed member hash recorded
+above. Encryption uses random salt/IV: two generator runs produced different
+archive hashes in all eight volumes, so encrypted archives are NOT promised
+to be bit-identical. The current committed volumes are frozen by hashes below.
+These eight archives total 100221 bytes; expansion is 393216 bytes combined.
+Independent official UNRAR 7.12 `t -ppassword` verified both archives and
+`p -inul -ppassword ARCHIVE MEMBER` matched each member's exact generated bytes.
+UNRAR rejected the wrong synthetic password with exit 3 (legacy) / 11 (RAR5).
+In rardecode the wrong-password terminal error is ErrBadFileChecksum (legacy)
+or ErrBadPassword (RAR5); all successfully opened files are released once.
+
+Frozen encrypted archive SHA256:
+rar3-solid-encrypted-multipart.part01.rar 478df07565ec05f1f70dacd7cc48e21aec3fe9af353abda410ae6b7f5a3cd3c8
+rar3-solid-encrypted-multipart.part02.rar 8fd9f5429f52eb188bfc98540e6e3ad9ce9b50b20fa611f066a0f644db8b9de9
+rar3-solid-encrypted-multipart.part03.rar c815524f8c6450c669b7de01aff5e76cfb1dfeb95cf20d627e0c022ef10be288
+rar3-solid-encrypted-multipart.part04.rar 10b8a7ebbd589ecea3d88b996b208f69777cc6da20e9ec60a32baf229cbcce80
+rar5-solid-encrypted-multipart.part01.rar 0033194dec086464246fcec3ebdfabccdfcdd11e952705fd48521575c8b91831
+rar5-solid-encrypted-multipart.part02.rar e6e495f5971c4ab1477b9f27fe09bdcb30eb91b1b9285cad24e27ff8d5a030b4
+rar5-solid-encrypted-multipart.part03.rar 4f2bf02a9d781b753aca30b7418025f56544ae2da662d35de39fbb0eb77d087e
+rar5-solid-encrypted-multipart.part04.rar 5c5482b25290f9b6bdb6514cc96d6dda695330c918bf705fd425beb04408f42c
