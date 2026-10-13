@@ -11,6 +11,7 @@ import (
 	"hash/crc32"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -48,6 +49,12 @@ type archiveProbeResult struct {
 
 func (r archiveProbeResult) matches(f panapi.File) bool {
 	return r.ID == f.ID && r.Version == f.Version && r.Size == f.Size && r.Updated.Equal(f.UpdatedAt)
+}
+
+func (r archiveProbeResult) durable() bool {
+	version := strings.TrimSpace(r.Version)
+	contentVersion := version != "" && version != ":"+strconv.FormatInt(r.Size, 10)
+	return contentVersion || (r.State == "detected" && (r.Kind == ".zip" || r.Kind == ".7z" || r.Kind == ".rar"))
 }
 
 type archiveProbeRecord struct {
@@ -105,7 +112,7 @@ func (t *Tree) loadProbeRecord(ctx context.Context, parentID int64) (*archivePro
 			return empty, 128, nil
 		}
 		for _, result := range record.Results {
-			if result.Version == "" || (result.Kind != "" && result.Kind != ".zip" && result.Kind != ".7z" && result.Kind != ".rar") {
+			if !result.durable() || (result.Kind != "" && result.Kind != ".zip" && result.Kind != ".7z" && result.Kind != ".rar") {
 				return empty, 128, nil
 			}
 		}
@@ -130,9 +137,9 @@ func (t *Tree) saveProbeRecord(ctx context.Context, record *archiveProbeRecord) 
 		durable := *record
 		durable.Results = nil
 		for _, result := range record.Results {
-			// Without an API content version, do not trust a durable detection
-			// just because an ID and size still match after a restart.
-			if result.Version != "" {
+			// Detected archives have immutable contents under their stable IDs.
+			// Negative/unknown detections still need a content version to persist.
+			if result.durable() {
 				durable.Results = append(durable.Results, result)
 			}
 		}

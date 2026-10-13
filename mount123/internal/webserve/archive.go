@@ -114,7 +114,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
 		return
 	}
-	file, _ := s.service.File(r.Context(), fileID)
+	file, _ := s.service.ArchiveMetadata(r.Context(), fileID)
 	name := ""
 	if file != nil {
 		name = file.Name

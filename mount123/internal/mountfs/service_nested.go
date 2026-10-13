@@ -14,7 +14,7 @@ func (s *Service) outerArchiveIndex(ctx context.Context, fileID int64) (*zipInde
 }
 
 func (s *Service) outerArchiveIndexMode(ctx context.Context, fileID int64, progressive bool) (*zipIndex, *archiveDescriptor, *storage.Remote, []byte, error) {
-	file, err := s.File(ctx, fileID)
+	file, err := s.tree.archiveFileMetadata(ctx, fileID)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -38,7 +38,7 @@ func (s *Service) outerArchiveIndexMode(ctx context.Context, fileID int64, progr
 	if kind == "" {
 		return nil, nil, nil, nil, syscall.ENOTSUP
 	}
-	source, err := s.tree.cloudFileSource(ctx, file, s.tree.opts.SourceTTL)
+	source, err := s.tree.cloudArchiveSource(ctx, &file)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}

@@ -215,7 +215,9 @@ func (r *Remote) fetchOneRangeWithRecovery(ctx context.Context, start, end int64
 		if !isInterruptedBody(readErr) {
 			return &faults.Error{Kind: faults.InvalidResponse, Message: "could not read remote range"}
 		}
-		if cursor > start && r.strongResumeValidator() == "" {
+		// Immutable archive IDs pin bytes independently of CDN validators.
+		// Ordinary sources still need a validator before combining responses.
+		if cursor > start && !r.immutable && r.strongResumeValidator() == "" {
 			return &faults.Error{Kind: faults.InvalidResponse, Message: "remote range was interrupted without a safe validator"}
 		}
 		retryNo, ok := retryBudget.takeRetry()

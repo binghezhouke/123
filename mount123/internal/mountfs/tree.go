@@ -673,6 +673,9 @@ func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 	started := time.Now()
 	defer n.observeStage(iostats.StageSourcePrepare, started)
 	f := n.item.cloud
+	if n.isArchiveDirectory() || n.isDisc() {
+		return n.tree.cloudArchiveSource(ctx, f)
+	}
 	ttl := n.tree.opts.SourceTTL
 	if f.Version != "" && ((n.tree.zipDirs && (archiveKind(f.Name) == ".rar" || archiveKind(f.Name) == ".7z")) || n.isDisc()) {
 		ttl = max(ttl, 6*24*time.Hour)
@@ -684,19 +687,31 @@ func (n *Node) source(ctx context.Context) (*storage.Remote, error) {
 // independent of FUSE. Node.source and the web service share this path so the
 // mounted tree and the HTTP front end reuse the same disk cache and direct link.
 func (t *Tree) cloudFileSource(ctx context.Context, f *panapi.File, ttl time.Duration) (*storage.Remote, error) {
+	return t.cloudSource(ctx, f, ttl, false)
+}
+
+func (t *Tree) cloudArchiveSource(ctx context.Context, f *panapi.File) (*storage.Remote, error) {
+	return t.cloudSource(ctx, f, 0, true)
+}
+
+func (t *Tree) cloudSource(ctx context.Context, f *panapi.File, ttl time.Duration, immutable bool) (*storage.Remote, error) {
 	key := t.cloudCacheKey(f)
-	value, err := t.loadMeta(ctx, "source:"+key, ttl, func(ctx context.Context) (any, int64, error) {
+	metaKey := "source:" + key
+	if immutable {
+		metaKey = "archive-source:" + key
+	}
+	value, err := t.loadMeta(ctx, metaKey, ttl, func(ctx context.Context) (any, int64, error) {
 		resolve := func(ctx context.Context) (string, error) { return t.api.DownloadURL(ctx, f.ID) }
 		var r *storage.Remote
 		var err error
 		if t.cacheScopeStable {
 			r, err = storage.NewCachedRemoteContext(t.ctx, ctx, t.cache, key, f.Size, resolve, storage.RemoteIdentity{
-				Account: t.diskCacheScope(),
-				FileID:  f.ID,
-				Version: f.Version,
-				TTL:     ttl,
+				Account:   t.diskCacheScope(),
+				FileID:    f.ID,
+				Version:   f.Version,
+				TTL:       ttl,
+				Immutable: immutable,
 				OnInvalidated: func() {
-					metaKey := "source:" + key
 					t.mu.Lock()
 					if item := t.meta[metaKey]; item != nil && item.value == r {
 						delete(t.meta, metaKey)

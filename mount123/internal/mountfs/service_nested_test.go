@@ -40,15 +40,20 @@ func (a *serviceNestedAPI) Detail(context.Context, int64) (panapi.File, error) {
 
 func newServiceNested(t *testing.T, data []byte) *Service {
 	t.Helper()
+	return newServiceNestedNamed(t, data, "outer.7z")
+}
+
+func newServiceNestedNamed(t *testing.T, data []byte, name string) *Service {
+	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"fixture"`)
-		http.ServeContent(w, r, "outer.7z", time.Unix(100, 0), bytes.NewReader(data))
+		http.ServeContent(w, r, name, time.Unix(100, 0), bytes.NewReader(data))
 	}))
 	t.Cleanup(server.Close)
 	api := &serviceNestedAPI{
 		url:    server.URL,
-		files:  []panapi.File{{ID: 77, Name: "outer.7z", Size: int64(len(data)), Version: "v1"}},
-		detail: panapi.File{ID: 77, Name: "outer.7z", Size: int64(len(data)), Version: "v1"},
+		files:  []panapi.File{{ID: 77, Name: name, Size: int64(len(data)), Version: "v1"}},
+		detail: panapi.File{ID: 77, Name: name, Size: int64(len(data)), Version: "v1"},
 	}
 	cache, err := storage.NewCache(t.TempDir(), 32<<20)
 	if err != nil {
@@ -252,10 +257,7 @@ func TestServiceZIPDecodedMemberPath(t *testing.T) {
 	if err = zw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	service := newServiceNested(t, payload.Bytes())
-	api := service.tree.api.(*serviceNestedAPI)
-	api.detail.Name = "fixture.zip"
-	api.files[0].Name = "fixture.zip"
+	service := newServiceNestedNamed(t, payload.Bytes(), "fixture.zip")
 	rows, err := service.ListArchive(context.Background(), 77, "中文")
 	if err != nil {
 		t.Fatal(err)

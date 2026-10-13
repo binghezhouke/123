@@ -69,7 +69,7 @@ func (s *Service) ListArchivePage(ctx context.Context, fileID int64, memberPath,
 }
 
 func (s *Service) listArchivePage(ctx context.Context, fileID int64, memberPath, cursor string, limit int, progressive bool) (ArchivePage, error) {
-	file, err := s.File(ctx, fileID)
+	file, err := s.tree.archiveFileMetadata(ctx, fileID)
 	if err != nil {
 		return ArchivePage{}, err
 	}
@@ -92,7 +92,7 @@ func (s *Service) listArchivePage(ctx context.Context, fileID int64, memberPath,
 		return ArchivePage{}, err
 	}
 	// Bind the cursor to the metadata used to build this index, even if the
-	// detail cache changed since the initial ISO format check above.
+	// metadata changed since the initial ISO format check above.
 	scope = fmt.Sprintf("%d:%s:%d:%s", fileID, archive.version, archive.size, memberPath)
 	root, err := s.tree.rootArchiveView(ctx, source, archive, idx, password)
 	if err != nil {

@@ -188,6 +188,9 @@ func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescript
 	dirID := archive.parentID
 	ownName := archivePasswordName(archive.name)
 	for level := 0; level < 128; level++ {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
 		directory, err := t.cloudDirectory(ctx, dirID)
 		if err != nil {
 			return nil, "", err
@@ -220,7 +223,13 @@ func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescript
 		if dirID == 0 {
 			break
 		}
-		parent, err := t.detailCached(ctx, dirID)
+		parent, cached := t.cachedDirectoryFile(dirID)
+		if !cached {
+			parent, err = t.detailCached(ctx, dirID)
+		}
+		if ctx.Err() != nil {
+			return nil, "", ctx.Err()
+		}
 		if errors.Is(err, syscall.EOPNOTSUPP) {
 			break
 		}

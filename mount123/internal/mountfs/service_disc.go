@@ -11,14 +11,14 @@ import (
 )
 
 func (s *Service) isoSource(ctx context.Context, fileID int64) (*storage.Remote, int64, error) {
-	file, err := s.File(ctx, fileID)
+	file, err := s.tree.archiveFileMetadata(ctx, fileID)
 	if err != nil {
 		return nil, 0, err
 	}
 	if file.IsDir {
 		return nil, 0, syscall.EISDIR
 	}
-	source, err := s.tree.cloudFileSource(ctx, file, s.tree.opts.SourceTTL)
+	source, err := s.tree.cloudArchiveSource(ctx, &file)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -44,7 +44,7 @@ func (s *Service) ListISO(ctx context.Context, fileID int64, memberPath string) 
 	if !validDiscPath(memberPath, s.tree.opts.MaxDepth) {
 		return nil, syscall.EINVAL
 	}
-	file, err := s.File(ctx, fileID)
+	file, err := s.tree.archiveFileMetadata(ctx, fileID)
 	if err != nil {
 		return nil, err
 	}

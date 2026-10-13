@@ -41,6 +41,7 @@ type Remote struct {
 	resolvedURL           string
 	urlUntil              time.Time
 	etag, modified        string
+	immutable             bool
 	identityExpiresAt     time.Time
 	identityDescriptorKey string
 	identityInvalidated   atomic.Bool

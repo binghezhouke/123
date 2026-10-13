@@ -5,7 +5,18 @@ download URL. This is intended for the mostly immutable, read-only cloud tree.
 
 ## Identity before networking
 
-The first source open still resolves its URL and probes byte zero. When the
+Archive sources explicitly opt into immutable content identity. Their index
+and cached bytes can be reused without resolving a URL or probing byte zero,
+including after restart and with missing API versions or HTTP validators.
+Existing source descriptors preserve their original byte-cache namespace even
+past the source TTL; sources without a reusable descriptor receive a stable
+archive-only namespace. The immutable descriptor is separate from ordinary-file
+descriptors and contains no URL or password. A cache gap resolves a URL through
+the existing bounded request and recovery paths. Legacy validators retained in
+the cache key do not become conditional request headers for immutable content;
+response ranges, sizes, encoding and lengths are still checked.
+
+For ordinary files, the first source open still resolves its URL and probes byte zero. When the
 source has a strong, quoted HTTP ETag, or no usable ETag and a valid HTTP
 Last-Modified date, the mount saves a small identity record scoped to the
 account/API, file ID, content version and size. The record retains
@@ -34,8 +45,10 @@ neither supported validator retains the eager-probe behavior.
 
 Local hits intentionally do not revalidate cloud permissions or external
 changes. Visibility follows the directory snapshot and source-identity TTLs.
+Archive entry metadata and password ancestry reuse fresh directory snapshots,
+falling back to Detail when the required metadata is absent or expired.
 This is not a complete offline mount: nonzero roots still require Detail,
-missing directory/index/data records need networking, and encrypted archives
+missing directory/index/data records can need networking, and encrypted archives
 still require their password sidecar. A descriptor is not a password cache.
 Prefetch can also request uncached bytes even when a foreground read hits.
 

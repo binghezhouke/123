@@ -93,8 +93,7 @@ func (r *volumeReaderAt) sourceAt(ctx context.Context, index int) (*storage.Remo
 		r.initializing[index] = pending
 		r.mu.Unlock()
 		f := r.parts[index]
-		source, err := storage.NewRemoteContext(r.owner.ctx, ctx, r.owner.cache, r.owner.cloudCacheKey(&f), f.Size,
-			func(ctx context.Context) (string, error) { return r.owner.api.DownloadURL(ctx, f.ID) })
+		source, err := r.owner.cloudArchiveSource(ctx, &f)
 		r.mu.Lock()
 		if err == nil {
 			r.sources[index] = source

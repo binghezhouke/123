@@ -297,8 +297,8 @@ func TestRootZIPByteSplitWarmRestoreWithoutPayloadRead(t *testing.T) {
 	calls := api.requests
 	api.denyNonzero = false
 	api.mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("warm split restore performed %d requests, want initial source probe only", calls)
+	if calls != 0 {
+		t.Fatalf("warm split restore performed %d requests, want no network requests before a cache miss", calls)
 	}
 	rootZIPRead(t, service, 1, "payload.bin", want)
 }

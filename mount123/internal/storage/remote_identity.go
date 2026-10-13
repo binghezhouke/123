@@ -15,36 +15,44 @@ import (
 const (
 	remoteIdentityDescriptorVersion = 2
 	remoteIdentityLegacyVersion     = 1
+	remoteIdentityImmutableVersion  = 3
 	remoteIdentityDefaultTTL        = 6 * 24 * time.Hour
 	remoteIdentityMaxDescriptor     = 8 << 10
 )
 
 // RemoteIdentity opts a remote source into durable identity restoration. The
 // account value must be stable and opaque (normally Cache.StableDigest output).
-// A descriptor is written only after the initial probe yields a strong ETag or
-// a valid Last-Modified date when no ETag is available.
+// Ordinary source descriptors require a probe with a strong ETag or a valid
+// Last-Modified date. Explicitly immutable sources can be constructed lazily.
 type RemoteIdentity struct {
-	Account       string
-	FileID        int64
-	Version       string
-	TTL           time.Duration
+	Account string
+	FileID  int64
+	Version string
+	TTL     time.Duration
+	// Immutable is an explicit promise that this account-scoped file ID's
+	// contents never change. Transport links may still expire or be rejected.
+	// Ordinary sources retain the validator and TTL requirements below.
+	Immutable     bool
 	OnInvalidated func()
 }
 
 type remoteIdentityDescriptor struct {
-	Version  int       `json:"schema"`
-	Identity string    `json:"identity"`
-	FileID   int64     `json:"file_id"`
-	Content  string    `json:"content_version"`
-	Size     int64     `json:"size"`
-	ETag     string    `json:"etag"`
-	Modified string    `json:"last_modified,omitempty"`
-	Obtained time.Time `json:"obtained_at"`
+	Version   int       `json:"schema"`
+	Identity  string    `json:"identity"`
+	FileID    int64     `json:"file_id"`
+	Content   string    `json:"content_version"`
+	Size      int64     `json:"size"`
+	ETag      string    `json:"etag"`
+	Modified  string    `json:"last_modified,omitempty"`
+	Obtained  time.Time `json:"obtained_at"`
+	Key       string    `json:"cache_key,omitempty"`
+	Immutable bool      `json:"immutable,omitempty"`
 }
 
 // NewCachedRemoteContext restores an identity descriptor before probing the
-// source. It preserves NewRemoteContext's cache key format and falls back to
-// eager URL resolution and probing whenever durable reuse cannot be proven.
+// source. Ordinary sources preserve NewRemoteContext's key format and fall back
+// to eager probing when durable reuse cannot be proven. Immutable sources reuse
+// legacy keys when available and otherwise use a stable archive-only namespace.
 func NewCachedRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Cache, key string, size int64, resolve ResolveURL, identity RemoteIdentity) (*Remote, error) {
 	if cache == nil || resolve == nil || size < 0 {
 		return nil, errors.New("invalid remote reader configuration")
@@ -64,6 +72,9 @@ func NewCachedRemoteContext(lifetimeCtx, operationCtx context.Context, cache *Ca
 	}
 
 	identityOK := remoteIdentityUsable(identity, size)
+	if identity.Immutable && identityOK {
+		return newImmutableRemoteContext(lifetimeCtx, ctx, cache, key, size, resolve, identity)
+	}
 	descriptorKey, identityDigest := "", ""
 	if identityOK && size > 0 {
 		descriptorKey, identityDigest = remoteIdentityKeys(cache, identity, size)
@@ -159,12 +170,12 @@ func isValidLastModified(value string) bool {
 
 func remoteIdentityUsable(identity RemoteIdentity, size int64) bool {
 	version := strings.TrimSpace(identity.Version)
-	if identity.Account == "" || identity.FileID <= 0 || version == "" || size <= 0 {
+	if identity.Account == "" || identity.FileID <= 0 || size <= 0 {
 		return false
 	}
 	// PanAPI represents a missing content version as ":<size>". It is not a
 	// version token and must not make unrelated same-size contents reusable.
-	if version == ":"+strconv.FormatInt(size, 10) {
+	if !identity.Immutable && (version == "" || version == ":"+strconv.FormatInt(size, 10)) {
 		return false
 	}
 	return len(identity.Account) <= 256 && len(version) <= 2048
@@ -208,12 +219,75 @@ func restoreRemoteIdentity(ctx context.Context, cache *Cache, key, digest string
 func validRemoteIdentityDescriptor(d remoteIdentityDescriptor, digest string, identity RemoteIdentity, size int64, ttl time.Duration) bool {
 	validValidator := isStrongETag(d.ETag) || (d.ETag == "" && isValidLastModified(d.Modified))
 	validSchema := d.Version == remoteIdentityDescriptorVersion || (d.Version == remoteIdentityLegacyVersion && isStrongETag(d.ETag))
+	if identity.Immutable && d.Version == remoteIdentityImmutableVersion && d.Immutable && d.Key != "" {
+		validSchema = true
+		validValidator = validValidator || (d.ETag == "" && d.Modified == "")
+	}
 	if !validSchema || d.Identity != digest || d.FileID != identity.FileID || d.Content != identity.Version || d.Size != size || !validValidator || d.Obtained.IsZero() {
 		return false
 	}
 	ttl = remoteIdentityTTL(ttl)
 	age := time.Since(d.Obtained)
-	return age >= 0 && age < ttl
+	return age >= 0 && (identity.Immutable || age < ttl)
+}
+
+// Immutable descriptors live beside the ordinary descriptor, so opening the
+// original cloud file with ordinary safety requirements cannot overwrite or
+// expire the archive's range namespace. Legacy validator namespaces are reused.
+func newImmutableRemoteContext(lifetimeCtx, ctx context.Context, cache *Cache, key string, size int64, resolve ResolveURL, identity RemoteIdentity) (*Remote, error) {
+	legacyKey, digest := remoteIdentityKeys(cache, identity, size)
+	descriptorKey := legacyKey + ":immutable"
+	restored, valid, err := restoreRemoteIdentity(ctx, cache, descriptorKey, digest, identity, size)
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		restored, valid, err = restoreRemoteIdentity(ctx, cache, legacyKey, digest, identity, size)
+		if err != nil {
+			return nil, err
+		}
+	}
+	namespace := key + "\x00immutable-v1"
+	etag, modified := "", ""
+	if valid {
+		if isStrongETag(restored.ETag) {
+			namespace = key + "\x00etag:" + restored.ETag
+			etag = restored.ETag
+		} else if isValidLastModified(restored.Modified) {
+			namespace = key + "\x00modified:" + restored.Modified
+			modified = restored.Modified
+		}
+		if restored.Key != "" && restored.Key != namespace {
+			// Never attach a source to a namespace belonging to another file.
+			_ = cache.Remove(descriptorKey)
+			valid = false
+			namespace, etag, modified = key+"\x00immutable-v1", "", ""
+		}
+	}
+	r := &Remote{
+		lifetimeCtx: lifetimeCtx, cache: cache, size: size, key: namespace,
+		linkKey: key, resolve: resolve, client: http.DefaultClient,
+		immutable: true,
+		// Legacy transport validators remain in the key for compatibility,
+		// but immutable bytes do not depend on a CDN retaining its validator.
+		rangeID:               cacheID(namespace),
+		identityDescriptorKey: descriptorKey, onIdentityInvalidated: identity.OnInvalidated,
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if !valid || restored.Version != remoteIdentityImmutableVersion {
+		descriptor := remoteIdentityDescriptor{
+			Version: remoteIdentityImmutableVersion, Identity: digest, FileID: identity.FileID,
+			Content: identity.Version, Size: size, ETag: etag, Modified: modified,
+			Obtained: time.Now().UTC(), Key: namespace, Immutable: true,
+		}
+		data, marshalErr := json.Marshal(descriptor)
+		if marshalErr == nil && len(data) <= remoteIdentityMaxDescriptor {
+			_ = cache.ReplaceArchiveIndex(ctx, descriptorKey, data)
+		}
+	}
+	return r, nil
 }
 
 func isStrongETag(etag string) bool {

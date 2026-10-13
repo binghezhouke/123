@@ -98,6 +98,17 @@ func (s *Service) File(ctx context.Context, fileID int64) (*panapi.File, error) 
 	return &file, nil
 }
 
+// ArchiveMetadata returns the core metadata needed for read-only archive
+// browsing, reusing a fresh parent listing before falling back to Detail.
+// Additional metadata for ordinary file content or writes comes from File.
+func (s *Service) ArchiveMetadata(ctx context.Context, fileID int64) (*panapi.File, error) {
+	file, err := s.tree.archiveFileMetadata(ctx, fileID)
+	if err != nil {
+		return nil, err
+	}
+	return &file, nil
+}
+
 // OpenFile returns a cached random-access reader for a plain cloud file and
 // its size. Directories return EISDIR.
 func (s *Service) OpenFile(ctx context.Context, fileID int64) (io.ReaderAt, int64, error) {
@@ -241,7 +252,7 @@ func (s *Service) listArchive(ctx context.Context, fileID int64, memberPath stri
 // stream through the shared growing cache;
 // plain ZIP Store members map directly onto the remote file instead.
 func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPath string) (io.ReaderAt, int64, error) {
-	if file, fileErr := s.File(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
+	if file, fileErr := s.tree.archiveFileMetadata(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
 		return s.OpenISOMember(ctx, fileID, memberPath)
 	}
 	idx, archive, source, password, err := s.outerArchiveIndex(ctx, fileID)

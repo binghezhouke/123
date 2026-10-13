@@ -8,6 +8,7 @@ import (
 	"io"
 	"path"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
@@ -32,25 +33,62 @@ type cloudDirectory struct {
 var cloudDirectoryGeneration atomic.Uint64
 
 // cachedDirectoryFile reuses the metadata already present in parent listings.
-// The files are sorted by ID when built (including disk restores). Only fresh
-// snapshots are eligible; keep this navigation shortcut separate from Detail,
-// whose additional fields may be needed when opening file content.
+// Only directories are eligible for this navigation shortcut.
 func (t *Tree) cachedDirectoryFile(id int64) (panapi.File, bool) {
+	return t.cachedListedFile(id, true)
+}
+
+// archiveFileMetadata needs only the core fields carried by parent listings.
+// Keep it separate from Detail-backed File calls, whose additional metadata
+// may be needed for ordinary file content or writes.
+func (t *Tree) archiveFileMetadata(ctx context.Context, id int64) (panapi.File, error) {
+	if err := ctx.Err(); err != nil {
+		return panapi.File{}, err
+	}
+	if err := t.ctx.Err(); err != nil {
+		return panapi.File{}, err
+	}
+	if file, ok := t.cachedListedFile(id, false); ok {
+		if err := ctx.Err(); err != nil {
+			return panapi.File{}, err
+		}
+		return file, nil
+	}
+	return t.detailCached(ctx, id)
+}
+
+// The files are sorted by ID when built, including disk restores. Search only
+// canonical directories in the bounded metadata cache. Probe overlays belong
+// to existing handles and may outlive a refreshed directory. Never restore
+// unrelated directories from disk. Fetched time orders listings restored in a
+// different order after restart.
+func (t *Tree) cachedListedFile(id int64, directoriesOnly bool) (panapi.File, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	now := time.Now()
 	var found panapi.File
 	var newest uint64
+	var fetchedAt time.Time
 	var hit *metaItem
-	for _, item := range t.meta {
+	for key, item := range t.meta {
+		if !strings.HasPrefix(key, "dir:") {
+			continue
+		}
 		directory, ok := item.value.(*cloudDirectory)
-		if !ok || (!item.expires.IsZero() && !now.Before(item.expires)) {
+		if !ok {
 			continue
 		}
 		i := sort.Search(len(directory.files), func(i int) bool { return directory.files[i].ID >= id })
-		if i < len(directory.files) && directory.files[i].ID == id && directory.files[i].IsDir && directory.generation > newest {
+		if i < len(directory.files) && directory.files[i].ID == id && (!directoriesOnly || directory.files[i].IsDir) &&
+			(hit == nil || item.fetchedAt.After(fetchedAt) || (item.fetchedAt.Equal(fetchedAt) && directory.generation > newest)) {
 			found, newest, hit = directory.files[i], directory.generation, item
+			fetchedAt = item.fetchedAt
 		}
+	}
+	// Do not revive an older location when the latest matching snapshot has
+	// expired or failed refresh. Resolve current metadata through Detail.
+	if hit != nil && (hit.stale || (!hit.expires.IsZero() && !now.Before(hit.expires))) {
+		return panapi.File{}, false
 	}
 	if hit != nil {
 		t.seq++
