@@ -51,6 +51,41 @@
       "parent_id": 4,
       "mount_path": "acceptance/folder",
       "directories": [{"path": "", "archive_depth": 0, "count": 260}]
+    },
+    {
+      "name": "explicit-seek-order",
+      "kind": "archive",
+      "order": "outer-first",
+      "file_id": 5,
+      "mount_path": "acceptance/small-seek.zip",
+      "directories": [
+        {
+          "path": "",
+          "archive_depth": 0,
+          "count": 1
+        },
+        {
+          "path": "inner.zip",
+          "archive_depth": 1,
+          "count": 1
+        }
+      ],
+      "reads": [
+        {
+          "path": "inner.zip/payload.bin",
+          "archive_depth": 1,
+          "size": 16777216,
+          "offsets": [
+            12582912,
+            4194304,
+            10485760,
+            2097152,
+            12582912,
+            16777215,
+            0
+          ]
+        }
+      ]
     }
   ]
 }

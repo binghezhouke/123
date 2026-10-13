@@ -29,7 +29,7 @@ MOUNT123_FUSE_TEST=1 go test -race ./internal/mountfs \
 - `mount_path`：相对于 `--mount` 的路径，禁止绝对路径或 `..`；`browse` 可设为空字符串以比较挂载根目录。
 - `directories`：按执行顺序列出的准确相对目录路径；每步带 `archive_depth`（顶层档案为 0，每进入一个档案加 1，普通文件夹不增加）。可用 `count` 检测两端同时少项。
 - `order=outer-first` 的第一步必须为空路径，即先枚举外层；`direct` 从指定内层直接进入，不先列外层。
-- 可选 `reads`：只列出明确允许读取的小样本，每项必须有精确 `size` 和 `archive_depth`。`magic_hex` 验证头部格式标记；可选 `head_sha256`/`tail_sha256` 验证独立可信摘要。ZIP、7z、RAR、ISO 和分卷通过实际路径表示，脚本不会根据后缀猜测格式或自动发现档案。
+- 可选 `reads`：只列出明确允许读取的小样本，每项必须有精确 `size` 和 `archive_depth`。可配置 `offsets` 明确给出随机/反向读取顺序，规则见下文。`magic_hex` 验证头部格式标记；可选 `head_sha256`/`tail_sha256` 验证独立可信摘要。ZIP、7z、RAR、ISO 和分卷通过实际路径表示，脚本不会根据后缀猜测格式或自动发现档案。
 
 `browse` 每个 case 只比较一个云目录；脚本跟随页面的分页 offset，不递归进入孩子。档案脚本跟随 JSON cursor，要求最终 `complete=true`、无重复成员和 cursor 循环、枚举数量等于最终 `total`，并比较 Web/FUSE 的完整名称集合。`complete` 表示索引完成，**不**代表当前页已覆盖全部目录。巨型固实 7z 可以只列已知浅层目录，不配置 `reads`，也不要猜测深层路径。
 
@@ -48,7 +48,7 @@ python3 mount123/tools/live_acceptance.py --live \
   --report /private/acceptance-report.json
 ```
 
-`--case` 可重复；省略则执行 manifest 所有 case。重新运行上述命令加 `--resume` 会跳过已通过 case，重跑失败及未完成 case。输入 manifest 字节、目标和运行参数必须与原报告一致；更换部署或希望重验已通过 case 时使用新报告，**不要**用 resume。每个 case 完成后原子写入权限 0600 的报告，中途退出后已完成的 case 仍可恢复；一个正在执行但未完成的 case 会重新开始。
+`--case` 可重复；省略则执行 manifest 所有 case。重新运行上述命令加 `--resume` 会跳过已通过 case，重跑失败及未完成 case。输入 manifest 字节、目标和运行参数必须与原报告一致；含 `offsets` 的 manifest 还绑定显式区间读取契约版本，不能恢复旧脚本忽略 `offsets` 后得到的 head/tail 通过报告。该契约依据 manifest 全部 case，切换 `--case` 子集不改变身份；未含 `offsets` 的旧 manifest 身份保持兼容。更换部署或希望重验已通过 case 时使用新报告，**不要**用 resume。每个 case 完成后原子写入权限 0600 的报告，中途退出后已完成的 case 仍可恢复；一个正在执行但未完成的 case 会重新开始。
 
 不启用 `--live` 时不读取 manifest、挂载或凭证。有 `--live` 时认证失败、服务不可用和超时均是失败，不会被标为通过或自动跳过。如果 Web 需要已有会话，可以通过私有环境提供 `MOUNT123_ACCEPTANCE_COOKIE` 或 `MOUNT123_ACCEPTANCE_AUTHORIZATION`；脚本不读取 mount123 配置、不申请 token、不处理密码。不要在命令行字面量或 shell history 中输入凭证。服务端已有的解锁状态会被使用。
 
@@ -88,6 +88,12 @@ localhost/loopback 请求单独禁用环境代理；内网 HTTP 和远程 HTTPS 
 ## 数据验证与预算
 
 每个成员读取最多 64 KiB 的 head 和 tail（小于 64 KiB 的文件只读其实际长度，两端可能重叠），默认重复两轮；可用 `--range-edge head --repeats 1` 仅做一次头部比较，避免尾部随机读。每次必须得到 206、准确 Content-Range、identity 编码、完整长度，且 Web 与 FUSE **逐字节相等**；重复读摘要必须相等。报告保存 SHA256、16 字节签名及两端操作耗时（不含 Python 子进程启动；墙钟 deadline 仍包含启动成本）。没有独立 magic/摘要时，只能证明两条路径结果相同，不能证明原始格式正确。HTTP 200、错误 HTML、超时、短读均不能判成功。
+
+每个 `reads` 样本可选 `offsets`：非空整数数组，最多 32 项，每项须满足 `0 <= offset < size`；布尔值、负数、浮点数和越界值均为配置错误。允许乱序及重复，例如 `[12582912, 4194304, 10485760, 2097152, 12582912, 0]`。配置后完全替代该样本的默认 head/tail，在每轮 `--repeats` 中严格按数组顺序读取，每次长度为 `min(65536, size-offset)`，近 EOF 不越过文件结尾。不自动生成偏移、不发现新文件、不增加独立预算；每个偏移的 FUSE 与 HTTP 操作仍计入原操作、响应字节和总时间预算。
+
+所选 case 含 `offsets` 时不能同时使用 `--range-edge`。`offsets` 样本也不能带 `head_sha256` 或 `tail_sha256` 字段；这些独立摘要仍只用于默认 head/tail 模式，禁止静默忽略或拿它们校验不同长度的显式区间。显式 offset 0 仍检查 `magic_hex`；没有请求 offset 0 时不检查文件头格式标记。同一 `(offset,length)` 的摘要在数组内重复位置和跨轮次均须一致，即使两端同时发生相同变化也会失败。
+
+显式模式的每条成功 Range 只报告数值 `offset`、从 1 开始贯穿本样本全部轮次的 `sequence`、`repeat`、`bytes`、SHA256 和两端耗时，不保存中间内容的十六进制签名、名称或路径。默认模式保留原 `edge` 与头尾签名字段。每个样本先挂接空的 `ranges` 列表，再依次追加已通过所有校验的区间；失败时保留之前完成的证据，失败区间不记为已通过，整个 case 仍失败。后续统计的普通预算失败只记录统计不可用，不覆盖先前的协议或完整性错误；无法回收 worker 仍必须终止整套流程。
 
 默认串行执行，并发固定为 1。预算参数：
 

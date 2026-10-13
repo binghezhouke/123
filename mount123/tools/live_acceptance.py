@@ -28,6 +28,7 @@ VERSION = 1
 READ_SIZE = 65536
 MAX_PENDING_RETRIES = 8
 MAX_FUSE_RESCANS = 8
+MAX_SAMPLE_OFFSETS = 32
 FUSE_RESCAN_DELAY = 0.1
 
 # Fixed exporter schema: iostats/{stats,cache,recovery}.go. Inventory, active
@@ -579,14 +580,20 @@ class Runner:
                       fuse_seconds=fuse_seconds)
         return result
 
-    def read_member(self, case, sample):
+    def read_member(self, case, sample, results=None):
         size = sample["size"]
-        length = min(READ_SIZE, size)
-        results, baseline = [], {}
+        explicit = "offsets" in sample
+        if explicit:
+            requests = [(None, offset, min(READ_SIZE, size - offset)) for offset in sample["offsets"]]
+        else:
+            length = min(READ_SIZE, size)
+            requests = [(edge, offset, length) for edge, offset in
+                        (("head", 0), ("tail", max(0, size - length)))
+                        if not getattr(self.args, "range_edge", []) or edge in self.args.range_edge]
+        results = [] if results is None else results
+        baseline = {}
         for repeat in range(self.args.repeats):
-            for edge, offset in (("head", 0), ("tail", max(0, size - length))):
-                if getattr(self.args, "range_edge", []) and edge not in self.args.range_edge:
-                    continue
+            for edge, offset, length in requests:
                 self.reserve(length)
                 fuse = self.call({"action": "read", "path": str(Path(self.args.mount) / case["mount_path"] / sample["path"]),
                                   "size": size, "offset": offset, "length": length})
@@ -600,14 +607,20 @@ class Runner:
                 need(len(a) == length and len(b) == length, "short_range", "protocol")
                 need(a == b, "range_bytes_mismatch", "integrity")
                 sha = digest(a)
-                need(edge not in baseline or baseline[edge] == sha, "repeat_bytes_changed", "integrity")
-                baseline[edge] = sha
-                expected = sample.get(edge + "_sha256")
+                key = (offset, length)
+                need(key not in baseline or baseline[key] == sha, "repeat_bytes_changed", "integrity")
+                baseline[key] = sha
+                expected = sample.get(edge + "_sha256") if edge is not None else None
                 need(not expected or sha == expected, "expected_hash_mismatch", "integrity")
-                if edge == "head" and sample.get("magic_hex"):
+                if (edge == "head" or (explicit and offset == 0)) and sample.get("magic_hex"):
                     need(a.startswith(bytes.fromhex(sample["magic_hex"])), "signature_mismatch", "format_or_policy")
-                results.append({"edge": edge, "repeat": repeat + 1, "bytes": length, "sha256": sha,
-                                "signature_hex": a[:16].hex(), "fuse_seconds": fuse["seconds"], "web_seconds": web["seconds"]})
+                row = {"repeat": repeat + 1, "bytes": length, "sha256": sha,
+                       "fuse_seconds": fuse["seconds"], "web_seconds": web["seconds"]}
+                if explicit:
+                    row.update(offset=offset, sequence=len(results) + 1)
+                else:
+                    row.update(edge=edge, signature_hex=a[:16].hex())
+                results.append(row)
         return results
 
     def case(self, case):
@@ -625,7 +638,9 @@ class Runner:
                 self.compare_directory(case, step, result)
             for index, sample in enumerate(case.get("reads", [])):
                 record.update(phase="read", active_index=index)
-                record["reads"].append({"index": index, "ranges": self.read_member(case, sample)})
+                result = {"index": index, "ranges": []}
+                record["reads"].append(result)
+                self.read_member(case, sample, result["ranges"])
             record["status"] = "passed"
             record["phase"] = "complete"
             record.pop("active_index", None)
@@ -674,6 +689,13 @@ def validate_manifest(value, max_depth):
         for sample in case.get("reads", []):
             relative(sample["path"])
             need(type(sample["size"]) is int and sample["size"] > 0, "invalid_sample_size", "configuration")
+            if "offsets" in sample:
+                offsets = sample["offsets"]
+                need(isinstance(offsets, list) and 1 <= len(offsets) <= MAX_SAMPLE_OFFSETS and
+                     all(type(offset) is int and 0 <= offset < sample["size"] for offset in offsets),
+                     "invalid_offsets", "configuration")
+                need(not any(edge + "_sha256" in sample for edge in ("head", "tail")),
+                     "offsets_edge_hash_conflict", "configuration")
             need(type(sample["archive_depth"]) is int and 0 <= sample["archive_depth"] <= max_depth, "depth_budget", "configuration")
             for edge in ("head", "tail"):
                 if sample.get(edge + "_sha256"):
@@ -735,8 +757,15 @@ def main(argv=None):
         all_cases = validate_manifest(json.loads(raw), args.max_depth)
         need(set(args.case).issubset({c["name"] for c in all_cases}), "unknown_case", "configuration")
         cases = [c for c in all_cases if not args.case or c["name"] in args.case]
+        need(not args.range_edge or not any("offsets" in sample for case in cases for sample in case.get("reads", [])),
+             "offsets_range_edge_conflict", "configuration")
         # Bind resume to inputs and target without exposing either in the report.
-        identity = digest(raw + json.dumps({k: v for k, v in vars(args).items() if k not in ("resume", "report", "case")}, sort_keys=True).encode())
+        # Old scripts silently ignored offsets. Never resume their head/tail
+        # pass as explicit-seek evidence. Bind all manifest cases so --case
+        # selection changes do not alter identity; legacy manifests stay exact.
+        reading_contract = b"\x00explicit-range-offsets-v1" if any(
+            "offsets" in sample for case in all_cases for sample in case.get("reads", [])) else b""
+        identity = digest(raw + json.dumps({k: v for k, v in vars(args).items() if k not in ("resume", "report", "case")}, sort_keys=True).encode() + reading_contract)
         report = {"version": VERSION, "identity": identity, "status": "running", "cache_configured": bool(args.cache), "cases": []}
         if args.resume:
             old = json.loads(Path(args.report).read_bytes())
