@@ -138,12 +138,12 @@ func TestSplit7zVolumeIsDirectoryEntryBeforeExpansion(t *testing.T) {
 func TestNestedOffsetReaderAtReadsOnlyMappedMember(t *testing.T) {
 	base := bytes.Repeat([]byte("x"), 64)
 	copy(base[24:32], []byte("inner-7z"))
-	r := nestedOffsetReader{r: bytes.NewReader(base), start: 24, size: 8}
+	r := archiveOffsetInput{input: archivePlainInput{reader: bytes.NewReader(base)}, start: 24, size: 8}
 	got := make([]byte, 8)
-	if n, err := r.ReadAt(got, 0); n != len(got) || err != nil || string(got) != "inner-7z" {
+	if n, err := r.ReadAtContext(context.Background(), got, 0); n != len(got) || err != nil || string(got) != "inner-7z" {
 		t.Fatalf("mapped read = %d %v %q", n, err, got)
 	}
-	if n, err := r.ReadAt(make([]byte, 2), 7); n != 1 || err != io.EOF {
+	if n, err := r.ReadAtContext(context.Background(), make([]byte, 2), 7); n != 1 || err != io.EOF {
 		t.Fatalf("bounded mapped read = %d %v", n, err)
 	}
 }
@@ -167,15 +167,18 @@ func TestNestedCopyMemberReaderUsesPackedRange(t *testing.T) {
 	}
 	streams := zr.Streams()
 	member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0, sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
-	mapped, direct, err := nestedCopyMemberReader(bytes.NewReader(data), int64(len(data)), member, 0, nil)
+	mapped, owned, direct, err := nestedCopyMemberReader(context.Background(), archivePlainInput{reader: bytes.NewReader(data)}, int64(len(data)), member, 0, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !direct {
 		t.Fatal("fixture outer member was not recognized as a copy stream")
 	}
+	if owned != nil {
+		defer owned.Close()
+	}
 	got := make([]byte, member.size)
-	if _, err := mapped.ReadAt(got, 0); err != nil && err != io.EOF {
+	if _, err := mapped.ReadAtContext(context.Background(), got, 0); err != nil && err != io.EOF {
 		t.Fatal(err)
 	}
 	if len(got) == 0 {
@@ -192,7 +195,7 @@ func TestNestedCopyMemberReaderPasswordMetadata(t *testing.T) {
 	for _, fixture := range []struct {
 		name, password string
 		data, want     []byte
-		direct         bool
+		stored         bool
 	}{
 		{"plaintext_copy_with_shared_password", "shared-password", copy7zFixture(plain), plain, true},
 		{"aes_copy_with_correct_password", "mount-test-password", encrypted, bytes.Repeat([]byte("mount 7z fixture contents\n"), 200), false},
@@ -212,8 +215,8 @@ func TestNestedCopyMemberReaderPasswordMetadata(t *testing.T) {
 			if err != nil || len(ranges) != 1 || ranges[0].Size != int64(streams[f.Stream].UncompressedSize) {
 				t.Fatalf("fixture must have one equal-sized packed range: %+v, %v", ranges, err)
 			}
-			if streams[f.Stream].Stored != fixture.direct {
-				t.Fatalf("fixture Stored = %v, want %v", streams[f.Stream].Stored, fixture.direct)
+			if streams[f.Stream].Stored != fixture.stored {
+				t.Fatalf("fixture Stored = %v, want %v", streams[f.Stream].Stored, fixture.stored)
 			}
 			r, err := f.Open()
 			if err != nil {
@@ -226,13 +229,16 @@ func TestNestedCopyMemberReaderPasswordMetadata(t *testing.T) {
 			}
 			member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0,
 				sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
-			mapped, direct, err := nestedCopyMemberReader(bytes.NewReader(fixture.data), int64(len(fixture.data)), member, 0, []byte(fixture.password))
-			if err != nil || direct != fixture.direct {
-				t.Fatalf("direct mapping = %v, %v; want %v", direct, err, fixture.direct)
+			mapped, owned, direct, err := nestedCopyMemberReader(context.Background(), archivePlainInput{reader: bytes.NewReader(fixture.data)}, int64(len(fixture.data)), member, 0, []byte(fixture.password))
+			if err != nil || !direct {
+				t.Fatalf("direct mapping = %v, %v; want supported", direct, err)
+			}
+			if owned != nil {
+				defer owned.Close()
 			}
 			if direct {
 				got := make([]byte, len(fixture.want))
-				if n, err := mapped.ReadAt(got, 0); n != len(got) || err != nil || !bytes.Equal(got, fixture.want) {
+				if n, err := mapped.ReadAtContext(context.Background(), got, 0); n != len(got) || err != nil || !bytes.Equal(got, fixture.want) {
 					t.Fatalf("direct plaintext read = %d, %v; golden bytes differ", n, err)
 				}
 			} else if mapped != nil {

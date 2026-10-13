@@ -373,7 +373,7 @@ func TestServiceNested7zEqualSizesDoNotProveCopy(t *testing.T) {
 	}
 	m := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0,
 		sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: offset, Size: int64(streams[f.Stream].UncompressedSize)}}
-	if _, direct, err := nestedCopyMemberReader(bytes.NewReader(data), int64(len(data)), m, 0, nil); err != nil || direct {
+	if _, _, direct, err := nestedCopyMemberReader(context.Background(), archivePlainInput{reader: bytes.NewReader(data)}, int64(len(data)), m, 0, nil); err != nil || direct {
 		t.Fatalf("Delta+Copy direct mapping = %v, %v; want decoder fallback", direct, err)
 	}
 	outer := multilevelFixture(t, "zip", map[string][]byte{"nested.7z": data})

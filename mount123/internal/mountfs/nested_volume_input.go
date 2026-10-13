@@ -2,6 +2,7 @@ package mountfs
 
 import (
 	"context"
+	"io"
 	"sync"
 
 	"github.com/binghezhouke/123/mount123/internal/storage"
@@ -15,7 +16,7 @@ type nestedVolumeInput struct {
 	parent        *nestedArchive
 	member        *member
 	input         archiveReaderAt
-	reader        *nestedMemberReader
+	reader        io.Closer
 	pending       chan struct{}
 	closed        bool
 	passwordKnown bool
@@ -48,7 +49,7 @@ func (r *nestedVolumeInput) ReadAtContext(ctx context.Context, p []byte, off int
 		r.pending = pending
 		r.mu.Unlock()
 		var input archiveReaderAt
-		var reader *nestedMemberReader
+		var reader io.Closer
 		var err error
 		if r.passwordKnown {
 			var password []byte
@@ -79,6 +80,9 @@ func (r *nestedVolumeInput) ReadAtContext(ctx context.Context, p []byte, off int
 			return 0, storage.ErrClosed
 		}
 		if err != nil {
+			if reader != nil {
+				_ = reader.Close()
+			}
 			return 0, err
 		}
 		return input.ReadAtContext(ctx, p, off)

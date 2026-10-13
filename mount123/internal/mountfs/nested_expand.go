@@ -139,7 +139,7 @@ func viewMember(n *nestedArchive, m *member) (*member, error) {
 	return &copy, nil
 }
 
-func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *member) (archiveReaderAt, *nestedMemberReader, error) {
+func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *member) (archiveReaderAt, io.Closer, error) {
 	m, err := viewMember(n, original)
 	if err != nil {
 		return nil, nil, err
@@ -154,7 +154,7 @@ func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *
 	return t.viewMemberInputPrepared(ctx, n, m, password)
 }
 
-func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m *member, password []byte) (archiveReaderAt, *nestedMemberReader, error) {
+func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m *member, password []byte) (archiveReaderAt, io.Closer, error) {
 	input := viewInput(n)
 	// Password discovery can load cloud metadata through the same admission
 	// queue. Complete it before taking a decoder permit, including on a miss.
@@ -167,15 +167,13 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 		defer release()
 		ctx = operation
 	}
-	bound := archiveRequestReader{ctx: ctx, input: input}
 	if n.format == ".7z" {
-		direct, ok, e := nestedCopyMemberReader(bound, n.size, m, m.ordinal, password)
+		direct, owned, ok, e := nestedCopyMemberReader(ctx, input, n.size, m, m.ordinal, password)
 		if e != nil {
 			return nil, nil, e
 		}
 		if ok {
-			mapped := direct.(nestedOffsetReader)
-			return archiveOffsetInput{input: input, start: mapped.start, size: mapped.size}, nil, nil
+			return direct, owned, nil
 		}
 	}
 	if canMapZIP {
@@ -298,8 +296,18 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 	if kind == ".zip" && splitKind == archiveSingle {
 		finalInput = &nestedVolumeInput{owner: t, parent: parent, member: m}
 		child.lazyInputs = append(child.lazyInputs, finalInput)
-		hint, e := readZIPVolumeHint(ctx, finalInput, int64(m.size))
+		recorder := &nestedSourceReader{}
+		hint, e := readZIPVolumeHint(ctx, nestedSourceInput{input: finalInput, recorder: recorder}, int64(m.size))
 		if e != nil {
+			if sourceErr := recorder.sourceError(); sourceErr != nil {
+				return nil, sourceErr
+			}
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if nestedEncryptedInput(finalInput) && (errors.Is(e, syscall.EIO) || errors.Is(e, syscall.EOPNOTSUPP)) {
+				return nil, syscall.EACCES
+			}
 			return nil, e
 		}
 		splitKind, lastDisk = hint.kind, hint.lastDisk
@@ -375,15 +383,30 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 	child.cachePrefix = t.cache.StableDigest(namespace, string(encoded))
 	// Parse clear headers without password discovery. For encrypted headers, try
 	// the current inner sidecar/shared password, then the effective parent secret.
-	index := func(password []byte) (*zipIndex, error) {
+	index := func(password []byte) (result *zipIndex, err error) {
 		operation, release, e := t.acquireNestedDecode(ctx)
 		if e != nil {
 			return nil, e
 		}
 		defer release()
-		bound := archiveRequestReader{ctx: operation, input: child.input}
+		bound := &nestedSourceReader{ReaderAt: archiveRequestReader{ctx: operation, input: child.input}}
+		defer func() {
+			if sourceErr := bound.sourceError(); sourceErr != nil {
+				result, err = nil, nestedSourceError{sourceErr}
+				return
+			}
+			if err == nil || operation.Err() != nil || !nestedEncryptedInput(child.input) {
+				return
+			}
+			var errno syscall.Errno
+			if !errors.As(err, &errno) || errors.Is(err, syscall.EIO) {
+				// A rejected inner header after successful AES body reads is
+				// indistinguishable from an incorrect parent password.
+				err = syscall.EACCES
+			}
+		}()
 		if kind == ".zip" {
-			raw := &preparedArchiveInput{input: child.input, size: size, identity: child.cachePrefix, layout: archiveVolumeLayout{kind: splitKind, sizes: sizes}}
+			raw := &preparedArchiveInput{input: nestedSourceInput{input: child.input, recorder: bound}, size: size, identity: child.cachePrefix, layout: archiveVolumeLayout{kind: splitKind, sizes: sizes}}
 			indexInput, indexSize, e := prepareZIPIndexInput(operation, raw, defaults(t.opts).MaxZIPEntries, min(policy.MaxIndexBytes, defaults(t.opts).MetadataBytes))
 			if e != nil {
 				return nil, e
@@ -421,6 +444,10 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 		clear(password)
 	}
 	if err != nil {
+		var sourceErr nestedSourceError
+		if errors.As(err, &sourceErr) {
+			return nil, sourceErr.err
+		}
 		return nil, archiveReadError(ctx, err, nil)
 	}
 	child.indexBytes = parent.indexBytes + child.index.bytes
@@ -440,7 +467,7 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 type nestedReadHandle struct {
 	ctx     context.Context
 	input   archiveReaderAt
-	decoder *nestedMemberReader
+	owned   io.Closer
 	release func()
 	once    sync.Once
 	closed  atomic.Bool
@@ -459,8 +486,8 @@ func (h *nestedReadHandle) Close() error {
 	var err error
 	h.once.Do(func() {
 		h.closed.Store(true)
-		if h.decoder != nil {
-			err = h.decoder.Close()
+		if h.owned != nil {
+			err = h.owned.Close()
 		}
 		if h.release != nil {
 			h.release()
@@ -473,17 +500,17 @@ func (t *Tree) openNestedArchiveMember(ctx context.Context, n *nestedArchive, m 
 	if err != nil {
 		return nil, 0, err
 	}
-	input, decoder, err := t.viewMemberInput(ctx, n, m)
+	input, owned, err := t.viewMemberInput(ctx, n, m)
 	if err != nil {
 		release()
 		return nil, 0, err
 	}
-	if decoder == nil {
+	if _, decoded := input.(*nestedMemberReader); !decoded {
 		integrityErr := errArchiveIntegrity
 		if n.format == ".zip" {
 			integrityErr = zip.ErrChecksum
 		}
 		input = newArchiveCheckedInput(input, int64(m.size), m.crc, n.format == ".zip" || m.crc != 0, integrityErr)
 	}
-	return &nestedReadHandle{ctx: ctx, input: input, decoder: decoder, release: release}, int64(m.size), nil
+	return &nestedReadHandle{ctx: ctx, input: input, owned: owned, release: release}, int64(m.size), nil
 }

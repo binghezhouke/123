@@ -6,6 +6,7 @@ import (
 	"github.com/binghezhouke/123/mount123/internal/storage"
 	"github.com/bodgit/sevenzip"
 	"io"
+	"math"
 	"strings"
 	"sync"
 	"syscall"
@@ -111,67 +112,150 @@ func (n *nestedArchive) release() error {
 	return first
 }
 
-// nestedOffsetReader maps a member's uncompressed stream to its packed bytes.
-// It is safe only when the outer 7z coder is Copy/Store; compressed streams
-// continue through the bounded cache fallback below.
-type nestedOffsetReader struct {
-	r           io.ReaderAt
-	start, size int64
+// nestedAESCopyInput owns only the fork's validated layout/key and the ancestor
+// input. Every read binds the current request; the constructor reader is dropped.
+type nestedAESCopyInput struct {
+	input  archiveReaderAt
+	stream *sevenzip.RandomAccessStream
 }
 
-func (r nestedOffsetReader) ReadAt(p []byte, off int64) (int, error) {
-	if off < 0 || off >= r.size {
-		if off == r.size && len(p) == 0 {
-			return 0, nil
-		}
-		return 0, io.EOF
+func (r *nestedAESCopyInput) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
 	}
-	truncated := int64(len(p)) > r.size-off
-	if truncated {
-		p = p[:int(r.size-off)]
-	}
-	n, err := r.r.ReadAt(p, r.start+off)
-	if (n < len(p) || truncated) && err == nil {
-		err = io.EOF
-	}
+	return r.stream.ReadAtWithReader(archiveRequestReader{ctx: ctx, input: r.input}, p, off)
+}
+func (r *nestedAESCopyInput) Close() error { return r.stream.Close() }
+
+// Record source failures separately from decoder failures: decrypting a wrong
+// parent password can make inner headers invalid, but source I/O must retain
+// its own error rather than become a password hint.
+type nestedSourceReader struct {
+	io.ReaderAt
+	mu  sync.Mutex
+	err error
+}
+
+func (r *nestedSourceReader) ReadAt(p []byte, off int64) (int, error) {
+	n, err := r.ReaderAt.ReadAt(p, off)
+	r.record(err)
 	return n, err
 }
 
-func nestedCopyMemberReader(reader io.ReaderAt, size int64, outer *member, ordinal int, password []byte) (io.ReaderAt, bool, error) {
-	// Stored metadata below proves the stream has no encryption or filters.
-	// A shared password may also cover a plaintext archive, so password presence
-	// alone does not determine whether its packed bytes can be mapped directly.
+func (r *nestedSourceReader) record(err error) {
+	if err != nil && !errors.Is(err, io.EOF) {
+		r.mu.Lock()
+		if r.err == nil {
+			r.err = err
+		}
+		r.mu.Unlock()
+	}
+}
+func (r *nestedSourceReader) sourceError() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.err
+}
+
+type nestedSourceInput struct {
+	input    archiveReaderAt
+	recorder *nestedSourceReader
+}
+
+func (r nestedSourceInput) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	n, err := r.input.ReadAtContext(ctx, p, off)
+	r.recorder.record(err)
+	return n, err
+}
+
+type nestedSourceError struct{ err error }
+
+func (e nestedSourceError) Error() string { return e.err.Error() }
+func (e nestedSourceError) Unwrap() error { return e.err }
+
+// Decoder errors over a directly decrypted ancestor need the same password
+// hint as the sequential decoder. This walks only the bounded ancestor graph.
+func nestedEncryptedInput(input archiveReaderAt) bool {
+	switch r := input.(type) {
+	case *nestedAESCopyInput:
+		return true
+	case *nestedVolumeInput:
+		r.mu.Lock()
+		input := r.input
+		r.mu.Unlock()
+		return nestedEncryptedInput(input)
+	case archiveOffsetInput:
+		return nestedEncryptedInput(r.input)
+	case archiveConcatInput:
+		for _, part := range r.parts {
+			if nestedEncryptedInput(part) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func nestedCopyMemberReader(ctx context.Context, input archiveReaderAt, size int64, outer *member, ordinal int, password []byte) (archiveReaderAt, io.Closer, bool, error) {
+	reader := &nestedSourceReader{ReaderAt: archiveRequestReader{ctx: ctx, input: input}}
 	zr, err := sevenzip.NewReaderWithPassword(reader, size, string(password))
 	if err != nil {
-		return nil, false, err
+		if sourceErr := reader.sourceError(); sourceErr != nil {
+			return nil, nil, false, sourceErr
+		}
+		return nil, nil, false, err
 	}
-	if ordinal < 0 || ordinal >= len(zr.File) {
-		return nil, false, syscall.ESTALE
+	if outer == nil || ordinal != outer.ordinal || ordinal < 0 || ordinal >= len(zr.File) {
+		return nil, nil, false, syscall.ESTALE
 	}
 	f := zr.File[ordinal]
-	if f.Name != outer.name || f.UncompressedSize != outer.size {
-		return nil, false, syscall.ESTALE
+	if f.Name != outer.name || f.UncompressedSize != outer.size || f.CRC32 != outer.crc {
+		return nil, nil, false, syscall.ESTALE
 	}
 	if outer.sevenStream == nil {
-		return nil, false, nil
-	}
-	ranges, err := zr.PackedRanges(outer.sevenStream.Stream)
-	if err != nil || len(ranges) != 1 {
-		return nil, false, nil
+		return nil, nil, false, nil // Older indexes can use the generic decoder.
 	}
 	streams := zr.Streams()
-	if outer.sevenStream.Stream < 0 || outer.sevenStream.Stream >= len(streams) {
-		return nil, false, nil
+	offset, hasOffset := f.StreamOffset()
+	location := outer.sevenStream
+	if !hasOffset || f.Stream != location.Stream || offset != location.Offset || location.Stream < 0 || location.Stream >= len(streams) {
+		return nil, nil, false, syscall.ESTALE
 	}
-	stream := streams[outer.sevenStream.Stream]
-	if !stream.Stored || ranges[0].Size != int64(stream.UncompressedSize) || outer.sevenStream.Size != int64(stream.UncompressedSize) {
-		return nil, false, nil
+	stream := streams[location.Stream]
+	if stream.UncompressedSize > math.MaxInt64 || location.Size != int64(stream.UncompressedSize) || !location.valid(outer.size) {
+		return nil, nil, false, syscall.ESTALE
 	}
-	start := ranges[0].Offset + outer.sevenStream.Offset
+	if !stream.Stored {
+		// This first stage maps only an independent, complete AES+Copy member.
+		if offset != 0 || outer.size != stream.UncompressedSize {
+			return nil, nil, false, nil
+		}
+		random, err := zr.OpenRandomAccessStream(location.Stream)
+		if errors.Is(err, sevenzip.ErrUnsupportedRandomAccess) {
+			return nil, nil, false, nil
+		}
+		if err != nil {
+			return nil, nil, false, err
+		}
+		if err := ctx.Err(); err != nil {
+			_ = random.Close()
+			return nil, nil, false, err
+		}
+		mapped := &nestedAESCopyInput{input: input, stream: random}
+		return mapped, mapped, true, nil
+	}
+	ranges, err := zr.PackedRanges(location.Stream)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if len(ranges) != 1 || ranges[0].Size != int64(stream.UncompressedSize) {
+		return nil, nil, false, syscall.EIO
+	}
+	start := ranges[0].Offset + offset
 	if start < ranges[0].Offset || start > ranges[0].Offset+ranges[0].Size || int64(outer.size) > ranges[0].Size-(start-ranges[0].Offset) {
-		return nil, false, nil
+		return nil, nil, false, syscall.EIO
 	}
-	return nestedOffsetReader{r: reader, start: start, size: int64(outer.size)}, true, nil
+	return archiveOffsetInput{input: input, start: start, size: int64(outer.size)}, nil, true, nil
 }
 
 // NestedArchivePolicy keeps recursive archive expansion deliberately bounded.

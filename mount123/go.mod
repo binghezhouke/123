@@ -31,8 +31,8 @@ require (
 // Local additions: header-only walking and direct independent-member opening.
 replace github.com/nwaples/rardecode/v2 => ./third_party/rardecode
 
-// Maintained fork: owned stream readers, member offsets, and stored-coder metadata.
-replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.20261013043956-da5d82f8efce
+// Maintained fork: owned streams, stored-coder metadata, and AES+Copy range reads.
+replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.20261013062704-25c5d99319f0
 
 // Local fix: iterative expansion of long UDF allocation-descriptor chains.
 replace golift.io/udf => ./third_party/udf
