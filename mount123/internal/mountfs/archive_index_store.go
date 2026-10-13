@@ -16,10 +16,11 @@ import (
 const archiveIndexFormatVersion = 1
 
 // Revision 1 fixed compact CRC counts; revision 2 also fixes default single-file
-// group assignments, which affect member sizes, offsets and CRCs.
+// group assignments, which affect member sizes, offsets and CRCs. Revision 3
+// records CRC presence separately from the numeric value, including zero.
 // Rebuild only old 7z metadata, once on access. Archive bytes remain immutable;
 // this is a schema migration, not content expiration.
-const sevenZIPCRCMetadataVersion = 2
+const sevenZIPCRCMetadataVersion = 3
 
 // Checkpoint version is separate from the completed index format. Older
 // checkpoints recorded only an HTTP high-water mark and cannot be resumed
@@ -58,6 +59,7 @@ type archiveIndexEntryDTO struct {
 	Ordinal           int                      `json:"ordinal,omitempty"`
 	Size              uint64                   `json:"size,omitempty"`
 	Compressed        uint64                   `json:"compressed,omitempty"`
+	SevenCRCDefined   *bool                    `json:"seven_crc_defined,omitempty"`
 	CRC               uint32                   `json:"crc,omitempty"`
 	Method            uint16                   `json:"method,omitempty"`
 	Flags             uint16                   `json:"flags,omitempty"`
@@ -194,6 +196,10 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 			}
 			encrypted := m.encrypted
 			item := archiveIndexEntryDTO{Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize, RARGroupStartable: m.rarGroupStartable}
+			if kind == ".7z" {
+				defined := m.sevenCRCDefined
+				item.SevenCRCDefined = &defined
+			}
 			if m.aes != nil {
 				item.AES = &archiveAESDTO{Version: m.aes.version, Strength: m.aes.strength, Method: m.aes.method}
 			}
@@ -325,6 +331,10 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 				return nil, errors.New("persisted RAR encryption state is missing")
 			}
 			if kind == ".7z" {
+				if record.SevenCRCDefined == nil || (!*record.SevenCRCDefined && record.CRC != 0) {
+					return nil, errors.New("persisted 7z CRC presence is missing or inconsistent")
+				}
+				m.sevenCRCDefined = *record.SevenCRCDefined
 				// Old 7z indexes lack the stream locations needed for direct
 				// nested member reads and must be rebuilt.
 				if record.Size > 0 && (record.SevenStream == nil || !record.SevenStream.valid(record.Size) || record.SevenStream.Stream >= t.opts.MaxZIPEntries) {

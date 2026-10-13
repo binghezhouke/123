@@ -2,7 +2,7 @@
 
 挂载器使用 [binghezhouke/sevenzip](https://github.com/binghezhouke/sevenzip)，上游是 [bodgit/sevenzip](https://github.com/bodgit/sevenzip)，许可证为 BSD-3-Clause。
 
-当前依赖固定为 fork 的 `v1.6.2-0.20261013111754-2e4ef2c59ab5`，基于上游 `v1.6.1`。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 从上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8` 开始维护，不直接跟随上游 `main` 升级。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
+当前依赖的精确伪版本以 [`mount123/go.mod`](../mount123/go.mod) 中的 `replace` 为准，基于上游 `v1.6.1`。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 从上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8` 开始维护，不直接跟随上游 `main` 升级。`replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
 
 ## 扩展边界
 
@@ -12,7 +12,8 @@ fork 已提供：
 
 - `Reader.Streams()`：各组编号、解压后大小及 `Stored` 标志，调用本身不打开解码器。`Stored` 只在单一无属性 Copy 编码器、单输入输出、无绑定且长度一致时成立；压缩前后大小相等不能单独证明可直接映射（例如 Delta + Copy）。
 - `File.StreamOffset()`：成员在组内的解压偏移，并区分没有数据流的目录和空文件。
-- `Reader.OpenStream(index)`：独立拥有的组级解码流；读取到 EOF 检查长度和可用的非零组 CRC，显式 Close 直接释放解码器，不进入 `File.Open` 的池。
+- `File.Checksum()`：直接返回解析好的成员 CRC 及是否声明；缺失 CRC 与显式零值不同。查询不扫描其他成员、不读来源、不创建解码器。
+- `Reader.OpenStream(index)`：独立拥有的组级解码流；读取到 EOF 检查长度和已声明的组 CRC（包含零值），显式 Close 直接释放解码器，不进入 `File.Open` 的池。
 - `Reader.PackedRanges(index)`：所选组各压缩输入在原始 ReaderAt 上的绝对区间，包含归档前缀和起始头，校验长度与溢出。
 - `Reader.OpenStreamWithReader(index, readerAt)`：保留已解析头部，替换所选组正文来源；调用者始终拥有来源，构造失败也由调用者清理。
 - `Reader.StreamLayout(index)`：复制组布局、成员偏移及明确的 CRC presence（包含值为零的 CRC），不创建解码器或保留 Reader、来源、密码。`PlainLZMA2DecoderInfo` 提供内置普通 LZMA2 的字典和缓冲事实，用于应用层决定是否保留状态；不覆盖自定义 codec 注册。

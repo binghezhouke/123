@@ -371,7 +371,7 @@ func TestServiceNested7zEqualSizesDoNotProveCopy(t *testing.T) {
 	if !ok {
 		t.Fatal("fixture has no member stream offset")
 	}
-	m := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0,
+	m := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, sevenCRCDefined: f.Checksum().Defined, ordinal: 0,
 		sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: offset, Size: int64(streams[f.Stream].UncompressedSize)}}
 	if _, _, direct, err := nestedCopyMemberReader(context.Background(), archivePlainInput{reader: bytes.NewReader(data)}, int64(len(data)), m, 0, nil); err != nil || direct {
 		t.Fatalf("Delta+Copy direct mapping = %v, %v; want decoder fallback", direct, err)

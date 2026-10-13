@@ -22,7 +22,7 @@ func archiveStreamTestMember(t *testing.T, data []byte, format string, ordinal i
 	var found *member
 	if err := scanArchive(context.Background(), format, bytes.NewReader(data), int64(len(data)), password, func(f archiveMember) error {
 		if !f.directory && f.ordinal == ordinal {
-			found = &member{format: format, name: f.name, ordinal: f.ordinal, size: f.size, crc: f.crc, rarLocator: f.rarLocator}
+			found = &member{format: format, name: f.name, ordinal: f.ordinal, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, rarLocator: f.rarLocator}
 		}
 		return nil
 	}); err != nil {
@@ -459,7 +459,7 @@ func TestArchiveMemberStream7zMemberCRCIsCheckedBeforeGroupEnd(t *testing.T) {
 	payload := []byte("member bytes")
 	group := append(append([]byte(nil), payload...), []byte("later solid member")...)
 	group[0] ^= 1
-	decoder := &archiveMember7zChecksum{reader: bytes.NewReader(group), hash: crc32.NewIEEE(), left: int64(len(payload)), want: crc32.ChecksumIEEE(payload)}
+	decoder := &archiveMember7zChecksum{reader: bytes.NewReader(group), hash: crc32.NewIEEE(), left: int64(len(payload)), want: crc32.ChecksumIEEE(payload), defined: true}
 	stream := &archiveMemberStream{ctx: context.Background(), reader: decoder, closer: io.NopCloser(decoder)}
 	defer stream.Close()
 	if _, err := io.ReadAll(stream); !errors.Is(err, errArchiveIntegrity) {

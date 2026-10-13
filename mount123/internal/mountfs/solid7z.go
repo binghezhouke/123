@@ -35,7 +35,7 @@ func (t *Tree) solid7zCacheable(m *member) bool {
 }
 
 func (t *Tree) solid7zKey(identity string, a *archiveDescriptor, m *member, password []byte) string {
-	return t.diskCacheScope() + ":" + identity + fmt.Sprintf(":7z-stream-v1:%d:%d:", m.sevenStream.Stream, m.sevenStream.Size) + t.passwordTag(a, password)
+	return t.diskCacheScope() + ":" + identity + fmt.Sprintf(":7z-stream-v2:%d:%d:", m.sevenStream.Stream, m.sevenStream.Size) + t.passwordTag(a, password)
 }
 
 // extractOtherMember keeps stream waiters outside the build gate. The shared
@@ -62,19 +62,7 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 		group, err := t.acquireSolid7z(ctx, source, a, m, password, identity)
 		if err == nil {
 			defer group.Close()
-			stream := io.NewSectionReader(growingGroupReader{ctx: ctx, group: group}, m.sevenStream.Offset, int64(m.size))
-			hash := crc32.NewIEEE()
-			n, err := io.CopyBuffer(io.MultiWriter(w, hash), stream, make([]byte, 256<<10))
-			if err != nil {
-				return err
-			}
-			if n != int64(m.size) {
-				return io.ErrUnexpectedEOF
-			}
-			if hash.Sum32() != m.crc {
-				return errArchiveIntegrity
-			}
-			return nil
+			return copySolid7zMember(ctx, group, m, w)
 		}
 		// A full group must not make a formerly readable member fail merely
 		// because its reservation cannot fit alongside active member caches.
@@ -90,6 +78,29 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 	started := time.Now()
 	defer t.observeStage(iostats.StageDecompression, started)
 	return extractArchiveMember(ctx, reader, size, m, password, w)
+}
+
+// A member without its own CRC cannot publish an independently verified prefix
+// before the retained group has completed validation.
+func copySolid7zMember(ctx context.Context, group *storage.GrowingHandle, m *member, w io.Writer) error {
+	stream := io.NewSectionReader(growingGroupReader{ctx: ctx, group: group}, m.sevenStream.Offset, int64(m.size))
+	hash := crc32.NewIEEE()
+	n, err := io.CopyBuffer(io.MultiWriter(w, hash), stream, make([]byte, 256<<10))
+	if err != nil {
+		return err
+	}
+	if n != int64(m.size) {
+		return io.ErrUnexpectedEOF
+	}
+	if m.sevenCRCDefined && hash.Sum32() != m.crc {
+		return errArchiveIntegrity
+	}
+	if !m.sevenCRCDefined {
+		// No independent member checksum can validate this prefix.
+		// Do not publish it before the retained group is validated.
+		return group.Wait(ctx)
+	}
+	return nil
 }
 
 type solidRAROutput struct {
@@ -148,7 +159,7 @@ func (t *Tree) acquireSolid7z(ctx context.Context, source *storage.Remote, a *ar
 		}
 		f := zr.File[m.ordinal]
 		offset, ok := f.StreamOffset()
-		if !ok || f.Stream != location.Stream || offset != location.Offset || f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc {
+		if !ok || f.Stream != location.Stream || offset != location.Offset || f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc || f.Checksum().Defined != m.sevenCRCDefined {
 			return syscall.ESTALE
 		}
 		ranges, err := zr.PackedRanges(location.Stream)
@@ -177,6 +188,14 @@ func (t *Tree) acquireSolid7z(ctx context.Context, source *storage.Remote, a *ar
 // Some solid groups omit their group CRC and provide only per-file CRCs.
 // Check these too before publishing a group that will serve other members.
 func copyValidated7zStream(ctx context.Context, zr *sevenzip.Reader, stream int, size int64, rc io.Reader, w io.Writer) error {
+	layout, err := zr.StreamLayout(stream)
+	if err != nil {
+		return err
+	}
+	if layout.UncompressedSize != uint64(size) {
+		return syscall.ESTALE
+	}
+	groupHash := crc32.NewIEEE()
 	reader := &contextReader{ctx: ctx, r: rc}
 	buffer := make([]byte, 256<<10)
 	var position int64
@@ -189,14 +208,14 @@ func copyValidated7zStream(ctx context.Context, zr *sevenzip.Reader, stream int,
 			return syscall.ESTALE
 		}
 		hash := crc32.NewIEEE()
-		n, err := io.CopyBuffer(io.MultiWriter(w, hash), io.LimitReader(reader, int64(f.UncompressedSize)), buffer)
+		n, err := io.CopyBuffer(io.MultiWriter(w, hash, groupHash), io.LimitReader(reader, int64(f.UncompressedSize)), buffer)
 		if err != nil {
 			return err
 		}
 		if n != int64(f.UncompressedSize) {
 			return io.ErrUnexpectedEOF
 		}
-		if f.CRC32 != 0 && hash.Sum32() != f.CRC32 {
+		if checksum := f.Checksum(); checksum.Defined && hash.Sum32() != checksum.Value {
 			return errArchiveIntegrity
 		}
 		position += n
@@ -212,6 +231,9 @@ func copyValidated7zStream(ctx context.Context, zr *sevenzip.Reader, stream int,
 	}
 	if err != io.EOF {
 		return err
+	}
+	if layout.CRC.Defined && groupHash.Sum32() != layout.CRC.Value {
+		return errArchiveIntegrity
 	}
 	return nil
 }

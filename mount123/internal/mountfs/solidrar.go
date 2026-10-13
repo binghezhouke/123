@@ -23,6 +23,11 @@ func (e *solidRARProducerError) Error() string { return e.err.Error() }
 func (e *solidRARProducerError) Unwrap() error { return e.err }
 
 func archiveMemberCacheMarker(kind string) string {
+	if kind == ".7z" {
+		// Earlier group/member fills did not check declared-zero CRCs.
+		return ":archive-member-7z-crc-v3:"
+	}
+
 	if kind == ".rar" {
 		// Older member fills could publish bytes before their group producer
 		// checked the member checksum. Do not reuse those persisted objects.

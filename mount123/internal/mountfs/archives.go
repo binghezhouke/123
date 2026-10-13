@@ -108,17 +108,18 @@ func (a *archiveDescriptor) kind() string {
 // Only immutable member metadata enters the shared index. Readers, passwords,
 // and decompressor state are scoped to one fill operation.
 type archiveMember struct {
-	encrypted    bool
-	name         string
-	size         uint64
-	crc          uint32
-	directory    bool
-	ordinal      int
-	rarLocator   *rardecode.MemberLocator
-	rarSolid     bool
-	rarStartable bool
-	sevenStream  *sevenStreamLocation
-	zipFile      *zip.File
+	encrypted       bool
+	name            string
+	size            uint64
+	crc             uint32
+	sevenCRCDefined bool
+	directory       bool
+	ordinal         int
+	rarLocator      *rardecode.MemberLocator
+	rarSolid        bool
+	rarStartable    bool
+	sevenStream     *sevenStreamLocation
+	zipFile         *zip.File
 }
 
 type budgetReaderAt struct {
@@ -215,7 +216,7 @@ func scanArchiveFrom(ctx context.Context, kind string, reader io.ReaderAt, size 
 					return syscall.EIO
 				}
 			}
-			if err := visit(archiveMember{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}, 0); err != nil {
+			if err := visit(archiveMember{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, sevenCRCDefined: f.Checksum().Defined, directory: f.FileInfo().IsDir(), ordinal: i, sevenStream: location}, 0); err != nil {
 				return err
 			}
 		}
@@ -517,7 +518,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 						idx.mu.Unlock()
 						return syscall.EIO
 					}
-					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, rarGroupStartable: f.rarStartable, sevenStream: f.sevenStream, format: a.kind()}
+					m := &member{name: f.name, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, rarGroupStartable: f.rarStartable, sevenStream: f.sevenStream, format: a.kind()}
 					dir.order = append(dir.order, part)
 					dir.files[part] = m
 					idx.members[f.name] = m
@@ -599,18 +600,10 @@ func extractArchiveMember(ctx context.Context, reader io.ReaderAt, size int64, m
 		defer rc.Close()
 		stream = rc
 	} else if m.format == ".7z" {
-		zr, err := sevenzip.NewReaderWithPassword(reader, size, string(password))
-		if err != nil {
-			return err
-		}
-		if m.ordinal >= len(zr.File) {
-			return syscall.ESTALE
-		}
-		f := zr.File[m.ordinal]
-		if f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc {
-			return syscall.ESTALE
-		}
-		rc, err := f.Open()
+		// Own the group decoder rather than retaining it in File.Open's pool.
+		// This checks a declared group CRC when the selected member reaches
+		// group EOF; an earlier member does not drain unrelated group output.
+		rc, err := openArchiveMemberStream(ctx, reader, size, m, password)
 		if err != nil {
 			return err
 		}
@@ -690,7 +683,7 @@ func extractArchiveMember(ctx context.Context, reader io.ReaderAt, size int64, m
 	if count != int64(m.size) {
 		return syscall.EIO
 	}
-	if m.format == ".7z" && hash.Sum32() != m.crc {
+	if m.format == ".7z" && m.sevenCRCDefined && hash.Sum32() != m.crc {
 		return errArchiveIntegrity
 	}
 	return nil

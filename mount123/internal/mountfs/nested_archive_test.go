@@ -166,7 +166,7 @@ func TestNestedCopyMemberReaderUsesPackedRange(t *testing.T) {
 		t.Fatal("fixture member has no stream")
 	}
 	streams := zr.Streams()
-	member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0, sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
+	member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, sevenCRCDefined: f.Checksum().Defined, ordinal: 0, sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
 	mapped, owned, direct, err := nestedCopyMemberReader(context.Background(), archivePlainInput{reader: bytes.NewReader(data)}, int64(len(data)), member, 0, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +227,7 @@ func TestNestedCopyMemberReaderPasswordMetadata(t *testing.T) {
 			if err != nil || !bytes.Equal(decoded, fixture.want) {
 				t.Fatalf("fixture does not decode to independent golden bytes: %v", err)
 			}
-			member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, ordinal: 0,
+			member := &member{name: f.Name, size: f.UncompressedSize, crc: f.CRC32, sevenCRCDefined: f.Checksum().Defined, ordinal: 0,
 				sevenStream: &sevenStreamLocation{Stream: f.Stream, Offset: off, Size: int64(streams[f.Stream].UncompressedSize)}}
 			mapped, owned, direct, err := nestedCopyMemberReader(context.Background(), archivePlainInput{reader: bytes.NewReader(fixture.data)}, int64(len(fixture.data)), member, 0, []byte(fixture.password))
 			if err != nil || !direct {

@@ -41,7 +41,7 @@ func openArchiveMemberStream(ctx context.Context, reader io.ReaderAt, size int64
 			return nil, syscall.ESTALE
 		}
 		f := zr.File[m.ordinal]
-		if f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc {
+		if f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc || f.Checksum().Defined != m.sevenCRCDefined {
 			return nil, syscall.ESTALE
 		}
 		offset, hasStream := f.StreamOffset()
@@ -54,7 +54,7 @@ func openArchiveMemberStream(ctx context.Context, reader io.ReaderAt, size int64
 			if err != nil {
 				return nil, err
 			}
-			return wrap(&archiveMember7zChecksum{reader: r, hash: crc32.NewIEEE(), want: m.crc}, r), nil
+			return wrap(&archiveMember7zChecksum{reader: r, hash: crc32.NewIEEE(), want: m.crc, defined: f.Checksum().Defined}, r), nil
 		}
 		streams := zr.Streams()
 		if f.Stream < 0 || f.Stream >= len(streams) || streams[f.Stream].UncompressedSize > math.MaxInt64 {
@@ -78,7 +78,7 @@ func openArchiveMemberStream(ctx context.Context, reader io.ReaderAt, size int64
 			_ = owned.Close()
 			return nil, err
 		}
-		return wrap(&archiveMember7zChecksum{reader: owned, hash: crc32.NewIEEE(), left: int64(m.size), want: m.crc}, owned), nil
+		return wrap(&archiveMember7zChecksum{reader: owned, hash: crc32.NewIEEE(), left: int64(m.size), want: m.crc, defined: f.Checksum().Defined}, owned), nil
 	case ".rar":
 		options := append(rarOptions(password), rardecode.FileSystem(singleArchiveFS{input, size}))
 		if m.rarLocator != nil && m.rarLocator.Direct() {
@@ -131,14 +131,14 @@ type archiveMemberInput struct {
 }
 
 // sevenzip.File.Open bounds the member but does not verify its file CRC.
-// Check length and nonzero CRCs, including a read consuming exactly its size.
-// The decoder does not expose CRC presence, so zero retains the existing 7z
-// compatibility rule: an optional CRC is unchecked, but length is still checked.
+// Check length and declared CRCs, including a read consuming exactly its size.
+// CRC presence comes from parsed header facts; declared zero is checked.
 type archiveMember7zChecksum struct {
-	reader io.Reader
-	hash   hash.Hash32
-	left   int64
-	want   uint32
+	reader  io.Reader
+	hash    hash.Hash32
+	left    int64
+	want    uint32
+	defined bool
 }
 
 func (r *archiveMember7zChecksum) Read(p []byte) (int, error) {
@@ -146,7 +146,7 @@ func (r *archiveMember7zChecksum) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 	if r.left == 0 {
-		if r.want != 0 && r.hash.Sum32() != r.want {
+		if r.defined && r.hash.Sum32() != r.want {
 			return 0, errArchiveIntegrity
 		}
 		return 0, io.EOF
@@ -160,7 +160,7 @@ func (r *archiveMember7zChecksum) Read(p []byte) (int, error) {
 	if err != nil && err != io.EOF {
 		return n, err
 	}
-	if r.left == 0 && r.want != 0 && r.hash.Sum32() != r.want {
+	if r.left == 0 && r.defined && r.hash.Sum32() != r.want {
 		return n, errArchiveIntegrity
 	}
 	if err == io.EOF && r.left != 0 {

@@ -204,7 +204,14 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 		CRC                    uint32
 		BlockBytes             int64
 	}{n.identity, m.name, t.passwordTag(n.archive, password), m.ordinal, m.size, m.crc, blockBytes})
-	key := t.cache.StableDigest("nested-member-range-v4", string(identity))
+	rangeVersion := "nested-member-range-v4"
+	if n.format == ".7z" {
+		// Previous owned streams skipped declared-zero group CRCs and could
+		// publish a final decoded block without completing that validation.
+		// Retain raw source ranges and other formats' derived block keys.
+		rangeVersion = "nested-member-range-v5"
+	}
+	key := t.cache.StableDigest(rangeVersion, string(identity))
 	protected, err := t.encryptPassword(key, password)
 	if err != nil {
 		return nil, nil, err
@@ -605,12 +612,15 @@ func (t *Tree) openNestedArchiveMember(ctx context.Context, n *nestedArchive, m 
 	}
 	switch input.(type) {
 	case *nestedMemberReader, *nestedDeflateLease:
+		if n.format == ".7z" && m.sevenCRCDefined {
+			input = newArchiveCheckedInput(input, int64(m.size), m.crc, true, errArchiveIntegrity)
+		}
 	default:
 		integrityErr := errArchiveIntegrity
 		if n.format == ".zip" {
 			integrityErr = zip.ErrChecksum
 		}
-		input = newArchiveCheckedInput(input, int64(m.size), m.crc, n.format == ".zip" || m.crc != 0, integrityErr)
+		input = newArchiveCheckedInput(input, int64(m.size), m.crc, n.format == ".zip" || (n.format == ".7z" && m.sevenCRCDefined) || (n.format != ".7z" && m.crc != 0), integrityErr)
 	}
 	return &nestedReadHandle{ctx: ctx, input: input, owned: owned, release: release}, int64(m.size), nil
 }

@@ -211,7 +211,7 @@ func nestedCopyMemberReader(ctx context.Context, input archiveReaderAt, size int
 		return nil, nil, false, syscall.ESTALE
 	}
 	f := zr.File[ordinal]
-	if f.Name != outer.name || f.UncompressedSize != outer.size || f.CRC32 != outer.crc {
+	if f.Name != outer.name || f.UncompressedSize != outer.size || f.CRC32 != outer.crc || f.Checksum().Defined != outer.sevenCRCDefined {
 		return nil, nil, false, syscall.ESTALE
 	}
 	if outer.sevenStream == nil {
@@ -391,7 +391,7 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 			if f.rarLocator != nil {
 				format = ".rar"
 			}
-			m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, format: format, encrypted: f.encrypted, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
+			m := &member{name: f.name, size: f.size, crc: f.crc, sevenCRCDefined: f.sevenCRCDefined, ordinal: f.ordinal, format: format, encrypted: f.encrypted, rarLocator: f.rarLocator, sevenStream: f.sevenStream}
 			if f.zipFile != nil {
 				m.format = ".zip"
 				m.file = f.zipFile

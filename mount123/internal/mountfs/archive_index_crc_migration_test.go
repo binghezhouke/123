@@ -20,7 +20,7 @@ func TestArchiveIndexCRCMetadataMigration(t *testing.T) {
 		for _, prior := range []struct {
 			nested  bool
 			version int
-		}{{false, 0}, {true, 0}, {false, 1}, {true, 1}} {
+		}{{false, 0}, {true, 0}, {false, 1}, {true, 1}, {false, 2}, {true, 2}} {
 			t.Run(fmt.Sprintf("%s/nested=%t/revision=%d", kind, prior.nested, prior.version), func(t *testing.T) {
 				ctx := context.Background()
 				cache, err := storage.NewCache(t.TempDir(), 1<<20)
@@ -148,5 +148,57 @@ func TestSevenZIPRebuildsLegacyIncorrectMemberCRCs(t *testing.T) {
 	tree = New(ctx, indexStoreTestAPI{}, cache, 0, true).tree
 	if restored, ok := tree.loadPersistentArchiveIndex(ctx, key, ".7z", a.size, legacy.IdentityDigest); !ok || len(restored.members) != 9 {
 		t.Fatal("rebuilt metadata required another migration")
+	}
+}
+
+func TestSevenZIPCRCPresenceRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	cache, err := storage.NewCache(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	tree := New(ctx, indexStoreTestAPI{}, cache, 0, true).tree
+	for _, defined := range []bool{false, true} {
+		key := tree.archiveIndexCacheKey(".7z", fmt.Sprintf("presence-%t", defined), &archiveDescriptor{id: 77}, nil)
+		dto := archiveIndexDTO{Version: archiveIndexFormatVersion, SevenCRCVersion: sevenZIPCRCMetadataVersion, Kind: ".7z", ArchiveSize: 100, IdentityDigest: "identity", Complete: true, Entries: []archiveIndexEntryDTO{{Path: "b", Name: "b", Ordinal: 0, Size: 4, CRC: 0, SevenCRCDefined: &defined, SevenStream: &sevenStreamLocation{Stream: 0, Offset: 0, Size: 4}}}}
+		idx, err := tree.indexFromDTO(ctx, ".7z", dto, 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tree.persistArchiveIndex(ctx, key, ".7z", 100, "identity", idx)
+		h, err := cache.OpenArchiveIndex(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := make([]byte, h.Size())
+		_, err = h.ReadAt(raw, 0)
+		h.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored archiveIndexDTO
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if len(stored.Entries) != 1 || stored.Entries[0].SevenCRCDefined == nil || *stored.Entries[0].SevenCRCDefined != defined {
+			t.Fatal("CRC presence did not persist explicitly")
+		}
+		fresh := New(ctx, indexStoreTestAPI{}, cache, 0, true).tree
+		got, ok := fresh.loadPersistentArchiveIndex(ctx, key, ".7z", 100, "identity")
+		if !ok || got.members["b"].sevenCRCDefined != defined || got.members["b"].crc != 0 {
+			t.Fatal("CRC presence was not restored")
+		}
+		stored.Entries[0].SevenCRCDefined = nil
+		raw, err = json.Marshal(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := cache.ReplaceArchiveIndex(ctx, key, raw); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := fresh.loadPersistentArchiveIndex(ctx, key, ".7z", 100, "identity"); ok {
+			t.Fatal("missing CRC presence accepted under current schema")
+		}
 	}
 }

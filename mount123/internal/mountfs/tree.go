@@ -192,6 +192,7 @@ type entry struct {
 }
 type member struct {
 	sevenStream       *sevenStreamLocation
+	sevenCRCDefined   bool
 	rarLocator        *rardecode.MemberLocator
 	rarSolid          bool
 	rarGroupStart     int

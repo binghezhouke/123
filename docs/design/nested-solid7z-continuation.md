@@ -76,9 +76,23 @@ that default mapping; inconsistent file/group counts are rejected before mapping
 Older parsers could save incorrect file CRCs even when parsing succeeded. The
 `seven_crc_version` field therefore rejects older persisted 7z indexes on first
 access, for both top-level and nested archives. Revision 1 corrected compact
-digests; revision 2 also corrects default file/group assignments. Rebuilt indexes
-are reusable across restarts. This metadata format migration neither expires archive
-content nor removes ZIP/RAR indexes, source ranges or decompressed body blocks.
+digests; revision 2 corrects default file/group assignments; revision 3 records
+member CRC presence separately from its numeric value. `File.Checksum()` returns
+that parsed fact without scanning other members or reading the source. Rebuilt
+indexes are reusable across restarts. This is a metadata migration, not content
+expiration; ZIP/RAR indexes and source ranges remain reusable.
+
+Both cached groups and private owned streams verify declared zero CRCs. A member
+without its own CRC may be read from a growing group, but its complete-member
+cache waits for successful group completion before publication. Early private
+member reads do not drain the group suffix or claim full-group validation.
+Verified whole-group and complete-member 7z cache keys change once to avoid
+trusting objects published under the former zero-skipping validation rules.
+Decoded 7z member blocks also receive a new namespace: the old decoder could
+publish a final block despite a declared-zero group CRC failure, and a full
+cache hit would bypass the corrected terminal check. ZIP/RAR decoded blocks and
+raw source ranges retain their keys. New partial blocks still carry partial-range
+semantics; an early range hit is not proof of full-group validation.
 
 ## Controlled acceptance
 

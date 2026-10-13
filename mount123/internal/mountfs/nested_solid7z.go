@@ -103,7 +103,7 @@ func (t *Tree) prepareNestedSolid7z(ctx context.Context, n *nestedArchive, m *me
 	}
 	f := zr.File[m.ordinal]
 	offset, ok := f.StreamOffset()
-	if !ok || f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc || f.Stream != layout.Index || offset != m.sevenStream.Offset || layout.UncompressedSize != uint64(m.sevenStream.Size) {
+	if !ok || f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc || f.Checksum().Defined != m.sevenCRCDefined || f.Stream != layout.Index || offset != m.sevenStream.Offset || layout.UncompressedSize != uint64(m.sevenStream.Size) {
 		return nil, syscall.ESTALE
 	}
 	charge, ok := nestedSolid7zCharge(n, layout, decoder)
@@ -117,7 +117,7 @@ func (t *Tree) prepareNestedSolid7z(ctx context.Context, n *nestedArchive, m *me
 		return nil, err
 	}
 	// Keep only scalar member identity, not a transient member/source reader.
-	bound := member{name: m.name, size: m.size, crc: m.crc, ordinal: m.ordinal, sevenStream: m.sevenStream}
+	bound := member{name: m.name, size: m.size, crc: m.crc, sevenCRCDefined: m.sevenCRCDefined, ordinal: m.ordinal, sevenStream: m.sevenStream}
 	return &nestedSolid7zPlan{key: key, fingerprint: fingerprint, charge: charge, parent: n, member: bound, password: protected}, nil
 }
 
