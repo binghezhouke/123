@@ -8,6 +8,7 @@ require (
 	github.com/hanwen/go-fuse/v2 v2.11.0
 	github.com/klauspost/compress v1.20.3
 	github.com/nwaples/rardecode/v2 v2.2.1
+	github.com/ulikunitz/xz v0.5.15
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 	golang.org/x/crypto v0.31.0
 	golang.org/x/sys v0.43.0
@@ -24,7 +25,6 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
-	github.com/ulikunitz/xz v0.5.15 // indirect
 	go4.org v0.0.0-20200411211856-f5505b9728dd // indirect
 )
 
@@ -32,7 +32,7 @@ require (
 replace github.com/nwaples/rardecode/v2 => ./third_party/rardecode
 
 // Maintained fork: owned streams, stored-coder metadata, and AES+Copy range reads.
-replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.20261013062704-25c5d99319f0
+replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.20261013111754-2e4ef2c59ab5
 
 // Local fix: iterative expansion of long UDF allocation-descriptor chains.
 replace golift.io/udf => ./third_party/udf

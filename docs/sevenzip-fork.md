@@ -2,7 +2,7 @@
 
 挂载器使用 [binghezhouke/sevenzip](https://github.com/binghezhouke/sevenzip)，上游是 [bodgit/sevenzip](https://github.com/bodgit/sevenzip)，许可证为 BSD-3-Clause。
 
-当前依赖固定为 fork 的 `v1.6.2-0.20261013043956-da5d82f8efce`，基于上游 `v1.6.1`。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 从上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8` 开始维护，不直接跟随上游 `main` 升级。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
+当前依赖固定为 fork 的 `v1.6.2-0.20261013111754-2e4ef2c59ab5`，基于上游 `v1.6.1`。[`mount123` 维护分支](https://github.com/binghezhouke/sevenzip/tree/mount123) 从上游提交 `a40a39ef0f29542db3d47d1dcb58d011b214feb8` 开始维护，不直接跟随上游 `main` 升级。`mount123/go.mod` 使用 `replace` 指向 fork，保留原模块及 import 路径，避免修改库的内部引用。
 
 ## 扩展边界
 
@@ -15,7 +15,10 @@ fork 已提供：
 - `Reader.OpenStream(index)`：独立拥有的组级解码流；读取到 EOF 检查长度和可用的非零组 CRC，显式 Close 直接释放解码器，不进入 `File.Open` 的池。
 - `Reader.PackedRanges(index)`：所选组各压缩输入在原始 ReaderAt 上的绝对区间，包含归档前缀和起始头，校验长度与溢出。
 - `Reader.OpenStreamWithReader(index, readerAt)`：保留已解析头部，替换所选组正文来源；调用者始终拥有来源，构造失败也由调用者清理。
+- `Reader.StreamLayout(index)`：复制组布局、成员偏移及明确的 CRC presence（包含值为零的 CRC），不创建解码器或保留 Reader、来源、密码。`PlainLZMA2DecoderInfo` 提供内置普通 LZMA2 的字典和缓冲事实，用于应用层决定是否保留状态；不覆盖自定义 codec 注册。
 - 组级正文使用 1 MiB 输入缓冲，减少网络 ReaderAt 调用；头解析及原 File.Open 缓冲不变。
+
+嵌套成员的[按需共享组游标](design/nested-solid7z-continuation.md)使用上述复制元数据与独占流接口，保留有界进程内状态；它不同于下述顶层完整组缓存策略。
 
 来源身份、密码身份、并发调度、取消策略、缓存预算及持久化由挂载器负责。每次组填充创建一个 Reader，直接将解压流写到共享的 growing 缓存，不跨填充保留解码器。组缓存按账户、内容版本、分卷身份、密码身份和组编号隔离，成员位置随索引持久化；旧 7z 索引缺少位置时重建，不使其他格式的索引失效。发布前也检查组内可用的成员 CRC。
 
@@ -27,4 +30,4 @@ fork 已提供：
 
 在 fork 的 `mount123` 分支提交并测试最小必要改动，保留上游许可证。挂载器只引用已推送的明确标签或提交对应的 Go 伪版本；不使用本地绝对路径替换，也不依赖浮动分支。升级后运行 Go 全套测试、FUSE 集成测试、竞态检查与 vet，并针对短读、同组顺序读取、随机跳转及温缓存验证行为。
 
-上游库普通全套测试通过；竞态测试中原有 `TestFS` 压力测试超过 120 秒，其他测试及新增组接口测试通过。挂载器单独运行全量竞态与 FUSE 集成测试。
+上游库普通全套测试通过；本次 fork 的全量竞态测试在 `TestFS` 达到 600 秒超时；仅排除 `TestFS` 后，其余原生测试和新增接口测试全部通过。未把 `TestFS` 记为通过，也未对旧版本作同预算耗时对照。挂载器单独运行全量竞态与 FUSE 集成测试。

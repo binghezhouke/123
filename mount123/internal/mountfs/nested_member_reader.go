@@ -45,6 +45,9 @@ type nestedMemberReader struct {
 	size       int64
 	blockBytes int64
 	open       func(context.Context) (io.ReadCloser, error)
+	// Optional shared group continuation. False selects the private stream;
+	// errors are never converted to a retry that could hide corruption.
+	fill func(context.Context, int64, int64, io.Writer) (bool, error)
 	// resume returns a stream starting after the current position and at or
 	// before the target, or nil when no reusable checkpoint is available.
 	resume   func(context.Context, int64, int64) (io.ReadCloser, int64, error)
@@ -86,6 +89,7 @@ func (r *nestedMemberReader) Close() error {
 	}
 	r.reset()
 	r.open = nil
+	r.fill = nil
 	r.resume = nil
 	return nil
 }
@@ -217,6 +221,11 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 		start := off / blockBytes * blockBytes
 		length := min(blockBytes, r.size-start)
 		handle, err := r.cache.Acquire(ctx, fmt.Sprintf("%s:block:%d", r.key, start), length, func(ctx context.Context, w io.Writer) error {
+			if r.fill != nil {
+				if handled, err := r.fill(ctx, start, length, w); handled || err != nil {
+					return err
+				}
+			}
 			var err error
 			if r.stream != nil && start < r.position {
 				r.reset()

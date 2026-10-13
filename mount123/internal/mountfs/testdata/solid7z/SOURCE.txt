@@ -1,0 +1,85 @@
+SYNTHETIC-SOLID-02: compact public Service demanded-decode regression fixture.
+Generated input, generator and data: LICENSE.generated (BSD-2-Clause).
+The test-only LZMA2 observer adapter mirrors sevenzip's BSD-3-Clause adapter;
+its original copyright and permission notice are in LICENSE.sevenzip.
+No archiver/codec executable is distributed with these fixtures.
+
+Tool: 7-Zip 25.01 x64, 2025-08-03 (Debian package 25.01+dfsg-1~deb13u2).
+Official primary source: https://www.7-zip.org/download.html
+Tool executable SHA256:
+60fc00b4e1ed37668972c51f03426973d8006db3c7224075878f6d66196d7c27
+Generation (choose a new output directory):
+python3 internal/mountfs/testdata/solid7z/generate.py --sevenzip 7z --out <OUTPUT>
+Archive command:
+7z a -t7z -m0=LZMA2 -mx=1 -md=1m -ms=on -mmt=1 -mhc=off -mtm=off -mtc=off -mta=off inner.7z member-a.bin member-b.bin member-c.bin
+Fixed environment TZ=UTC, LC_ALL=C; inputs mode 0644. File times are excluded.
+Two generations produced the same archive bytes/hash. Independent CLI `7z x
+-so ARCHIVE MEMBER` matched every generated member before observation.
+
+Payload algorithm: xorshift32 with shifts 13/17/5 using uint32 arithmetic.
+Seeds 4100, 4101, 4102 respectively; take 16384 low bytes after each update and
+repeat that nonzero/nonuniform block to exactly 4194317 bytes per member.
+Go independently generates each expected member and checks its fixed hash.
+Member SHA256:
+member-a.bin eacaba81605ceb1a05168bbc3b5b7776afbaa6a2ca356a7a7a74e2852b8e816b
+member-b.bin f3b67116ecaa30a554d6a58c52c9defbf6eda9588a0dad2230eab19af66a06d7
+member-c.bin 2281935fa2a58077ef8f1fc83d468318eb01be4409946cac3694d80e24f61f68
+inner.7z: 51981 bytes, SHA256
+08b38858bb256efc500eda012e60887e6d852a122b6a04457d39e2ba1400f978
+Layout: one solid plain LZMA2 stream, dictionary 1 MiB, 12582951 output bytes;
+member offsets 0 / 4194317 / 8388634. Headers are not compressed (-mhc=off).
+The Go test wraps inner.7z in generated ZIP Store and Deflate containers and
+uses a local immutable HTTP Range source plus public Service APIs. No cloud,
+FUSE or user data are involved, and a normal test needs no installed 7z tool.
+
+This compact fixture has DIFFERENT plaintext and compression ratio from the
+earlier issue #55 controlled baseline fixture. Layout/member sizes match, but
+do not compare its HTTP bytes, compressed-input bytes or elapsed time as if
+it were the same source. All metrics below were actually measured on this
+new compact fixture at commit 52c8fe2, not copied from the earlier report.
+
+Observation boundary: existing public sevenzip.RegisterDecompressor(method
+0x21). A dedicated child test process registers a real LZMA2 factory mirroring
+the pinned default constructor/config/Read errors/Close semantics, backed by
+the same github.com/ulikunitz/xz v0.5.15 implementation. No production hook,
+module replacement, pool implementation or uncommitted metadata API is used.
+The existing pinned xz dependency is promoted from indirect to direct solely
+because this test imports its real constructor; its version is unchanged.
+The child isolation prevents process-global registration affecting other
+tests; no private default-factory getter or unsafe restoration is needed.
+Adapter reference: github.com/bodgit/sevenzip/internal/lzma2/reader.go as pinned
+by github.com/binghezhouke/sevenzip 25c5d99319f0.
+
+Count successful decoder construction and actual n returned by codec Read.
+For the fixture's one plain LZMA2 coder, this is the group-output boundary.
+These bytes include discarded member prefixes and requested member blocks,
+not internal codec lookahead or CPU time. No wall-clock performance threshold
+is used. Metadata/index seeding must initialize zero body decoders. Pool
+residency facts for arbitrary registered decoders are not validated by this
+test: the observer deliberately preserves the builtin codec parameters and
+semantics. An admission rule refusing all registry overrides would require
+a separate builtin observation seam, rather than relaxed custom-codec bounds.
+
+All A/B/C public handles are opened simultaneously and remain live throughout
+cold A/B/C head reads and warm C/B/A head reads (64 KiB each). Every returned
+byte matches independently generated plaintext. Cache is 16 MiB, max depth 2,
+max decode builds 1, read-ahead and streamed member fills disabled.
+
+Measured RED at 52c8fe2:
+cold A/B/C: successful decoder initializations 3; returned output 15728679.
+warm C/B/A: additional initializations 0; additional returned output 0.
+Required behavior: cold phase shares one forward decoder and returns <=10 MiB,
+without filling the unrelated final member suffix; warm phase adds no decode.
+This prevents an unconditional full-group fill (12582951 output bytes) from
+passing as demand-preserving reuse. A 1 MiB demanded block per head yields
+the forward group endpoint 9437210; the assertion tolerates up to 10 MiB.
+
+Run from mount123:
+go test -count=1 -run '^TestServiceNestedSolid7zSequentialHeadsShareDemandedDecode$' -v ./internal/mountfs
+The performance assertions intentionally fail on 52c8fe2. With the shared
+cursor, Store and Deflate ancestors both initialize one decoder and return
+9437210 bytes; warm reversed heads remain 0/0. A tiny resident budget confirms
+fallback returns the same bytes with the original 3/15728679 cost. An uncached
+backward range followed by a forward miss adds only the one private backward
+decoder; the shared cursor survives. Each read uses and then cancels its own
+request context.

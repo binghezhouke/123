@@ -23,8 +23,8 @@ github.com/andybalholm/brotli v1.1.1 h1:PR2pgnyFznKEugtsUo0xLdDop5SKXd5Qf5ysW+7X
 github.com/andybalholm/brotli v1.1.1/go.mod h1:05ib4cKhjx3OQYUY22hTVd34Bc8upXjOLL2rKwwZBoA=
 github.com/binghezhouke/compress v0.0.0-20261013082413-68d9ba34d55b h1:ScYnDMe+OidJ/CEJo+ZDZ5J6j7B+9+tCecJsIZimzhw=
 github.com/binghezhouke/compress v0.0.0-20261013082413-68d9ba34d55b/go.mod h1:LUdAzn7YLVvxLpc7y3V1m40wESHTgc1422pwwBSKYuI=
-github.com/binghezhouke/sevenzip v1.6.2-0.20261013062704-25c5d99319f0 h1:ZiKlIHgubWsbYItvHxXnUPbDyQrf9AiNVqGWgqdtVOA=
-github.com/binghezhouke/sevenzip v1.6.2-0.20261013062704-25c5d99319f0/go.mod h1:GVoYQbEVbOGT8n2pfqCIMRUaRjQ8F9oSqoBEqZh5fQ8=
+github.com/binghezhouke/sevenzip v1.6.2-0.20261013111754-2e4ef2c59ab5 h1:16y/4uvZyJV+T+sr4j+kA2WfZxSQsSV8mlT4fo0p3dw=
+github.com/binghezhouke/sevenzip v1.6.2-0.20261013111754-2e4ef2c59ab5/go.mod h1:GVoYQbEVbOGT8n2pfqCIMRUaRjQ8F9oSqoBEqZh5fQ8=
 github.com/bodgit/plumbing v1.3.0 h1:pf9Itz1JOQgn7vEOE7v7nlEfBykYqvUYioC61TwWCFU=
 github.com/bodgit/plumbing v1.3.0/go.mod h1:JOTb4XiRu5xfnmdnDJo6GmSbSbtSyufrsyZFByMtKEs=
 github.com/bodgit/windows v1.0.1 h1:tF7K6KOluPYygXa3Z2594zxlkbKPAOvqr97etrGNIz4=
