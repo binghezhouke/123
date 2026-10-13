@@ -48,9 +48,10 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 	}
 	if t.solidRARCacheable(m) {
 		output := &solidRAROutput{Writer: w}
+		var producerErr *solidRARProducerError
 		if err := t.extractSolidRARMember(ctx, source, a, m, password, identity, output); err == nil {
 			return nil
-		} else if output.written != 0 || ctx.Err() != nil {
+		} else if output.written != 0 || ctx.Err() != nil || errors.As(err, &producerErr) || errors.Is(err, errArchiveIntegrity) {
 			return err
 		}
 		// Retry a cache failure only before any bytes reach the destination.

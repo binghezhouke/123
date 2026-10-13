@@ -23,3 +23,8 @@ without constructing preceding decoders, then lazily initialize only the target
 compressed independent member on the first `Next`. See `SOLID_GROUP_START.md`
 for target restrictions and checksum/cancellation semantics. Upstream `reader.go`,
 `OpenReader`, and `OpenMember` are unchanged.
+
+`FileHeader.CanStartSolidSession` exposes the supported independent-group-start
+predicate. A private compression bit in `reader.go` is set by `volume.go` from
+the parsed block's real decoder version; callers cannot infer it from names or
+packed/unpacked ratios. `OpenSolidSessionFromContext` uses the same predicate.

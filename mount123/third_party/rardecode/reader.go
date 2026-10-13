@@ -39,6 +39,7 @@ var (
 
 // FileHeader represents a single file in a RAR archive.
 type FileHeader struct {
+	compressed       bool      // derived from the parsed block's decoder version
 	Name             string    // file name using '/' as the directory separator
 	IsDir            bool      // is a directory
 	Solid            bool      // is a solid file

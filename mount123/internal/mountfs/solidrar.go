@@ -15,6 +15,13 @@ import (
 
 const solidRARFillTimeout = 5 * time.Minute
 
+// Distinguish archive production failures from cache admission/publication
+// failures, which may still use the private extraction fallback before output.
+type solidRARProducerError struct{ err error }
+
+func (e *solidRARProducerError) Error() string { return e.err.Error() }
+func (e *solidRARProducerError) Unwrap() error { return e.err }
+
 func archiveMemberCacheMarker(kind string) string {
 	if kind == ".rar" {
 		// Older member fills could publish bytes before their group producer
@@ -48,7 +55,12 @@ func (t *Tree) acquireSolidRAR(ctx context.Context, source *storage.Remote, a *a
 	if workqueue.IsBackground(ctx) {
 		lifetime = workqueue.Background(lifetime)
 	}
-	return t.cache.AcquireGrowingRetained(ctx, lifetime, key, int64(m.rarGroupSize), func(fillCtx context.Context, w io.Writer) error {
+	return t.cache.AcquireGrowingRetained(ctx, lifetime, key, int64(m.rarGroupSize), func(fillCtx context.Context, w io.Writer) (err error) {
+		defer func() {
+			if err != nil {
+				err = &solidRARProducerError{err}
+			}
+		}()
 		fillCtx, cancel := context.WithTimeout(fillCtx, solidRARFillTimeout)
 		defer cancel()
 		pw, err := t.decryptPassword(key, protected)
@@ -68,12 +80,18 @@ func (t *Tree) acquireSolidRAR(ctx context.Context, source *storage.Remote, a *a
 			return err
 		}
 		defer release()
-		session, err := rardecode.OpenSolidSessionContext(fillCtx, "archive.rar", append(rarOptions(pw), rardecode.FileSystem(singleArchiveFS{reader, size}))...)
+		options := append(rarOptions(pw), rardecode.FileSystem(singleArchiveFS{reader, size}))
+		var session *rardecode.SolidSession
+		if m.rarGroupStartable {
+			session, err = rardecode.OpenSolidSessionFromContext(fillCtx, "archive.rar", m.rarGroupStart, options...)
+		} else {
+			session, err = rardecode.OpenSolidSessionContext(fillCtx, "archive.rar", options...)
+		}
 		if err != nil {
 			return archiveReadError(fillCtx, err, pw)
 		}
 		defer session.Close()
-		for i := 0; i < m.rarGroupStart; i++ {
+		for i := 0; !m.rarGroupStartable && i < m.rarGroupStart; i++ {
 			member, err := session.Next()
 			if err != nil {
 				return archiveReadError(fillCtx, err, pw)

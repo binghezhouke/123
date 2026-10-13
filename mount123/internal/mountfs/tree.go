@@ -190,25 +190,26 @@ type entry struct {
 	index       *zipIndex
 }
 type member struct {
-	sevenStream      *sevenStreamLocation
-	rarLocator       *rardecode.MemberLocator
-	rarSolid         bool
-	rarGroupStart    int
-	rarGroupOffset   uint64
-	rarGroupSize     uint64
-	format           string
-	ordinal          int
-	file             *zip.File
-	reader           *contextZIPReaderAt
-	name             string
-	headerOffset     int64
-	modifiedTime     uint16
-	method           uint16
-	flags            uint16
-	crc              uint32
-	compressed, size uint64
-	encrypted        bool
-	aes              *aesMemberInfo
+	sevenStream       *sevenStreamLocation
+	rarLocator        *rardecode.MemberLocator
+	rarSolid          bool
+	rarGroupStart     int
+	rarGroupOffset    uint64
+	rarGroupSize      uint64
+	rarGroupStartable bool
+	format            string
+	ordinal           int
+	file              *zip.File
+	reader            *contextZIPReaderAt
+	name              string
+	headerOffset      int64
+	modifiedTime      uint16
+	method            uint16
+	flags             uint16
+	crc               uint32
+	compressed, size  uint64
+	encrypted         bool
+	aes               *aesMemberInfo
 }
 type archiveDescriptor struct {
 	format        string

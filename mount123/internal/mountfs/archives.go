@@ -59,11 +59,13 @@ func finalizeRARGroups(idx *zipIndex, capacity int64) {
 			total += members[j].size
 		}
 		if total > 0 && total <= uint64(maxSize) {
+			startable := members[start].rarGroupStartable
 			var off uint64
 			for j := start; j <= end; j++ {
 				members[j].rarGroupStart = members[start].ordinal
 				members[j].rarGroupOffset = off
 				members[j].rarGroupSize = total
+				members[j].rarGroupStartable = startable
 				off += members[j].size
 			}
 		}
@@ -106,16 +108,17 @@ func (a *archiveDescriptor) kind() string {
 // Only immutable member metadata enters the shared index. Readers, passwords,
 // and decompressor state are scoped to one fill operation.
 type archiveMember struct {
-	encrypted   bool
-	name        string
-	size        uint64
-	crc         uint32
-	directory   bool
-	ordinal     int
-	rarLocator  *rardecode.MemberLocator
-	rarSolid    bool
-	sevenStream *sevenStreamLocation
-	zipFile     *zip.File
+	encrypted    bool
+	name         string
+	size         uint64
+	crc          uint32
+	directory    bool
+	ordinal      int
+	rarLocator   *rardecode.MemberLocator
+	rarSolid     bool
+	rarStartable bool
+	sevenStream  *sevenStreamLocation
+	zipFile      *zip.File
 }
 
 type budgetReaderAt struct {
@@ -227,7 +230,7 @@ func scanArchiveFrom(ctx context.Context, kind string, reader io.ReaderAt, size 
 		if f.UnKnownSize || f.UnPackedSize < 0 || (!f.IsDir && !f.Mode().IsRegular()) {
 			return syscall.EOPNOTSUPP
 		}
-		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator, rarSolid: f.Solid}, nextOffset)
+		err := visit(archiveMember{encrypted: f.Encrypted, name: f.Name, size: uint64(f.UnPackedSize), directory: f.IsDir, ordinal: i, rarLocator: &locator, rarSolid: f.Solid, rarStartable: f.CanStartSolidSession()}, nextOffset)
 		i++
 		return err
 	}
@@ -514,7 +517,7 @@ func (t *Tree) buildOtherIndex(ctx context.Context, source *storage.Remote, a *a
 						idx.mu.Unlock()
 						return syscall.EIO
 					}
-					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, sevenStream: f.sevenStream, format: a.kind()}
+					m := &member{name: f.name, size: f.size, crc: f.crc, ordinal: f.ordinal, rarLocator: f.rarLocator, rarSolid: f.rarSolid, rarGroupStartable: f.rarStartable, sevenStream: f.sevenStream, format: a.kind()}
 					dir.order = append(dir.order, part)
 					dir.files[part] = m
 					idx.members[f.name] = m

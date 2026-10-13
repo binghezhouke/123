@@ -45,25 +45,26 @@ type archiveIndexDTO struct {
 }
 
 type archiveIndexEntryDTO struct {
-	Path           string                   `json:"path"`
-	Name           string                   `json:"name,omitempty"`
-	Directory      bool                     `json:"directory,omitempty"`
-	Ordinal        int                      `json:"ordinal,omitempty"`
-	Size           uint64                   `json:"size,omitempty"`
-	Compressed     uint64                   `json:"compressed,omitempty"`
-	CRC            uint32                   `json:"crc,omitempty"`
-	Method         uint16                   `json:"method,omitempty"`
-	Flags          uint16                   `json:"flags,omitempty"`
-	Encrypted      *bool                    `json:"encrypted,omitempty"`
-	ModifiedTime   uint16                   `json:"modified_time,omitempty"`
-	HeaderOffset   int64                    `json:"header_offset,omitempty"`
-	AES            *archiveAESDTO           `json:"aes,omitempty"`
-	RARLocator     *rardecode.LocatorRecord `json:"rar_locator,omitempty"`
-	RARSolid       bool                     `json:"rar_solid,omitempty"`
-	RARGroupStart  int                      `json:"rar_group_start,omitempty"`
-	RARGroupOffset uint64                   `json:"rar_group_offset,omitempty"`
-	RARGroupSize   uint64                   `json:"rar_group_size,omitempty"`
-	SevenStream    *sevenStreamLocation     `json:"seven_stream,omitempty"`
+	Path              string                   `json:"path"`
+	Name              string                   `json:"name,omitempty"`
+	Directory         bool                     `json:"directory,omitempty"`
+	Ordinal           int                      `json:"ordinal,omitempty"`
+	Size              uint64                   `json:"size,omitempty"`
+	Compressed        uint64                   `json:"compressed,omitempty"`
+	CRC               uint32                   `json:"crc,omitempty"`
+	Method            uint16                   `json:"method,omitempty"`
+	Flags             uint16                   `json:"flags,omitempty"`
+	Encrypted         *bool                    `json:"encrypted,omitempty"`
+	ModifiedTime      uint16                   `json:"modified_time,omitempty"`
+	HeaderOffset      int64                    `json:"header_offset,omitempty"`
+	AES               *archiveAESDTO           `json:"aes,omitempty"`
+	RARLocator        *rardecode.LocatorRecord `json:"rar_locator,omitempty"`
+	RARSolid          bool                     `json:"rar_solid,omitempty"`
+	RARGroupStart     int                      `json:"rar_group_start,omitempty"`
+	RARGroupOffset    uint64                   `json:"rar_group_offset,omitempty"`
+	RARGroupSize      uint64                   `json:"rar_group_size,omitempty"`
+	RARGroupStartable bool                     `json:"rar_group_startable,omitempty"`
+	SevenStream       *sevenStreamLocation     `json:"seven_stream,omitempty"`
 }
 
 type archiveAESDTO struct {
@@ -178,7 +179,7 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 				path = prefix + "/" + key
 			}
 			encrypted := m.encrypted
-			item := archiveIndexEntryDTO{Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize}
+			item := archiveIndexEntryDTO{Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize, RARGroupStartable: m.rarGroupStartable}
 			if m.aes != nil {
 				item.AES = &archiveAESDTO{Version: m.aes.version, Strength: m.aes.strength, Method: m.aes.method}
 			}
@@ -337,6 +338,7 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 				m.rarGroupStart = record.RARGroupStart
 				m.rarGroupOffset = record.RARGroupOffset
 				m.rarGroupSize = record.RARGroupSize
+				m.rarGroupStartable = record.RARGroupStartable
 			}
 			dir.order = append(dir.order, part)
 			dir.files[part] = m

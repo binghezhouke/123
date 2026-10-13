@@ -95,6 +95,14 @@ func OpenSolidSessionFrom(name string, startOrdinal int, opts ...Option) (*Solid
 	return OpenSolidSessionFromContext(stdcontext.Background(), name, startOrdinal, opts...)
 }
 
+// CanStartSolidSession reports whether this parsed member can independently
+// initialize a session opened by OpenSolidSessionFrom. It describes only the
+// header's supported geometry; opening/decoding still validates current input,
+// password, dictionary limits and checksums.
+func (h *FileHeader) CanStartSolidSession() bool {
+	return h != nil && !h.Solid && h.Mode().IsRegular() && !h.UnKnownSize && h.UnPackedSize > 0 && h.compressed
+}
+
 // OpenSolidSessionFromContext reparses headers, including intervening volumes,
 // with the current password. The selected member must be a nonempty compressed
 // regular file with known size and Solid false, so its decoder resets the group
@@ -140,7 +148,7 @@ func OpenSolidSessionFromContext(ctx stdcontext.Context, name string, startOrdin
 			if h.Solid {
 				return fail(ErrSolidOpen)
 			}
-			if !h.Mode().IsRegular() || h.UnKnownSize || h.UnPackedSize <= 0 || h.decVer == 0 {
+			if !h.FileHeader.CanStartSolidSession() {
 				return fail(fs.ErrInvalid)
 			}
 			archive := &ReadCloser{Reader: Reader{f: pr}, cl: v, vm: v.vm}

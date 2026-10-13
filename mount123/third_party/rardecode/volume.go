@@ -155,6 +155,7 @@ func (v *readerVolume) nextBlock() (*fileBlockHeader, error) {
 		return nil, err
 	}
 	f.volnum = v.num
+	f.compressed = f.decVer > 0
 	f.dataOff = v.br.off
 	v.n = f.PackedSize
 	return f, nil
