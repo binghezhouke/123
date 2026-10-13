@@ -24,6 +24,177 @@ spec.loader.exec_module(a)
 DATA = b"\xff\xd8\xff" + bytes(range(256)) * 600
 
 
+class StatsDelta(unittest.TestCase):
+    @staticmethod
+    def sample(values=None, groups=None, epoch="a" * 64, uptime=1):
+        return {"available": True, "epoch": epoch,
+                "values": {"uptime_seconds": uptime, **(values or {})}, "groups": groups or {}}
+
+    def test_first_download_from_omitted_zero_is_in_case_delta(self):
+        before = {"available": True, "epoch": "a" * 64,
+                  "values": {"uptime_seconds": 1},
+                  "groups": {"downloaded_bytes": "unknown"}}
+        after = {"available": True, "epoch": "a" * 64,
+                 "values": {"uptime_seconds": 2, "downloaded_bytes.events": 1,
+                            "downloaded_bytes.bytes": 1048576},
+                 "groups": {"downloaded_bytes": "measured"}}
+        runner = a.Runner(SimpleNamespace(max_seconds=10))
+        with patch.object(runner, "stats", side_effect=[before, after]):
+            result = runner.case({"name": "synthetic", "order": "direct", "directories": []})
+        self.assertEqual(result["stats_delta"].get("downloaded_bytes.events"), 1)
+        self.assertEqual(result["stats_delta"].get("downloaded_bytes.bytes"), 1048576)
+        self.assertEqual(result["stats_before"], before)
+        self.assertEqual(result["stats_after"], after)
+
+    def test_existing_counters_grow_and_gauges_are_snapshot_only(self):
+        before = self.sample({"downloaded_bytes.events": 2, "downloaded_bytes.bytes": 10,
+                              "cache.used_bytes": 50, "lookup.active_foreground": 2,
+                              "foreground_read_latency.p95_nanos": 100, "future_counter": 2},
+                             {"downloaded_bytes": "measured"})
+        after = self.sample({"downloaded_bytes.events": 3, "downloaded_bytes.bytes": 30,
+                             "cache.used_bytes": 1, "lookup.active_foreground": 1,
+                             "foreground_read_latency.p95_nanos": 10, "future_counter": 99},
+                            {"downloaded_bytes": "measured"}, uptime=2)
+        delta, status = a.stats_delta(before, after)
+        self.assertEqual(status, {"status": "measured"})
+        self.assertEqual(delta, {"downloaded_bytes.events": 1, "downloaded_bytes.bytes": 20})
+        self.assertEqual(before["values"]["cache.used_bytes"], 50)
+
+    def test_only_defined_present_unobserved_group_is_zero(self):
+        after = self.sample({"downloaded_bytes.events": 1, "downloaded_bytes.bytes": 10},
+                            {"downloaded_bytes": "measured"}, uptime=2)
+        for groups in ({}, {"downloaded_bytes": "measured"}, {"downloaded_bytes": "unsupported"}):
+            with self.subTest(groups=groups):
+                delta, status = a.stats_delta(self.sample(groups=groups), after)
+                self.assertEqual(delta, {})
+                self.assertEqual(status, {"status": "unavailable", "reason": "no_comparable_counters"})
+        empty = self.sample(groups={"downloaded_bytes": "unknown"})
+        self.assertEqual(a.stats_delta(empty, empty),
+                         ({"downloaded_bytes.events": 0, "downloaded_bytes.bytes": 0}, {"status": "measured"}))
+
+    def test_sampling_failure_missing_epoch_restart_or_time_reversal_is_not_comparable(self):
+        before = self.sample({"downloaded_bytes.events": 1, "downloaded_bytes.bytes": 10},
+                             {"downloaded_bytes": "measured"})
+        for after, reason in (
+            ({"available": False, "reason": "stats_response_invalid"}, "sample_unavailable"),
+            (self.sample(epoch=None), "epoch_unknown"),
+            (self.sample(epoch="b" * 64, uptime=999), "process_changed"),
+            (self.sample(uptime=0), "sample_time_reversed"),
+            (self.sample(uptime=None), "sample_time_unknown"),
+        ):
+            with self.subTest(reason=reason):
+                delta, status = a.stats_delta(before, after)
+                self.assertEqual(delta, {})
+                self.assertEqual(status["reason"], reason)
+                self.assertNotEqual(status["status"], "measured")
+        delta, status = a.stats_delta({"available": False}, before)
+        self.assertEqual(delta, {})
+        self.assertEqual(status["reason"], "sample_unavailable")
+
+    def test_counter_rollback_even_back_to_omitted_zero_invalidates_whole_window(self):
+        before = self.sample({"downloaded_bytes.events": 2, "downloaded_bytes.bytes": 10},
+                             {"downloaded_bytes": "measured"})
+        for after in (self.sample({"downloaded_bytes.events": 3, "downloaded_bytes.bytes": 5},
+                                 {"downloaded_bytes": "measured"}, uptime=2),
+                      self.sample(groups={"downloaded_bytes": "unknown"}, uptime=2)):
+            self.assertEqual(a.stats_delta(before, after),
+                             ({}, {"status": "not_comparable", "reason": "counter_reset"}))
+
+    def test_invalid_counter_is_not_a_zero_or_negative_delta(self):
+        before = self.sample({"downloaded_bytes.events": 1, "downloaded_bytes.bytes": 10},
+                             {"downloaded_bytes": "measured"})
+        for value in (-1, 10.5, True):
+            with self.subTest(value=value):
+                after = self.sample({"downloaded_bytes.events": 2, "downloaded_bytes.bytes": value},
+                                    {"downloaded_bytes": "measured"}, uptime=2)
+                self.assertEqual(a.stats_delta(before, after),
+                                 ({}, {"status": "not_comparable", "reason": "invalid_counter"}))
+
+    def test_versioned_optional_counter_requires_version_on_both_samples(self):
+        before = self.sample({"cache.fill_outcome_version": 1}, {"cache": "measured"})
+        after = self.sample({"cache.fill_outcome_version": 1, "cache.fill_cancelled": 2},
+                            {"cache": "measured"}, uptime=2)
+        self.assertEqual(a.stats_delta(before, after)[0], {"cache.fill_cancelled": 2, "cache.fill_errors": 0})
+        before["values"].pop("cache.fill_outcome_version")
+        self.assertEqual(a.stats_delta(before, after)[0], {})
+
+    def test_duration_cumulative_samples_and_time_not_percentiles(self):
+        group = "stages.archive_index"
+        before = self.sample({"stage_schema_version": 1}, {group: "unknown"})
+        after = self.sample({"stage_schema_version": 1, group + ".samples": 1,
+                             group + ".total_nanos": 30, group + ".p95_nanos": 63},
+                            {group: "measured"}, uptime=2)
+        self.assertEqual(a.stats_delta(before, after)[0], {group + ".samples": 1, group + ".total_nanos": 30})
+        before["values"].pop("stage_schema_version")
+        self.assertEqual(a.stats_delta(before, after)[0], {})
+
+    def test_metadata_epoch_and_fixed_field_privacy_whitelist(self):
+        raw = {"started_at": "2026-01-02T03:04:05.123456789Z", "uptime_seconds": 2,
+               "downloaded_bytes": {"status": "unknown", "events": None, "bytes": None},
+               "future_counter": 123, "sample_secret": {"bytes": 456},
+               "cache": {"used_bytes": 12, "filename_secret": 789},
+               "foreground_read_latency": {"p50_nanos": 20, "p95_nanos": 40},
+               "configuration": {"port": 100, "password": "SECRET"}, "reason": "SECRET"}
+        metadata = a.stats_metadata(raw)
+        self.assertEqual(metadata, {"epoch": a.digest(raw["started_at"].encode()),
+                                    "groups": {"downloaded_bytes": "unknown"}})
+        self.assertEqual(a.numeric_stats(raw), {"uptime_seconds": 2, "cache.used_bytes": 12,
+                                               "foreground_read_latency.p50_nanos": 20,
+                                               "foreground_read_latency.p95_nanos": 40})
+        raw["downloaded_bytes"]["bytes"] = True
+        self.assertNotIn("downloaded_bytes", a.stats_metadata(raw)["groups"])
+        for started in ("2026-01-02T11:04:05.123456789+08:00", "2026-01-01T22:04:05.123-05:00"):
+            raw["started_at"] = started
+            metadata = a.stats_metadata(raw)
+            self.assertEqual(metadata["epoch"], a.digest(started.encode()))
+            self.assertNotIn(started, json.dumps(metadata))
+        for started in ("SECRET", "2026-99-01T00:00:00Z", "0001-01-01T00:00:00Z", None,
+                        "2026-01-02T11:04:05+24:00", "2026-01-02T11:04:05-08:60",
+                        "2026-01-02T11:04:05+08:00SECRET", "2026-01-02T11:04:05+8:00"):
+            raw["started_at"] = started
+            self.assertIsNone(a.stats_metadata(raw)["epoch"])
+
+    def test_first_download_over_control_socket_worker_and_runner_case(self):
+        started = "2026-01-02T11:04:05.123456789+08:00"
+        snapshots = [
+            {"started_at": started, "uptime_seconds": 1,
+             "downloaded_bytes": {"status": "unknown", "events": None, "bytes": None}},
+            {"started_at": started, "uptime_seconds": 2,
+             "downloaded_bytes": {"status": "measured", "events": 1, "bytes": 1048576}},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "control.sock")
+            with socket.socket(socket.AF_UNIX) as server:
+                server.bind(path)
+                server.listen(2)
+                server.settimeout(3)
+                commands, errors = [], []
+                def respond():
+                    try:
+                        for snapshot in snapshots:
+                            conn, _ = server.accept()
+                            with conn:
+                                commands.append(json.loads(conn.recv(1024)))
+                                conn.sendall(json.dumps({"io_stats": snapshot}).encode() + b"\n")
+                    except OSError as exc:
+                        errors.append(type(exc).__name__)
+                thread = threading.Thread(target=respond, daemon=True)
+                thread.start()
+                runner = a.Runner(SimpleNamespace(max_seconds=10, max_operations=4, timeout=2,
+                                                  control_socket=path))
+                result = runner.case({"name": "synthetic", "order": "direct", "directories": []})
+                thread.join(timeout=4)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(errors, [])
+                self.assertEqual(commands, [{"command": "io-stats"}] * 2)
+        self.assertEqual(result["stats_delta_status"], {"status": "measured"})
+        self.assertEqual(result["stats_delta"], {"downloaded_bytes.events": 1, "downloaded_bytes.bytes": 1048576})
+        self.assertNotIn("downloaded_bytes.bytes", result["stats_before"]["values"])
+        self.assertEqual(result["stats_after"]["values"]["downloaded_bytes.bytes"], 1048576)
+        self.assertEqual(result["stats_before"]["epoch"], result["stats_after"]["epoch"])
+        self.assertNotIn(started, json.dumps(result))
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -259,14 +430,15 @@ class Fixture(unittest.TestCase):
             conn, _ = server.accept()
             with conn:
                 received.append(json.loads(conn.recv(1024)))
-                conn.sendall(json.dumps({"io_stats": {"cache": {"hit_bytes": 12},
+                conn.sendall(json.dumps({"io_stats": {"cache": {"foreground": {"status": "measured", "hit_bytes": 12}},
                     "configuration": {"password": "SECRET"}, "reason": "SECRET"}}).encode() + b"\n")
         thread = threading.Thread(target=respond, daemon=True)
         thread.start()
         try:
             self.args.control_socket = path
             result = a.Runner(self.args).stats()
-            self.assertEqual(result, {"available": True, "values": {"cache.hit_bytes": 12}})
+            self.assertEqual(result, {"available": True, "values": {"cache.foreground.hit_bytes": 12},
+                                      "epoch": None, "groups": {"cache.foreground": "measured"}})
             self.assertEqual(received, [{"command": "io-stats"}])
         finally:
             server.close()

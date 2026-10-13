@@ -48,7 +48,24 @@ localhost/loopback 请求单独禁用环境代理；内网 HTTP 和远程 HTTPS 
 
 复现 #90 应使用**已设置长正/负缓存 TTL** 的真实挂载。TTL=0 的 fixture 可能掩盖 inode 被目录枚举提前创建的问题。本工具不修改 TTL、不重挂载、不重启、不刷新、不探测、不清缓存、不删除索引。outer-first 与 direct 对照应选两个独立、尚未触碰的样本；先访问同一样本再做对照无法恢复冷状态。报告记录第一轮及重复轮耗时，不能将第一轮称为冷缓存测量。FUSE 先读、Web 后读，后者通常已经暖缓存；共享服务其他流量也会影响耗时与统计。
 
-`--cache` 只注明有配置缓存位置，不遍历缓存目录、不读缓存文件、不写入该路径。`--control-socket` 可选，仅发送 `io-stats`。报告包含每个 case 前后的数值型统计以及算术差值，不抄写配置、路径或错误原文。计数器重置会产生负差；延迟分位数/活跃数等是 gauge，算术差不能解释为此 case 的独立延迟或请求数。未配置或暂不可用时注明 `available=false`，不会伪造缓存命中证据。
+`--cache` 只注明有配置缓存位置，不遍历缓存目录、不读缓存文件、不写入该路径。`--control-socket` 可选，仅发送 `io-stats`。`stats_before`/`stats_after` 保留导出器固定白名单中的原始数值、固定枚举组状态及启动时间摘要 `epoch`，不抄写配置、路径、下载链接、绝对时间字符串或错误原文。`stats_delta` 仅包含已定义的累计计数器：源下载/前台读取/缓存命中/预读的事件与字节，缓存和恢复事件、API 与 FUSE 请求、完成的队列任务，以及时延样本数和累计纳秒。缓存驻留量、容量、活跃数、队列等待数、速率、p50/p95/max 时延保留在前后快照中，不计算差值；分位数不能解释为本 case 的独立时延。
+
+`stats_delta_status` 说明这一窗口的比较结果：
+
+启动时间须符合 RFC3339（支持 `Z` 和合法的 `±HH:MM` 偏移），日期与偏移均通过校验；报告只保存完整导出字符串的摘要，保留纳秒精度，不输出原始时间。同一运行期的导出格式应保持一致。
+
+| 状态 | 含义 |
+| --- | --- |
+| `measured` | 两次取样成功、`epoch` 相同、运行时间未倒退，且已有可比较计数器；这些计数器的 `0` 表示该窗口无增量 |
+| `unavailable/sample_unavailable` | 未配置统计、取样失败或没有完成取样；`stats_delta` 为空，不表示零下载 |
+| `unavailable/no_comparable_counters` | 取样成功但没有双方均可解释的累计字段 |
+| `not_comparable/epoch_unknown`、`process_changed` | 缺少有效启动时间标识，或服务运行期发生改变；即使新进程 uptime 更大也不跨进程求差 |
+| `not_comparable/sample_time_unknown`、`sample_time_reversed` | 运行时间缺失、无效或倒退 |
+| `not_comparable/counter_reset`、`invalid_counter` | 已知累计计数器下降，或值不符合非负整数定义；整个窗口的增量摘要为空，原始前后值仍保留 |
+
+首次事件之前，导出器的七个事件/字节组及固定时延组会返回 `status=unknown`、数值为 null，脚本的数值快照因此省略这些字段。只有该已知组确实存在、符合这种无观测形状、且运行期可比较时，才将省略值视为累计零；例如第一次下载后仍报告 `downloaded_bytes.events=1` 和相应字节增量。整个组缺失、未知字段或 `measured` 组缺少字段不补零。`directory_lookup` 顶层组目前没有观测 hook，不推断其零值。`stages` 累计值须双方 `stage_schema_version=1`；缓存省略的取消/错误计数须双方 `fill_outcome_version=1`，旧版本缺失视为未知。`stats_delta` 中未出现的字段表示未定义或不可比较，与显式 `0` 不同。
+
+旧报告若没有 `stats_delta_status`，其差值不能按上述规则解释；需要新的统计窗口时使用新报告。统计不可用不替代目录和字节一致性检验，共享服务其他流量也会计入这些进程累计增量。
 
 ## 数据验证与预算
 

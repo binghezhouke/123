@@ -2,11 +2,13 @@
 """Bounded, opt-in web/FUSE acceptance. Standard library only; see live_acceptance.md."""
 import argparse
 import base64
+from datetime import datetime
 import errno
 import hashlib
 from html.parser import HTMLParser
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -23,6 +25,142 @@ import urllib.request
 
 VERSION = 1
 READ_SIZE = 65536
+
+# Fixed exporter schema: iostats/{stats,cache,recovery}.go. Inventory, active
+# counts, limits and latency percentiles remain snapshots, never counter deltas.
+BYTE_COUNTER_GROUPS = (
+    "downloaded_bytes", "foreground_read_bytes", "cache_hit_bytes",
+    "read_ahead_scheduled_bytes", "read_ahead_completed_bytes",
+    "read_ahead_consumed_bytes", "read_ahead_wasted_bytes")
+DURATION_GROUPS = (
+    "foreground_read_latency", "foreground_read_success_time", "transfer_queue_latency",
+    "http_body_ttfb", "http_transfer_latency", "cache_publication_latency",
+    "read_ahead_foreground_wait") + tuple("stages." + name for name in (
+        "directory_lookup", "source_prepare", "url_resolve", "source_probe",
+        "build_queue", "archive_index", "decompression", "file_open")) + tuple(
+            "api_profile." + name + ".latency" for name in (
+                "list", "file_info", "download_url", "access_token", "other"))
+COUNTER_FIELDS = {group: ("events", "bytes") for group in BYTE_COUNTER_GROUPS}
+COUNTER_FIELDS.update({group: ("samples", "total_nanos") for group in DURATION_GROUPS})
+COUNTER_FIELDS.update({
+    "cache": ("capacity_evictions", "capacity_eviction_bytes", "enospc", "fill_successes",
+              "fill_failures", "fill_cancelled", "fill_errors", "existing_fill_waits",
+              "disk_pressure_events", "disk_pressure_rejects", "disk_pressure_evictions", "orphan_files_cleaned"),
+    "cache.foreground": ("read_requests", "full_hits", "requested_bytes", "hit_bytes", "miss_bytes"),
+    "cache.background": ("read_requests", "full_hits", "requested_bytes", "hit_bytes", "miss_bytes"),
+    "cache.refaults": ("count", "bytes"),
+    "directory_cache": ("memory_hits", "disk_restores", "disk_restore_attempts", "list_calls", "list_errors",
+                        "stale_served", "stale_failures", "retry_backoffs", "permanent_failures",
+                        "corrupt_snapshots", "persistence_failures"),
+    "remote_recovery": ("attempts", "retries", "recovered", "exhausted", "cancelled", "suffix_bytes"),
+    "download_scheduler": ("completed_requests",), "index_queue": ("requests",),
+    "image_prefetch": ("planned", "started", "reused", "completed", "cancelled", "failed", "foreground_ready"),
+})
+COUNTER_FIELDS.update({group: ("requests", "foreground_requests", "background_requests")
+                       for group in ("readdir", "lookup", "getattr", "open")})
+COUNTER_FIELDS.update({"api_profile." + group: ("requests", "successes", "errors", "retries", "throttle_waits")
+                       for group in ("list", "file_info", "download_url", "access_token", "other")})
+SNAPSHOT_FIELDS = {
+    "": ("uptime_seconds", "stage_schema_version"),
+    "cache": ("capacity_bytes", "used_bytes", "reserved_bytes", "entries", "pinned_bytes",
+              "index_budget_bytes", "index_used_bytes", "fill_outcome_version", "disk_free_bytes", "disk_minimum_free_bytes"),
+    "download_scheduler": ("maximum_requests", "maximum_in_flight_bytes", "active_requests", "active_bytes",
+                           "available_background_bytes", "waiting_foreground", "waiting_background", "staging_active_bytes",
+                           "staging_peak_bytes", "staging_waiting_foreground", "staging_waiting_background"),
+    "index_queue": ("limit", "active", "background_active", "waiting"),
+    "image_prefetch": ("foreground_in_flight",),
+    "scan": ("metadata_requests_per_second", "enter_requests_per_second", "exit_requests_per_second"),
+    "directory_lookup": ("events", "bytes"),  # This group currently has no hook; never infer zero.
+}
+SNAPSHOT_FIELDS.update({group: ("p50_nanos", "p95_nanos", "max_nanos") for group in DURATION_GROUPS})
+SNAPSHOT_FIELDS.update({group: ("active_foreground", "active_background")
+                        for group in ("readdir", "lookup", "getattr", "open")})
+NUMERIC_STAT_FIELDS = frozenset((group + "." if group else "") + field
+                              for schema in (COUNTER_FIELDS, SNAPSHOT_FIELDS)
+                              for group, fields in schema.items() for field in fields)
+
+
+def stats_path(value, path):
+    for key in path.split("."):
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+    return value
+
+
+def stats_metadata(value):
+    groups = {}
+    for group in COUNTER_FIELDS:
+        status = stats_path(value, ("cache" if group == "cache.refaults" else group) + ".status")
+        if (status == "unknown" and group in BYTE_COUNTER_GROUPS + DURATION_GROUPS and
+                any(stats_path(value, group + "." + field) is not None for field in COUNTER_FIELDS[group])):
+            continue  # Malformed values are not the exporter's null-before-first-event shape.
+        if status in ("measured", "idle", "unknown"):
+            groups[group] = status
+    epoch = None
+    started = value.get("started_at") if isinstance(value, dict) else None
+    stamp = (re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-](\d\d):(\d\d))", started)
+             if isinstance(started, str) else None)
+    if stamp and (stamp[1] is None or (int(stamp[1]) < 24 and int(stamp[2]) < 60)):
+        try:
+            if datetime.fromisoformat(started.replace("Z", "+00:00")).year > 1:
+                # Keep nanosecond precision. One exporter epoch uses the same
+                # RFC3339 spelling in every snapshot, including its UTC offset.
+                epoch = digest(started.encode())
+        except ValueError:
+            pass
+    return {"epoch": epoch, "groups": groups}
+
+
+def counter_value(sample, group, field):
+    values, statuses = sample["values"], sample.get("groups", {})
+    if group.startswith("stages.") and values.get("stage_schema_version") != 1:
+        return None
+    if field in ("fill_cancelled", "fill_errors") and group == "cache" and values.get("cache.fill_outcome_version") != 1:
+        return None
+    path = group + "." + field
+    value = values.get(path)
+    if value is not None:
+        if type(value) is not int or value < 0:
+            raise ValueError("invalid counter")
+        return value if statuses.get(group) in ("measured", "idle") else None
+    # These concrete tracker factories return null fields before their first
+    # observation. An absent group, measured-but-missing field, or unknown hook
+    # is not a zero. Version 1 explicitly omits zero fill outcomes too.
+    if statuses.get(group) == "unknown" and group in BYTE_COUNTER_GROUPS + DURATION_GROUPS:
+        return 0
+    if group == "cache" and field in ("fill_cancelled", "fill_errors") and statuses.get(group) == "measured":
+        return 0
+    return None
+
+
+def stats_delta(before, after):
+    if not before.get("available") or not after.get("available"):
+        return {}, {"status": "unavailable", "reason": "sample_unavailable"}
+    epochs = [sample.get("epoch") for sample in (before, after)]
+    if not all(isinstance(epoch, str) and re.fullmatch(r"[0-9a-f]{64}", epoch) for epoch in epochs):
+        return {}, {"status": "not_comparable", "reason": "epoch_unknown"}
+    if epochs[0] != epochs[1]:
+        return {}, {"status": "not_comparable", "reason": "process_changed"}
+    uptimes = [sample["values"].get("uptime_seconds") for sample in (before, after)]
+    if not all(type(value) in (int, float) and math.isfinite(value) and value >= 0 for value in uptimes):
+        return {}, {"status": "not_comparable", "reason": "sample_time_unknown"}
+    if uptimes[1] < uptimes[0]:
+        return {}, {"status": "not_comparable", "reason": "sample_time_reversed"}
+    result = {}
+    try:
+        for group, fields in COUNTER_FIELDS.items():
+            for field in fields:
+                previous, current = (counter_value(sample, group, field) for sample in (before, after))
+                if previous is None or current is None:
+                    continue
+                if current < previous:
+                    return {}, {"status": "not_comparable", "reason": "counter_reset"}
+                result[group + "." + field] = current - previous
+    except ValueError:
+        return {}, {"status": "not_comparable", "reason": "invalid_counter"}
+    return result, ({"status": "measured"} if result else
+                    {"status": "unavailable", "reason": "no_comparable_counters"})
 
 
 class Failure(Exception):
@@ -88,16 +226,13 @@ class BrowseParser(HTMLParser):
             self.next = href
 
 
-def numeric_stats(value, prefix=""):
+def numeric_stats(value):
     # Never copy arbitrary values, paths, status reasons, URLs or configuration.
     out = {}
-    if isinstance(value, dict):
-        for key, child in value.items():
-            if key == "configuration" or not re.fullmatch(r"[a-z_]+", key):
-                continue
-            out.update(numeric_stats(child, prefix + key + "."))
-    elif isinstance(value, (int, float)) and not isinstance(value, bool):
-        out[prefix.rstrip(".")] = value
+    for path in sorted(NUMERIC_STAT_FIELDS):
+        number = stats_path(value, path)
+        if type(number) is int or (type(number) is float and math.isfinite(number)):
+            out[path] = number
     return out
 
 
@@ -134,7 +269,8 @@ def worker(job):
                 data.extend(chunk)
         value = json.loads(data)
         need("io_stats" in value and "error" not in value, "stats_response_invalid")
-        return {"values": numeric_stats(value["io_stats"])}
+        need(isinstance(value["io_stats"], dict), "stats_response_invalid")
+        return {"values": numeric_stats(value["io_stats"]), **stats_metadata(value["io_stats"])}
     need(action == "http", "invalid_worker", "configuration")
     url = urllib.parse.urlsplit(job["url"])
     handlers = [NoRedirect()]
@@ -244,7 +380,7 @@ class Runner:
             return {"available": False, "reason": "not_configured"}
         try:
             result = self.call({"action": "stats", "path": self.args.control_socket})
-            return {"available": True, "values": result["values"]}
+            return {"available": True, "values": result["values"], "epoch": result["epoch"], "groups": result["groups"]}
         except Failure as exc:
             if exc.code == "worker_unreaped":
                 raise
@@ -349,6 +485,9 @@ class Runner:
     def case(self, case):
         record = {"name": case["name"], "status": "running", "order": case["order"], "steps": [], "reads": []}
         record["stats_before"] = {"available": False, "reason": "not_collected"}
+        record["stats_after"] = {"available": False, "reason": "not_collected"}
+        record["stats_delta"] = {}
+        record["stats_delta_status"] = {"status": "unavailable", "reason": "sample_unavailable"}
         try:
             record["stats_before"] = self.stats()
             for index, step in enumerate(case["directories"]):
@@ -372,8 +511,7 @@ class Runner:
                 record.update(status="failed", error={"code": exc.code, "category": exc.category, **exc.facts})
                 return record
             before, after = record["stats_before"], record["stats_after"]
-            if before["available"] and after["available"]:
-                record["stats_delta"] = {k: v - before["values"][k] for k, v in after["values"].items() if k in before["values"]}
+            record["stats_delta"], record["stats_delta_status"] = stats_delta(before, after)
         return record
 
 
