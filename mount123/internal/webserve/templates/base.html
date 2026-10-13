@@ -35,7 +35,7 @@
             <div class="sidebar-header sidebar-header-action"><span>历史记录</span><button type="button" id="sidebar-history-clear" class="sidebar-header-action-button">清除</button></div>
             <div id="sidebar-history-list" class="sidebar-history-list" aria-live="polite"></div>
         </div>
-        <div class="sidebar-footer"><div class="sidebar-connection"><span class="connection-dot"></span>123 云盘</div>{{if .Commit}}<code class="build-commit" title="当前运行提交">{{.Commit}}</code>{{end}}</div>
+        <div class="sidebar-footer"><a href="/status" class="sidebar-item" title="查看共享后端的缓存、请求和传输统计">运行状态</a><div class="sidebar-connection"><span class="connection-dot"></span>123 云盘</div>{{if .Commit}}<code class="build-commit" title="当前运行提交">{{.Commit}}</code>{{end}}</div>
     </aside>
 
     <div class="finder-content">

@@ -102,6 +102,8 @@ type Server struct {
 	static            http.Handler
 	service           *mountfs.Service
 	authEnabled       bool
+	traffic           webTraffic
+	status            statusCache
 }
 
 // New validates opts and returns a server that is ready to serve. The caller
@@ -149,6 +151,11 @@ func New(opts Options) (*Server, error) {
 		}
 		s.pages[name] = page
 	}
+	statusPage, err := template.ParseFS(assets, "templates/status.html")
+	if err != nil {
+		return nil, fmt.Errorf("webserve: parse status: %w", err)
+	}
+	s.pages["status.html"] = statusPage
 	root, err := fs.Sub(assets, "static")
 	if err != nil {
 		return nil, fmt.Errorf("webserve: open static assets: %w", err)
@@ -174,22 +181,26 @@ func (s *Server) Handler() http.Handler {
 // URL. Static assets and health checks are intentionally omitted.
 func (s *Server) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" || strings.HasPrefix(r.URL.Path, "/static/") {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/status" || r.URL.Path == "/api/status" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}
 		started := time.Now()
-		rw := &requestLogWriter{ResponseWriter: w}
+		rw := &requestLogWriter{ResponseWriter: w, traffic: &s.traffic}
+		s.traffic.active.Add(1)
+		defer s.traffic.active.Add(-1)
 		s.logger.Printf("web request start method=%s path=%s query=%q", r.Method, r.URL.Path, r.URL.RawQuery)
 		next.ServeHTTP(rw, r)
+		s.traffic.finish(rw.status, time.Since(started), r.Context().Err() != nil)
 		s.logger.Printf("web request done method=%s path=%s status=%d bytes=%d duration=%s canceled=%t", r.Method, r.URL.Path, rw.status, rw.bytes, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil)
 	})
 }
 
 type requestLogWriter struct {
 	http.ResponseWriter
-	status int
-	bytes  int
+	status  int
+	bytes   int
+	traffic *webTraffic
 }
 
 func (w *requestLogWriter) WriteHeader(status int) {
@@ -203,6 +214,9 @@ func (w *requestLogWriter) Write(p []byte) (int, error) {
 	}
 	n, err := w.ResponseWriter.Write(p)
 	w.bytes += n
+	if w.traffic != nil && n > 0 {
+		w.traffic.bytes.Add(uint64(n))
+	}
 	return n, err
 }
 
@@ -232,6 +246,8 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /logout", s.requireAuth(s.handleLogout))
 	s.mux.HandleFunc("GET /{$}", s.requireAuth(s.handleIndex))
 	s.mux.HandleFunc("GET /favorites", s.requireAuth(s.handleFavorites))
+	s.mux.HandleFunc("GET /status", s.requireAuth(s.handleStatus))
+	s.mux.HandleFunc("GET /api/status", s.requireAuth(s.handleStatusData))
 	s.registerListingRoutes()
 	s.registerPasswordRoutes()
 	s.registerArchiveRoutes()

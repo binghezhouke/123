@@ -39,6 +39,12 @@ type Service struct {
 	tree *Tree
 }
 
+// IOStats exposes the same bounded aggregate as the FUSE control socket.
+// Reading it never fetches cloud metadata or opens archive members.
+func (s *Service) IOStats() iostats.Snapshot {
+	return (&Node{tree: s.tree}).IOStats()
+}
+
 // NewService prepares a cloud tree without mounting FUSE.
 func NewService(ctx context.Context, api API, cache *storage.Cache, rootID int64, zipDirs bool, opts Options) (*Service, error) {
 	root := NewWithOptions(ctx, api, cache, rootID, zipDirs, opts)

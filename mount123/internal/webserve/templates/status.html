@@ -1,0 +1,58 @@
+{{define "layout"}}<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>运行状态 · CloudArchive</title>
+  <link rel="stylesheet" href="/static/css/status.css?v={{.Version}}">
+  <script defer src="/static/js/status.js?v={{.Version}}"></script>
+</head>
+<body>
+<header class="status-header">
+  <a class="brand" href="/browse?parent_id={{.RootID}}" aria-label="返回文件浏览">▦ <span>CloudArchive</span></a>
+  <nav aria-label="页面导航"><a href="/browse?parent_id={{.RootID}}">文件浏览</a><a href="/status" aria-current="page">运行状态</a></nav>
+  <code title="当前运行提交">{{.Commit}}</code>
+</header>
+<main class="dashboard">
+  <div class="page-heading">
+    <div><p class="eyebrow">WEB + FUSE · 共享后端</p><h1>运行状态</h1><p class="muted">从请求、缓存到传输，查看当前系统正在做什么。</p></div>
+    <div class="controls">
+      <label>更新间隔 <select id="poll-interval"><option value="5000">5 秒</option><option value="10000">10 秒</option><option value="30000">30 秒</option></select></label>
+      <button id="pause" type="button" aria-pressed="false">暂停</button>
+      <button id="refresh" type="button">立即刷新</button>
+      <button id="export" type="button" disabled>导出 JSON</button>
+    </div>
+  </div>
+  <div class="connection-line"><span class="live-dot" id="live-dot"></span><span id="connection" role="status">正在获取统计…</span><span class="muted" id="sample-time"></span></div>
+  <div id="status-error" class="status-error" role="alert" hidden></div>
+  <section class="metric-grid" aria-label="当前概览">
+    <article class="metric"><h2>网盘 → 服务</h2><strong id="download-rate">—</strong><p>最近采样区间 · 实际源下载</p></article>
+    <article class="metric"><h2>服务 → Web 客户端</h2><strong id="web-rate">—</strong><p>最近采样区间 · 响应写入速率</p></article>
+    <article class="metric"><h2>前台缓存命中</h2><strong id="cache-hit">—</strong><p>最近采样区间 · 按读取字节</p></article>
+    <article class="metric"><h2>Web 在途请求</h2><strong id="web-active">—</strong><p>含正在传输的视频连接</p></article>
+  </section>
+  <div class="trend-heading"><h2>近期趋势</h2><label>显示 <select id="history-window"><option value="300000">最近 5 分钟</option><option value="900000" selected>最近 15 分钟</option><option value="1800000">最近 30 分钟</option></select></label></div>
+  <section class="chart-grid" aria-label="运行趋势图">
+    <article class="panel chart-panel"><h3>传输速率 <small>MiB/s</small></h3><div class="legend"><span class="blue">网盘下载</span><span class="green">Web 响应</span></div><div id="chart-traffic" class="chart" tabindex="0" aria-label="传输速率趋势，左右方向键查看采样"></div></article>
+    <article class="panel chart-panel"><h3>缓存命中率 <small>%</small></h3><div class="legend"><span class="blue">前台区间字节命中率</span></div><div id="chart-cache" class="chart" tabindex="0" aria-label="缓存命中率趋势，左右方向键查看采样"></div></article>
+    <article class="panel chart-panel"><h3>调度压力 <small>请求数</small></h3><div class="legend"><span class="blue">下载活跃</span><span class="green">下载等待</span><span class="orange">索引等待</span></div><div id="chart-queue" class="chart" tabindex="0" aria-label="调度队列趋势，左右方向键查看采样"></div></article>
+  </section>
+  <p class="note">图表记录本次页面会话，最多保留 360 个采样点。暂停、后台标签页或断线期间留空；服务重启后重新计算。Web 响应字节不等于 TCP 已确认字节，也不包含浏览器直连 CDN 的流量。</p>
+  <section class="panel"><div class="section-heading"><h2>磁盘缓存</h2><span class="muted" id="cache-capacity">—</span></div><progress id="cache-usage" value="0" max="100" aria-label="磁盘缓存使用比例"></progress><div id="cache-summary" class="facts"></div><div class="table-scroll"><table><caption>当前缓存分层与本次运行淘汰</caption><thead><tr><th>保留等级</th><th>条目</th><th>占用</th><th>正在使用</th><th>淘汰次数</th><th>淘汰字节</th></tr></thead><tbody id="cache-classes"></tbody></table></div><div class="table-scroll"><table><caption>范围读取累计命中（不等同于浏览器图片缓存）</caption><thead><tr><th>优先级</th><th>请求</th><th>完整命中</th><th>读取字节</th><th>命中字节</th><th>字节命中率</th></tr></thead><tbody id="cache-ranges"></tbody></table></div></section>
+  <section class="detail-grid">
+    <article class="panel"><h2>下载与索引队列</h2><div id="queues" class="facts"></div><p class="note">活跃/等待为采样时刻的值；源下载并发和平台 API 限流是不同的调度器。</p></article>
+    <article class="panel"><h2>Web 请求</h2><div id="web-summary" class="facts"></div><p class="note">本次 Web 服务累计，排除状态页、健康检查及静态资源。请求耗时包含整个视频响应的传输时间；取消请求与 HTTP 错误可能重叠。</p></article>
+  </section>
+  <section class="panel"><h2>平台 API</h2><p class="note">次数、失败、重试与等待为本次运行累计。API 耗时包含认证、限流等待及重试。无调用时显示“—”。</p><div class="table-scroll"><table><thead><tr><th>API</th><th>调用</th><th>失败</th><th>重试</th><th>限流等待</th><th>区间调用/s</th><th>区间均值</th><th>累计均值</th><th>P95 ≈</th><th>最大</th></tr></thead><tbody id="api-table"></tbody></table></div></section>
+  <section class="panel"><h2>读取链路延迟</h2><p class="note">各阶段可能重叠，不能相加。P50 / P95 为本次运行的对数桶上界估计，可能略大于实际最大值；区间只计算均值，不对分位数作差。</p><div class="table-scroll"><table><thead><tr><th>阶段</th><th>样本数</th><th>区间均值</th><th>累计均值</th><th>P50 ≈</th><th>P95 ≈</th><th>最大</th></tr></thead><tbody id="latency-table"></tbody></table></div></section>
+  <section class="detail-grid">
+    <article class="panel"><h2>目录缓存与恢复</h2><div id="directory-summary" class="facts"></div></article>
+    <article class="panel"><h2>预读与图片预取</h2><div id="prefetch-summary" class="facts"></div><p class="note">这是共享后端的预取统计；浏览器画廊的内存缓存不在此处计数。</p></article>
+  </section>
+  <details class="panel" open><summary>FUSE 操作与扫描降载</summary><div id="scan-summary" class="facts"></div><div class="table-scroll"><table><thead><tr><th>操作</th><th>累计请求</th><th>前台累计</th><th>后台累计</th><th>前台活跃</th><th>后台活跃</th></tr></thead><tbody id="operations-table"></tbody></table></div></details>
+  <details class="panel"><summary>索引缓存与磁盘保护</summary><div id="disk-summary" class="facts"></div><div class="table-scroll"><table><thead><tr><th>索引类型</th><th>条目</th><th>占用</th><th>正在使用</th><th>超预算降级</th><th>淘汰</th></tr></thead><tbody id="index-table"></tbody></table></div></details>
+  <section class="panel"><h2>运行信息与参数</h2><div id="runtime-summary" class="facts"></div><p class="note">统计只读取共享进程的计数器和内存缓存索引，不发起网盘请求。累计统计重启后归零，已有磁盘缓存继续保留。挂载模式的长期记录位于缓存目录中的 io-stats.jsonl；本页图表不回放该文件。</p></section>
+  <footer>CloudArchive <code>{{.Commit}}</code> · <a href="/browse?parent_id={{.RootID}}">返回文件浏览</a></footer>
+</main>
+</body>
+</html>{{end}}
