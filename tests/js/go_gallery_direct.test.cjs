@@ -3,7 +3,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const fs = require('node:fs');
 
-function setup({count = 5, blobSize = 1, viewport = null, indexPages = null, delayIndex = false, pages = [], delayedPage = false, manualTimers = false, delayedExif = false} = {}) {
+function setup({count = 5, blobSize = 1, viewport = null, resources = null, indexPages = null, delayIndex = false, pages = [], delayedPage = false, manualTimers = false, delayedExif = false} = {}) {
     const documentHandlers = {};
     const element = () => ({dataset: {}, attrs: {}, handlers: {}, listeners: {}, children: [], isConnected: true,
         addEventListener(event, handler) {
@@ -56,6 +56,7 @@ function setup({count = 5, blobSize = 1, viewport = null, indexPages = null, del
     let blobId = 0;
     vm.runInNewContext(fs.readFileSync('mount123/internal/webserve/static/js/zip_gallery.js', 'utf8'), {
         window,
+        CloudImageResources: resources,
         setTimeout: manualTimers ? (fn, delay) => {const id = ++timerID; timers.set(id, {fn, delay}); return id;} : setTimeout,
         clearTimeout: manualTimers ? id => timers.delete(id) : clearTimeout,
         document: {
@@ -88,6 +89,22 @@ function setup({count = 5, blobSize = 1, viewport = null, indexPages = null, del
     return {exif, timers, paging, images, buttons, get, requests, revoked, storage, indexRequests, dispatchClick:target=>(documentHandlers.click||[]).forEach(handler=>handler({target,preventDefault(){}}))};
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
+
+test('resetting diagnostics during an original-cache read cannot make misses negative', async () => {
+    let finish;
+    const {buttons, get, requests} = setup({count: 1, resources: {
+        read: () => new Promise(resolve => {finish = resolve;}),
+    }});
+    get('zip-gallery-diagnostics').open = true;
+    buttons[0].handlers.click();
+    get('zip-gallery-diagnostics-reset').handlers.click();
+    finish({blob: {size: 1}, cached: true, timing: ''});
+    await tick();
+    assert.match(get('zip-gallery-diagnostics-output').textContent, /命中 1 · 未命中 0/);
+    assert.equal(requests.length, 0);
+    get('zip-gallery-close').onclick();
+    await tick();
+});
 
 
 test('Go gallery keeps encoded blobs and only creates an Image for the selected slide', async () => {

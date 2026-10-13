@@ -8,6 +8,7 @@
     const pending = new Map();
     const attempted = new Set();
     const stats = {hits: 0, misses: 0, failures: 0, durations: [], extracts: [], cacheBytes: 0};
+    let statsGeneration = 0;
     // Download requests use cached short-lived URLs and are separate from
     // platform API calls. Keep a generous client-side window for direct-link
     // reads while the API scheduler continues to protect metadata requests.
@@ -202,13 +203,14 @@
         const task = {controller: new AbortController(), priority, thumbOnly:Boolean(ownerSignal), failed:false};
         if (ownerSignal) ownerSignal.addEventListener('abort', () => { if (task.thumbOnly && pending.get(index) === task) { task.controller.abort(); pending.delete(index); } }, {once:true});
         task.promise = (async () => {
-        const started = typeof performance !== 'undefined' ? performance.now() : Date.now(); stats.misses++;
+        const started = typeof performance !== 'undefined' ? performance.now() : Date.now();
+        const statsToken = statsGeneration; stats.misses++;
             try {
                 let blob, timing;
                 if (globalThis.CloudImageResources) {
                     const result = await CloudImageResources.read(item, {signal: task.controller.signal, priority: priority ? 'foreground' : 'background'});
                     blob = result.blob; timing = result.timing;
-                    if (result.cached) { stats.misses--; stats.hits++; }
+                    if (result.cached) { if (statsToken === statsGeneration) stats.misses--; stats.hits++; }
                 } else {
                     const directUrl = directSource(item);
                     // New listings carry separate local/direct URLs. Keep legacy
@@ -441,7 +443,7 @@
         el('debug-toggle')?.setAttribute?.('aria-expanded', String(open));
         if (open) renderDebugOverlay();
     });
-    el('diagnostics-reset')?.addEventListener('click', () => { stats.hits=stats.misses=stats.failures=0; stats.durations=[]; stats.extracts=[]; renderDiagnostics(); });
+    el('diagnostics-reset')?.addEventListener('click', () => { statsGeneration++; stats.hits=stats.misses=stats.failures=0; stats.durations=[]; stats.extracts=[]; renderDiagnostics(); });
     if (el('setting-count')) el('setting-count').value = settings.count;
     if (el('setting-concurrency')) el('setting-concurrency').value = settings.concurrency;
     if (el('setting-budget')) el('setting-budget').value = settings.budget;
