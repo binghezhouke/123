@@ -6,6 +6,7 @@ require (
 	github.com/bodgit/sevenzip v1.6.1
 	github.com/diskfs/go-diskfs v1.9.5-0.20261007191415-864d5cbcf232
 	github.com/hanwen/go-fuse/v2 v2.11.0
+	github.com/klauspost/compress v1.20.3
 	github.com/nwaples/rardecode/v2 v2.2.1
 	github.com/yeka/zip v0.0.0-20231116150916-03d6312748a9
 	golang.org/x/crypto v0.31.0
@@ -21,7 +22,6 @@ require (
 	github.com/bodgit/windows v1.0.1 // indirect
 	github.com/djherbis/times v1.6.0 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/pierrec/lz4/v4 v4.1.26 // indirect
 	github.com/spf13/afero v1.11.0 // indirect
 	github.com/ulikunitz/xz v0.5.15 // indirect
@@ -36,3 +36,6 @@ replace github.com/bodgit/sevenzip => github.com/binghezhouke/sevenzip v1.6.2-0.
 
 // Local fix: iterative expansion of long UDF allocation-descriptor chains.
 replace golift.io/udf => ./third_party/udf
+
+// Maintained fork: correct Deflate checkpoint offsets after stored blocks.
+replace github.com/klauspost/compress => github.com/binghezhouke/compress v0.0.0-20261013082413-68d9ba34d55b

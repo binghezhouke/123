@@ -58,12 +58,12 @@ func (r *nestedVolumeInput) ReadAtContext(ctx context.Context, p []byte, off int
 				var m *member
 				m, err = viewMember(r.parent, r.member)
 				if err == nil {
-					input, reader, err = r.owner.viewMemberInputPrepared(ctx, r.parent, m, password)
+					input, reader, err = r.owner.viewMemberInputPrepared(ctx, r.parent, m, password, true)
 				}
 			}
 			clear(password)
 		} else {
-			input, reader, err = r.owner.viewMemberInput(ctx, r.parent, r.member)
+			input, reader, err = r.owner.viewMemberInput(ctx, r.parent, r.member, true)
 		}
 		r.mu.Lock()
 		closed := r.closed

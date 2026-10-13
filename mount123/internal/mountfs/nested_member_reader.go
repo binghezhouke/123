@@ -28,9 +28,9 @@ func (t *Tree) nestedBlockBytes() int64 {
 }
 
 // nestedMemberReader persists only demanded decompressed blocks. The live
-// decoder and position form a forward continuation point; no codec snapshot is
-// serialized. A backward cache miss (or idle expiry) replays the stream. Solid
-// streams still have to decode their prefix on the first tail read.
+// decoder and position form a forward continuation point. An optional resume
+// source can skip already indexed compressed prefixes after a backward miss or
+// idle expiry; formats without one still replay the prefix.
 // Partial blocks are not full-member CRC verified; they are isolated from the
 // verified full-member cache. The inner parser validates its header CRCs.
 type nestedMemberReader struct {
@@ -45,12 +45,15 @@ type nestedMemberReader struct {
 	size       int64
 	blockBytes int64
 	open       func(context.Context) (io.ReadCloser, error)
-	gate       func(context.Context) (func(), error)
-	stream     io.ReadCloser
-	position   int64
-	idle       *time.Timer
-	poolIdle   bool // Pool generation/timer owns idle expiry for leased readers.
-	closed     atomic.Bool
+	// resume returns a stream starting after the current position and at or
+	// before the target, or nil when no reusable checkpoint is available.
+	resume   func(context.Context, int64, int64) (io.ReadCloser, int64, error)
+	gate     func(context.Context) (func(), error)
+	stream   io.ReadCloser
+	position int64
+	idle     *time.Timer
+	poolIdle bool // Pool generation/timer owns idle expiry for leased readers.
+	closed   atomic.Bool
 }
 
 func (r *nestedMemberReader) blockSize() int64 {
@@ -80,6 +83,7 @@ func (r *nestedMemberReader) Close() error {
 	}
 	r.reset()
 	r.open = nil
+	r.resume = nil
 	return nil
 }
 
@@ -213,6 +217,20 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 			var err error
 			if r.stream != nil && start < r.position {
 				r.reset()
+			}
+			if r.resume != nil && start > r.position {
+				candidate, position, resumeErr := r.resume(r.operation, start, r.position)
+				if resumeErr != nil {
+					return resumeErr
+				}
+				if candidate != nil {
+					if position <= r.position || position > start {
+						_ = candidate.Close()
+						return syscall.EIO
+					}
+					r.reset()
+					r.stream, r.position = candidate, position
+				}
 			}
 			if r.stream == nil {
 				r.stream, err = r.open(r.operation)

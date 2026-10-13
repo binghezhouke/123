@@ -139,7 +139,7 @@ func viewMember(n *nestedArchive, m *member) (*member, error) {
 	return &copy, nil
 }
 
-func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *member) (archiveReaderAt, io.Closer, error) {
+func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *member, indexInput bool) (archiveReaderAt, io.Closer, error) {
 	m, err := viewMember(n, original)
 	if err != nil {
 		return nil, nil, err
@@ -151,10 +151,10 @@ func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *
 		return nil, nil, err
 	}
 	defer clear(password)
-	return t.viewMemberInputPrepared(ctx, n, m, password)
+	return t.viewMemberInputPrepared(ctx, n, m, password, indexInput)
 }
 
-func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m *member, password []byte) (archiveReaderAt, io.Closer, error) {
+func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m *member, password []byte, indexInput bool) (archiveReaderAt, io.Closer, error) {
 	input := viewInput(n)
 	// Password discovery can load cloud metadata through the same admission
 	// queue. Complete it before taking a decoder permit, including on a miss.
@@ -225,8 +225,46 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 		}
 		return stream, nil
 	}}
+	// Child archive inputs commonly reach EOF while parsing their tail index.
+	// Leaf range reads rarely do: leave those on the original decoder instead
+	// of collecting checkpoints that cannot be published without full CRC.
+	if indexInput && n.format == ".zip" && m.method == zip.Deflate && !m.encrypted && m.flags&1 == 0 && m.aes == nil {
+		if points := newZIPDeflateCheckpoints(t.cache, key, int64(m.size), int64(m.compressed)); points != nil {
+			openCheckpoint := func(readCtx context.Context, point *zipDeflateCheckpoint) (io.ReadCloser, error) {
+				// Rebind the local header to this view, never an old index reader.
+				bound := *m
+				bound.reader = &contextZIPReaderAt{source: input, gate: make(chan struct{}, 1)}
+				offset, err := bound.dataOffset(readCtx)
+				if err != nil {
+					return nil, err
+				}
+				if offset < 0 || offset > n.size || m.compressed > uint64(n.size-offset) {
+					return nil, syscall.EIO
+				}
+				return openZIPDeflateCheckpointStream(readCtx, input, &bound, offset, point, points.hooks(readCtx))
+			}
+			r.open = func(ctx context.Context) (io.ReadCloser, error) { return openCheckpoint(ctx, nil) }
+			r.resume = func(ctx context.Context, target, after int64) (io.ReadCloser, int64, error) {
+				point := points.nearest(ctx, target, after)
+				if err := ctx.Err(); err != nil {
+					return nil, 0, err
+				}
+				if point == nil {
+					return nil, 0, nil
+				}
+				stream, err := openCheckpoint(ctx, point)
+				return stream, point.OutputOffset, err
+			}
+		}
+	}
 	if resident, ok := nestedDeflateResidentBytes(n, m); ok {
-		if lease, borrowed := t.nestedDeflatePool.acquire(ctx, key, resident, n, r); borrowed {
+		poolKey := key
+		if indexInput {
+			// Bytes on disk remain shared, but a leaf decoder must not replace
+			// the collector needed by a child archive's header/tail reads.
+			poolKey += ":index-checkpoints"
+		}
+		if lease, borrowed := t.nestedDeflatePool.acquire(ctx, poolKey, resident, n, r); borrowed {
 			return lease, lease, nil
 		}
 	}
@@ -548,7 +586,7 @@ func (t *Tree) openNestedArchiveMember(ctx context.Context, n *nestedArchive, m 
 	if err != nil {
 		return nil, 0, err
 	}
-	input, owned, err := t.viewMemberInput(ctx, n, m)
+	input, owned, err := t.viewMemberInput(ctx, n, m, false)
 	if err != nil {
 		release()
 		return nil, 0, err
