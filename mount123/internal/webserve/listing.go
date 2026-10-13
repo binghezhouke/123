@@ -406,7 +406,7 @@ func (s *Server) handleFileDetail(w http.ResponseWriter, r *http.Request) {
 	if kind.class == "archive" {
 		data.ArchiveHref = "/archive/" + strconv.FormatInt(meta.ID, 10)
 	}
-	data.Breadcrumbs, _ = s.folderNames(ctx, meta.ParentID)
+	data.Breadcrumbs = s.folderPath(ctx, meta.ParentID)
 	s.renderListingPage(w, http.StatusOK, filePageName, data)
 }
 
