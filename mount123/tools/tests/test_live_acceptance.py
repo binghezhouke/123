@@ -533,8 +533,12 @@ class Unit(unittest.TestCase):
     def test_cursor_cycle(self):
         args = SimpleNamespace(max_seconds=10, max_pages=4, max_entries=20, max_page_bytes=4096)
         runner = a.Runner(args)
-        body = json.dumps({"items": [], "total": 0, "complete": False, "next_cursor": "same"}).encode()
-        runner.http = lambda *x: {"status": 200, "content_type": "application/json", "data": a.base64.b64encode(body), "seconds": 0}
+        names = iter(("first", "second"))
+        def response(*args):
+            body = json.dumps({"items": [{"name": next(names)}], "total": 2,
+                               "complete": False, "next_cursor": "same"}).encode()
+            return {"status": 200, "content_type": "application/json", "data": a.base64.b64encode(body), "seconds": 0}
+        runner.http = response
         with self.assertRaises(a.Failure) as failure:
             runner.listing({"kind": "archive", "file_id": 1}, {"path": ""})
         self.assertEqual(failure.exception.code, "cursor_cycle")

@@ -3,6 +3,7 @@
 import argparse
 import base64
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 import errno
 import hashlib
 from html.parser import HTMLParser
@@ -25,6 +26,7 @@ import urllib.request
 
 VERSION = 1
 READ_SIZE = 65536
+MAX_PENDING_RETRIES = 8
 
 # Fixed exporter schema: iostats/{stats,cache,recovery}.go. Inventory, active
 # counts, limits and latency percentiles remain snapshots, never counter deltas.
@@ -178,6 +180,25 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def pending_delay(value):
+    # Never shorten a legitimate server delay and retry early. An excessive
+    # delay fails this bounded acceptance attempt instead of stalling it.
+    if not value:
+        return 1.0
+    value = value.strip()
+    if re.fullmatch(r"[0-9]+", value):
+        delay = float(value)
+    else:
+        need(re.fullmatch(r"[A-Z][a-z]{2}, \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT", value),
+             "invalid_retry_after", "protocol")
+        try:
+            delay = max(0, parsedate_to_datetime(value).timestamp() - time.time())
+        except (ValueError, OverflowError):
+            raise Failure("invalid_retry_after", "protocol")
+    need(math.isfinite(delay), "pending_wait_budget", "budget")
+    return delay
+
+
 def relative(value, empty=False):
     need(isinstance(value, str), "invalid_path", "configuration")
     parts = value.split("/")
@@ -297,6 +318,7 @@ def worker(job):
         data = response.read(job["limit"] + 1)
         need(len(data) <= job["limit"], "response_byte_budget", "budget")
         return {"status": response.status, "bytes": len(data),
+                "retry_after": response.headers.get("Retry-After", ""),
                 "content_range": response.headers.get("Content-Range", ""),
                 "content_type": response.headers.get("Content-Type", ""),
                 "encoding": response.headers.get("Content-Encoding", "identity"),
@@ -389,6 +411,7 @@ class Runner:
     def listing(self, case, step):
         names, cursor, seen, pages = [], "", set(), []
         total = None
+        pending_retries = 0
         for _ in range(self.args.max_pages):
             if case["kind"] == "archive":
                 query = urllib.parse.urlencode({"path": step["path"], "cursor": cursor})
@@ -397,6 +420,49 @@ class Runner:
                 query = urllib.parse.urlencode({"parent_id": case["parent_id"], "offset": cursor or "0"})
                 path = "/browse?" + query
             response = self.http(path, self.args.max_page_bytes)
+            pending_count, pending_wait = 0, 0.0
+            while True:
+                if response["status"] == 202:
+                    need(case["kind"] == "archive", "listing_status", "web")
+                    need("application/json" in response["content_type"], "invalid_pending_response", "protocol")
+                    try:
+                        value = json.loads(base64.b64decode(response["data"]))
+                    except (ValueError, TypeError):
+                        raise Failure("invalid_pending_response", "protocol")
+                    need(isinstance(value, dict) and value.get("code") == "archive_index_pending" and
+                         value.get("retryable") is True and value.get("items") == [] and
+                         value.get("complete") is False and value.get("next_cursor") == cursor and
+                         type(value.get("total")) is int and value["total"] == 0,
+                         "invalid_pending_response", "protocol")
+                elif response["status"] == 200 and case["kind"] == "archive":
+                    need("application/json" in response["content_type"], "listing_not_json", "protocol")
+                    value = json.loads(base64.b64decode(response["data"]))
+                    if not (isinstance(value, dict) and value.get("complete") is False and value.get("items") == []):
+                        break
+                    need(type(value.get("total")) is int and value["total"] >= 0,
+                         "invalid_pagination", "protocol")
+                    need(isinstance(value.get("next_cursor"), str), "invalid_cursor", "protocol")
+                    # A verified empty prefix can advance the scan cursor even
+                    # though it produced no directory page. Empty cursor keeps
+                    # the preceding position, matching the Web growing state.
+                    cursor = value["next_cursor"] or cursor
+                    query = urllib.parse.urlencode({"path": step["path"], "cursor": cursor})
+                    path = f'/archive/{case["file_id"]}/entries?{query}'
+                else:
+                    break
+                pending_retries += 1
+                need(pending_retries <= MAX_PENDING_RETRIES, "pending_retry_budget", "budget")
+                delay = pending_delay(response.get("retry_after", ""))
+                remaining = self.deadline - time.monotonic()
+                need(delay < remaining, "suite_deadline", "budget")
+                # Check the next request's budgets before sleeping. Pending
+                # or growing responses are operations and bytes, not pages.
+                need(self.operations < self.args.max_operations, "operation_budget", "budget")
+                self.reserve(self.args.max_page_bytes + 1)
+                time.sleep(delay)
+                pending_count += 1
+                pending_wait += delay
+                response = self.http(path, self.args.max_page_bytes)
             need(response["status"] == 200, "listing_status", "web")
             body = base64.b64decode(response["data"])
             if case["kind"] == "archive":
@@ -426,13 +492,16 @@ class Runner:
             need(len(set(batch)) == len(batch) and not set(batch).intersection(names), "duplicate_entries", "pagination")
             names.extend(batch)
             need(len(names) <= self.args.max_entries, "entry_budget", "budget")
-            pages.append({"count": len(batch), "seconds": response["seconds"], "complete": complete})
+            page = {"count": len(batch), "seconds": response["seconds"], "complete": complete}
+            if pending_count:
+                page.update(pending_responses=pending_count, pending_wait_seconds=round(pending_wait, 6))
+            pages.append(page)
             if not next_cursor:
                 need(complete, "incomplete_listing", "pagination")
                 if total is not None:
                     need(total == len(names), "total_mismatch", "pagination", advertised=total, actual=len(names))
                 return names, pages
-            need(next_cursor not in seen, "cursor_cycle", "pagination")
+            need(next_cursor not in seen and (not batch or next_cursor != cursor), "cursor_cycle", "pagination")
             seen.add(next_cursor)
             cursor = next_cursor
         raise Failure("page_budget", "budget")
@@ -601,6 +670,7 @@ def main(argv=None):
              not url.query and not url.fragment and url.path in ("", "/"), "invalid_base_url", "configuration")
         for key in ("timeout", "max_seconds", "max_bytes", "max_page_bytes", "max_pages", "max_entries", "max_operations", "repeats"):
             need(getattr(args, key) > 0, "invalid_budget", "configuration")
+        need(math.isfinite(args.timeout) and math.isfinite(args.max_seconds), "invalid_budget", "configuration")
         raw = Path(args.manifest).read_bytes()
         all_cases = validate_manifest(json.loads(raw), args.max_depth)
         need(set(args.case).issubset({c["name"] for c in all_cases}), "unknown_case", "configuration")

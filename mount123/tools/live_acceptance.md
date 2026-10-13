@@ -23,6 +23,8 @@ python3 -m unittest discover -s mount123/tools/tests -v
 
 `browse` 每个 case 只比较一个云目录；脚本跟随页面的分页 offset，不递归进入孩子。档案脚本跟随 JSON cursor，要求最终 `complete=true`、无重复成员和 cursor 循环、枚举数量等于最终 `total`，并比较 Web/FUSE 的完整名称集合。`complete` 表示索引完成，**不**代表当前页已覆盖全部目录。巨型固实 7z 可以只列已知浅层目录，不配置 `reads`，也不要猜测深层路径。
 
+档案目录返回 HTTP 202 时，仅接受 `code=archive_index_pending`、`retryable=true`、空 `items`、`complete=false`、`total=0` 和未改变的当前 cursor。HTTP 200 的空 `items`、`complete=false` 则表示索引仍在增长，要求 `total` 为非负整数、`next_cursor` 为字符串；非空新 cursor 可推进扫描位置。两种状态均保留先前收到的行，等待后重试，不占 `--max-pages`，每个目录共享最多 8 次重试。每次 HTTP 仍计入操作和响应字节预算，等待也计入 `--max-seconds`。合法 `Retry-After` 秒数或 HTTP 日期决定等待时间，缺失时等待 1 秒；超过剩余全局时间时直接报预算失败，不提前重试，非法头报协议失败。带成员行的重复 cursor 仍报分页错误。400/403 等实际错误、坏 202 和预算耗尽均不会被等待逻辑掩盖。
+
 ## 运行及恢复
 
 ```sh
@@ -88,6 +90,8 @@ localhost/loopback 请求单独禁用环境代理；内网 HTTP 和远程 HTTPS 
 深度来自人工 manifest 声明，不能替代服务自身的递归策略。响应字节预算**不等于网盘下载预算**：档案索引、固实解压、后台预取可能在服务内读取远多于 64 KiB，终止客户端也不能保证服务立即停止后台工作。选择事先已知代价的小样本；不要在未评估的 GB 级固实包上配置成员读取。脚本不自动全盘发现、不递归树扫描、不批量下载。缓存统计可供事后评估实际下载量，无法提供源端硬限额。
 
 所有可能阻塞的操作在独立进程组中运行。超时杀死进程组并回收子进程；如果 Linux FUSE I/O 处于不可中断状态，SIGKILL 也可能暂时无法回收。此时记录 `worker_unreaped` 和 PID，立即停止整套验收，不再累积阻塞子进程。脚本不为了清理这种内核状态而重启或卸载服务。
+
+`--timeout` 和 `--max-seconds` 必须为有限正数。成功目录页可额外记录 `pending_responses` 和 `pending_wait_seconds`，分别表示该页的等待响应数及按服务端要求等待的秒数；不保存 `Retry-After` 原文、pending 正文或 cursor。
 
 ## 结果解释与尚未覆盖项
 
