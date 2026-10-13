@@ -50,6 +50,8 @@ type apiEndpoint struct {
 	latency                                             duration
 }
 
+// ObserveAPI records one completed logical API call. Its latency includes
+// authentication, rate-limit waits, HTTP attempts, and retry backoff.
 func (t *Tracker) ObserveAPI(category APIEndpoint, latency time.Duration, success bool) {
 	if category >= APIEndpointCount {
 		category = APIOther
@@ -208,6 +210,8 @@ type DurationSummary struct {
 	MaxNanos   *uint64 `json:"max_nanos"`
 }
 
+// APIEndpointSummary is idle until activity is recorded. Latency remains
+// unknown until a logical call completes, including calls that return errors.
 type APIEndpointSummary struct {
 	Status        string          `json:"status"`
 	Requests      uint64          `json:"requests"`
@@ -451,6 +455,9 @@ func (t *Tracker) Snapshot() Snapshot {
 	for i := range t.api {
 		a := &t.api[i]
 		out := APIEndpointSummary{Status: "measured", Requests: a.requests.Load(), Successes: a.successes.Load(), Errors: a.errors.Load(), Retries: a.retries.Load(), ThrottleWaits: a.throttleWaits.Load(), Latency: a.latency.snapshot()}
+		if out.Requests == 0 && out.Retries == 0 && out.ThrottleWaits == 0 {
+			out.Status = "idle"
+		}
 		switch APIEndpoint(i) {
 		case APIList:
 			s.APIProfile.List = out

@@ -112,3 +112,18 @@ func TestSnapshotScanStateIsExplicitAndBounded(t *testing.T) {
 		t.Fatalf("scan state = %+v", got)
 	}
 }
+
+func TestAPIProfileIdleAndCompletedCalls(t *testing.T) {
+	stats := New()
+	idle := stats.Snapshot().APIProfile
+	for _, got := range []APIEndpointSummary{idle.List, idle.FileInfo, idle.DownloadURL, idle.AccessToken, idle.Other} {
+		if got.Status != "idle" || got.Requests != 0 || got.Latency.Status != "unknown" || got.Latency.Samples != nil || got.Latency.TotalNanos != nil {
+			t.Fatalf("unobserved endpoint = %+v", got)
+		}
+	}
+	stats.ObserveAPI(APIList, 12*time.Millisecond, false)
+	got := stats.Snapshot().APIProfile.List
+	if got.Status != "measured" || got.Requests != 1 || got.Errors != 1 || got.Successes != 0 || got.Latency.Samples == nil || *got.Latency.Samples != 1 || got.Latency.TotalNanos == nil || *got.Latency.TotalNanos != uint64(12*time.Millisecond) {
+		t.Fatalf("completed failed call = %+v", got)
+	}
+}

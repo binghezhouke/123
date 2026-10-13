@@ -404,6 +404,10 @@ func (c *Client) getJSON(ctx context.Context, endpoint string, query url.Values,
 }
 
 func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query url.Values, payload []byte, out any) (err error) {
+	// One observation covers the logical call, including authentication, local
+	// rate-limit waits, all HTTP attempts, and retry backoff.
+	started := time.Now()
+	defer func() { c.observeAPI(endpoint, started, err == nil) }()
 	const maxReadRetries = 4
 	const maxThrottleRetries = 4
 	const maxCompletionRetries = 5
@@ -415,7 +419,6 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 	defer cancel()
 	readRetries, throttleRetries, completionRetries, authRetried := 0, 0, 0, false
 	for {
-		attemptStarted := time.Now()
 		token, err := c.accessToken(requestCtx)
 		if err != nil {
 			return err
@@ -452,7 +455,6 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				continue
 			}
 			message := "panapi: request failed: " + safeError(err.Error(), c.config)
-			c.observeAPI(endpoint, attemptStarted, false)
 			return &faults.Error{Kind: faults.Network, Message: message, Retryable: isTransientTransportError(err)}
 		}
 		data, readErr := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
@@ -462,6 +464,9 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 				return requestCtx.Err()
 			}
 			if readOnly && (faults.IsTransient(readErr) || errors.Is(readErr, io.EOF) || errors.Is(readErr, io.ErrUnexpectedEOF)) && readRetries < maxReadRetries {
+				if c.stats != nil {
+					c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+				}
 				readRetries++
 				if err := waitCompletionRetry(requestCtx, readRetries); err != nil {
 					return err
@@ -474,6 +479,9 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			return &faults.Error{Kind: faults.InvalidResponse, Message: "panapi: could not read API response"}
 		}
 		if resp.StatusCode == http.StatusUnauthorized && !authRetried && c.config.AccessToken == "" {
+			if c.stats != nil {
+				c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+			}
 			authRetried = true
 			c.invalidateTokenIf(token)
 			continue
@@ -508,16 +516,17 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			continue
 		}
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			c.observeAPI(endpoint, attemptStarted, false)
 			return statusErr
 		}
 		var envelope apiEnvelope
 		if err := json.Unmarshal(data, &envelope); err != nil {
-			c.observeAPI(endpoint, attemptStarted, false)
 			return errors.New("panapi: malformed API response")
 		}
 		if envelope.Code != 0 {
 			if envelope.Code == http.StatusUnauthorized && !authRetried && c.config.AccessToken == "" {
+				if c.stats != nil {
+					c.stats.AddAPIRetry(apiProfileCategory(endpoint))
+				}
 				authRetried = true
 				c.invalidateTokenIf(token)
 				continue
@@ -564,7 +573,6 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 			if msg == "" {
 				return &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: API error code %d", envelope.Code), Retryable: apiCodeRetryable(envelope.Code)}
 			}
-			c.observeAPI(endpoint, attemptStarted, false)
 			return &faults.Error{Kind: apiCodeKind(envelope.Code), Message: fmt.Sprintf("panapi: API error code %d: %s", envelope.Code, msg), Retryable: apiCodeRetryable(envelope.Code)}
 		}
 		if len(envelope.Data) == 0 || string(envelope.Data) == "null" {
@@ -573,7 +581,6 @@ func (c *Client) requestJSON(ctx context.Context, method, endpoint string, query
 		if err := json.Unmarshal(envelope.Data, out); err != nil {
 			return errors.New("panapi: malformed API data")
 		}
-		c.observeAPI(endpoint, attemptStarted, true)
 		return nil
 	}
 }
@@ -698,6 +705,7 @@ func (c *Client) fetchToken(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.token != "" && time.Now().Before(c.expires.Add(-time.Minute)) {
+		completed = true
 		return c.token, nil
 	}
 	payload, _ := json.Marshal(map[string]string{"clientID": c.config.ClientID, "clientSecret": c.config.ClientSecret})
