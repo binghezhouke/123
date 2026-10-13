@@ -3,6 +3,7 @@ package mountfs
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -12,6 +13,44 @@ import (
 type countedNestedStream struct {
 	*bytes.Reader
 	decoded *int64
+}
+
+type nestedFinalErrorStream struct {
+	*bytes.Reader
+	err error
+}
+
+func (r nestedFinalErrorStream) Read(p []byte) (int, error) {
+	if r.Len() == 0 {
+		return 0, r.err
+	}
+	return r.Reader.Read(p)
+}
+func (r nestedFinalErrorStream) Close() error { return nil }
+
+func TestNestedMemberRejectsFinalChecksumError(t *testing.T) {
+	cache, err := storage.NewCache(t.TempDir(), 4<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cache.Close()
+	checksumErr := errors.New("member checksum mismatch")
+	opens := 0
+	r := &nestedMemberReader{ctx: context.Background(), cache: cache, key: "bad-checksum", size: 16,
+		gate: func(context.Context) (func(), error) { return func() {}, nil },
+		open: func(context.Context) (io.ReadCloser, error) {
+			opens++
+			return nestedFinalErrorStream{bytes.NewReader(make([]byte, 16)), checksumErr}, nil
+		}}
+	defer r.Close()
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := r.ReadAt(make([]byte, 16), 0); !errors.Is(err, checksumErr) {
+			t.Fatalf("attempt %d: checksum failure must prevent publication, got %v", attempt, err)
+		}
+	}
+	if opens != 2 {
+		t.Fatalf("failed checksum was reused from cache: opens=%d", opens)
+	}
 }
 
 func (s countedNestedStream) Read(p []byte) (int, error) {

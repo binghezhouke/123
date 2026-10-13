@@ -210,6 +210,17 @@ func (c *Cache) Open(key string) (*Handle, error) {
 	return c.open(key, false)
 }
 
+// OpenCached pins a complete object of the requested size, or returns nil on
+// a miss. It never starts or waits for a fill, so callers can check disk hits
+// before joining a decoder admission queue.
+func (c *Cache) OpenCached(key string, size int64) (*Handle, error) {
+	h, err := c.existing(key, size)
+	if h != nil {
+		h.promoteOnRead = true
+	}
+	return h, err
+}
+
 // OpenArchiveIndex opens a persisted archive index without treating its
 // metadata read as user-content heat. Legacy entries are classified under the
 // bounded index share when possible; otherwise they remain ordinary entries.
