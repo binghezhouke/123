@@ -15,6 +15,11 @@ import (
 
 const archiveIndexFormatVersion = 1
 
+// Earlier sevenzip parsers miscounted compact CRC tables and could persist
+// incorrect member CRCs. Rebuild only old 7z metadata, once on access. Archive
+// bytes remain immutable; this is a schema migration, not content expiration.
+const sevenZIPCRCMetadataVersion = 1
+
 // Checkpoint version is separate from the completed index format. Older
 // checkpoints recorded only an HTTP high-water mark and cannot be resumed
 // safely, while completed indexes remain backwards compatible.
@@ -33,15 +38,16 @@ func (b *boundedJSONBuffer) Write(p []byte) (int, error) {
 }
 
 type archiveIndexDTO struct {
-	Version        int                    `json:"version"`
-	Kind           string                 `json:"kind"`
-	ArchiveSize    int64                  `json:"archive_size"`
-	IdentityDigest string                 `json:"identity_digest"`
-	Entries        []archiveIndexEntryDTO `json:"entries"`
-	Complete       bool                   `json:"complete"`
-	ScanOffset     int64                  `json:"scan_offset,omitempty"`
-	ScanVersion    int                    `json:"scan_version,omitempty"`
-	ScanOrdinal    int                    `json:"scan_ordinal,omitempty"`
+	Version         int                    `json:"version"`
+	Kind            string                 `json:"kind"`
+	ArchiveSize     int64                  `json:"archive_size"`
+	IdentityDigest  string                 `json:"identity_digest"`
+	Entries         []archiveIndexEntryDTO `json:"entries"`
+	Complete        bool                   `json:"complete"`
+	ScanOffset      int64                  `json:"scan_offset,omitempty"`
+	ScanVersion     int                    `json:"scan_version,omitempty"`
+	ScanOrdinal     int                    `json:"scan_ordinal,omitempty"`
+	SevenCRCVersion int                    `json:"seven_crc_version,omitempty"`
 }
 
 type archiveIndexEntryDTO struct {
@@ -106,6 +112,10 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 		_ = t.cache.Remove(cacheKey)
 		return nil, false
 	}
+	if kind == ".7z" && dto.SevenCRCVersion != sevenZIPCRCMetadataVersion {
+		_ = t.cache.Remove(cacheKey)
+		return nil, false
+	}
 	// Nested snapshots require an explicit completion marker. Older outer
 	// indexes predate it; checkpoints retain their separate prefix semantics.
 	if strings.HasPrefix(cacheKey, "archive-index-nested-dto-v1:") {
@@ -152,6 +162,9 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 		return
 	}
 	dto := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: size, IdentityDigest: identity, Complete: true, ScanOffset: size}
+	if kind == ".7z" {
+		dto.SevenCRCVersion = sevenZIPCRCMetadataVersion
+	}
 	var walk func(*zipDir, string)
 	walk = func(dir *zipDir, prefix string) {
 		keys := make([]string, 0, len(dir.dirs))

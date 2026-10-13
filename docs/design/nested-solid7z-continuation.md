@@ -60,6 +60,21 @@ proof. This change does not revalidate previously persisted partial blocks.
 The pool holds parent references until its stream closes. Tree cancellation
 closes idle state and interrupts borrowers; active state closes on release.
 
+### CRC metadata upgrade
+
+A single-file 7z group with a declared group CRC inherits that value and has no
+slot in the compact substream CRC table. The parser counts only explicit slots;
+file headers and copied layouts use the same mapping. A declared zero CRC still
+counts as present. Synthetic archives exercise both group orders, bitmap byte
+boundaries and absent digests, with a 7-Zip CLI-validated fixture covering the
+public Service through Store and Deflate ZIP parents.
+
+Older parsers could save incorrect file CRCs even when parsing succeeded. The
+`seven_crc_version` field therefore rejects older persisted 7z indexes on first
+access, for both top-level and nested archives. Rebuilt indexes are reusable
+across restarts. This one-time metadata format migration neither expires archive
+content nor removes ZIP/RAR indexes, source ranges or decompressed body blocks.
+
 ## Controlled acceptance
 
 A synthetic three-member fixture has one 1 MiB-dictionary LZMA2 solid group;
