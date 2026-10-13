@@ -262,15 +262,10 @@ func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescript
 }
 
 func (n *Node) cachedZIP(ctx context.Context, source *storage.Remote, archive *archiveDescriptor) (*zipIndex, *preparedArchiveInput, error) {
-	var password []byte
-	if _, ok := n.tree.api.(PasswordAPI); ok {
-		if value, err := n.tree.archivePassword(ctx, archive); err == nil {
-			password = value
-		}
-	}
-	defer clear(password)
+	// Match getZIPPreparedWithProgress: listing/status never needs a body
+	// password, and polling must not start unrelated cloud password I/O.
 	identity := archiveIdentity(source, archive)
-	scope, passwordIdentity := n.tree.diskCacheScope(), n.tree.passwordTag(archive, password)
+	scope, passwordIdentity := n.tree.diskCacheScope(), n.tree.passwordTag(archive, nil)
 	key := "zip:" + scope + ":" + identity + ":" + passwordIdentity
 	lookup := func(key string) *zipIndex {
 		n.tree.mu.Lock()

@@ -276,6 +276,16 @@ func TestZIPConcurrentAdaptersJoinOneMemberFill(t *testing.T) {
 			if _, err := service.ListArchive(ctx, 77, ""); err != nil {
 				t.Fatal(err)
 			}
+			if encryption != "plain" {
+				// Password discovery is lazy and uses metadata admission too. This
+				// test holds all admission to isolate the shared decoder, so finish
+				// that prerequisite explicitly instead of relying on listing it.
+				password, err := node.passwordForMember(ctx)
+				clear(password)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
 			// Hold decoder admission after metadata is ready. Both open handles then
 			// coexist while their shared producer is unable to finish.
 			release, err := root.tree.acquireBuild(ctx)

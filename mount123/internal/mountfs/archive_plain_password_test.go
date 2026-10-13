@@ -106,13 +106,8 @@ func testClear7zMembersIgnoreUnrelatedPasswordFailures(t *testing.T, fixture str
 					}
 					got = content
 				}
-				// ZIP currently discovers a password once for its existing index
-				// identity; failure is ignored. The 7z child must add no discovery.
-				wantReads := 0
-				if parent != "root" {
-					wantReads = 1
-				}
-				if !bytes.Equal(got, solid7zReusePayload(0)[:64<<10]) || reject.reads != wantReads {
+				// Clear ZIP parents and clear 7z children need no password I/O.
+				if !bytes.Equal(got, solid7zReusePayload(0)[:64<<10]) || reject.reads != 0 {
 					t.Fatalf("clear member mismatched or discovered unrelated passwords: reads=%d", reject.reads)
 				}
 			})

@@ -840,16 +840,10 @@ func (t *Tree) getZIPWithProgress(ctx context.Context, source *storage.Remote, s
 }
 
 func (t *Tree) getZIPPreparedWithProgress(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor, prepared *preparedArchiveInput, progress func(int64), preparedReady ...func(int64)) (*zipIndex, error) {
-	var password []byte
-	if archive != nil {
-		if _, ok := t.api.(PasswordAPI); ok {
-			if value, err := t.archivePassword(ctx, archive); err == nil {
-				password = value
-			}
-		}
-	}
-	defer clear(password)
-	passwordIdentity := t.passwordTag(archive, password)
+	// Supported ZIP central directories are plaintext. Their immutable index
+	// identity is independent of a body password; encrypted reads resolve it
+	// later, without holding index admission or invalidating this metadata.
+	passwordIdentity := t.passwordTag(archive, nil)
 	var restored *zipIndex
 	if prepared == nil && archive != nil && t.cache != nil {
 		if err := ctx.Err(); err != nil {
@@ -869,7 +863,7 @@ func (t *Tree) getZIPPreparedWithProgress(ctx context.Context, source *storage.R
 			}
 		}
 		t.mu.Unlock()
-		singleKey := t.archiveIndexCacheKey(".zip", singleIdentity, archive, password)
+		singleKey := t.archiveIndexCacheKey(".zip", singleIdentity, archive, nil)
 		digest := t.cache.StableDigest("archive-index-identity-v1", singleIdentity)
 		if idx, ok := t.loadPersistentArchiveIndex(ctx, singleKey, ".zip", size, digest); ok {
 			prepared = &preparedArchiveInput{input: source, size: size, identity: singleIdentity, layout: archiveVolumeLayout{kind: archiveSingle, sizes: []int64{size}}, durable: true}
@@ -891,7 +885,7 @@ func (t *Tree) getZIPPreparedWithProgress(ctx context.Context, source *storage.R
 	if len(preparedReady) != 0 && preparedReady[0] != nil {
 		preparedReady[0](prepared.size)
 	}
-	cacheKey := t.archiveIndexCacheKey(".zip", identity, archive, password)
+	cacheKey := t.archiveIndexCacheKey(".zip", identity, archive, nil)
 	identityDigest := ""
 	if t.cache != nil {
 		identityDigest = t.cache.StableDigest("archive-index-identity-v1", identity)
