@@ -629,7 +629,7 @@ func (s *Server) folderPath(ctx context.Context, id int64) []breadcrumb {
 			break
 		}
 		visited[current] = true
-		meta, err := s.service.File(ctx, current)
+		meta, err := s.service.DirectoryMetadata(ctx, current)
 		if err != nil {
 			s.logger.Printf("webserve: breadcrumb %d: %v", current, err)
 			break

@@ -31,6 +31,34 @@ type cloudDirectory struct {
 
 var cloudDirectoryGeneration atomic.Uint64
 
+// cachedDirectoryFile reuses the metadata already present in parent listings.
+// The files are sorted by ID when built (including disk restores). Only fresh
+// snapshots are eligible; keep this navigation shortcut separate from Detail,
+// whose additional fields may be needed when opening file content.
+func (t *Tree) cachedDirectoryFile(id int64) (panapi.File, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	now := time.Now()
+	var found panapi.File
+	var newest uint64
+	var hit *metaItem
+	for _, item := range t.meta {
+		directory, ok := item.value.(*cloudDirectory)
+		if !ok || (!item.expires.IsZero() && !now.Before(item.expires)) {
+			continue
+		}
+		i := sort.Search(len(directory.files), func(i int) bool { return directory.files[i].ID >= id })
+		if i < len(directory.files) && directory.files[i].ID == id && directory.files[i].IsDir && directory.generation > newest {
+			found, newest, hit = directory.files[i], directory.generation, item
+		}
+	}
+	if hit != nil {
+		t.seq++
+		hit.seq = t.seq
+	}
+	return found, hit != nil
+}
+
 func (n *Node) listCloud(ctx context.Context) (map[string]*entry, error) {
 	directory, err := n.tree.cloudDirectory(ctx, n.item.cloud.ID)
 	if err != nil {

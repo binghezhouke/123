@@ -77,6 +77,18 @@ func (s *Service) ListDirectory(ctx context.Context, parentID int64) ([]FileEntr
 	return entries, nil
 }
 
+// DirectoryMetadata resolves navigation metadata from a cached parent listing
+// before falling back to the shared file-detail cache and API.
+func (s *Service) DirectoryMetadata(ctx context.Context, fileID int64) (*panapi.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if file, ok := s.tree.cachedDirectoryFile(fileID); ok {
+		return &file, nil
+	}
+	return s.File(ctx, fileID)
+}
+
 // File returns the cloud metadata for one file ID.
 func (s *Service) File(ctx context.Context, fileID int64) (*panapi.File, error) {
 	file, err := s.tree.detailCached(ctx, fileID)

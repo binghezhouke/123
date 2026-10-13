@@ -10,8 +10,9 @@ import (
 )
 
 type serviceAPI struct {
-	files   map[int64][]panapi.File
-	details map[int64]panapi.File
+	files       map[int64][]panapi.File
+	details     map[int64]panapi.File
+	detailCalls int
 }
 
 func (a *serviceAPI) List(_ context.Context, id int64) ([]panapi.File, error) {
@@ -30,6 +31,7 @@ func (a *serviceAPI) Infos(_ context.Context, ids []int64) ([]panapi.File, error
 	return out, nil
 }
 func (a *serviceAPI) Detail(_ context.Context, id int64) (panapi.File, error) {
+	a.detailCalls++
 	f, ok := a.details[id]
 	if !ok {
 		return panapi.File{}, syscall.ENOENT
@@ -62,6 +64,11 @@ func TestServiceListsDirectoryAndResolvesFile(t *testing.T) {
 	}
 	if len(entries) != 2 || entries[0].Name != "photo.jpg" || !entries[1].IsDir {
 		t.Fatalf("ListDirectory = %#v", entries)
+	}
+	if dir, err := svc.DirectoryMetadata(context.Background(), 2); err != nil || dir.Name != "dir" {
+		t.Fatalf("DirectoryMetadata = %#v, err=%v", dir, err)
+	} else if api.detailCalls != 0 {
+		t.Fatalf("DirectoryMetadata should reuse listing, detail calls=%d", api.detailCalls)
 	}
 	file, err := svc.File(context.Background(), 1)
 	if err != nil || file == nil || file.Name != "photo.jpg" {
