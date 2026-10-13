@@ -214,11 +214,15 @@ func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescript
 				shared = &archivePasswordFile{f.ID, f.Size, f.Version}
 			}
 		}
-		if own != nil {
-			return own, fmt.Sprintf("password:%d:%s:%d:%d:%s:sidecar:%d:%s", archive.id, archive.version, archive.size, dirID, archive.name, own.id, own.version), nil
+		selected := own
+		if selected == nil {
+			selected = shared
 		}
-		if shared != nil {
-			return shared, fmt.Sprintf("password:%d:%s:%d:shared:%d:%s:g%d", archive.id, archive.version, archive.size, shared.id, shared.version, directory.generation), nil
+		if selected != nil {
+			// Selection remains archive-specific, but the selected sidecar's
+			// protected contents are shared across archives. A directory refresh
+			// changes the key even if the sidecar has no API content version.
+			return selected, fmt.Sprintf("password:sidecar:%d:%s:%d:%d:g%d", selected.id, selected.version, selected.size, dirID, directory.generation), nil
 		}
 		if dirID == 0 {
 			break
