@@ -390,6 +390,14 @@ func validName(name string) bool {
 // loadMeta coalesces each key before taking a build slot. Waiters never hold a
 // slot, so cancellation retries cannot deadlock the build semaphore.
 func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, build func(context.Context) (any, int64, error)) (any, error) {
+	return t.loadMetaWithBuildSlot(ctx, key, ttl, true, build)
+}
+
+// Raw source initialization is I/O, governed by API and download scheduling.
+// It cannot take a build slot: a decoder already owning one can lazily need a
+// cold volume, including when every build slot is occupied by such decoders.
+// Cache flights, cancellation and metadata accounting remain identical.
+func (t *Tree) loadMetaWithBuildSlot(ctx context.Context, key string, ttl time.Duration, useBuildSlot bool, build func(context.Context) (any, int64, error)) (any, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	stop := context.AfterFunc(t.ctx, cancel)
 	defer func() { stop(); cancel() }()
@@ -430,10 +438,15 @@ func (t *Tree) loadMeta(ctx context.Context, key string, ttl time.Duration, buil
 		var value any
 		var size int64
 		var err error
-		release, err := t.acquireBuild(ctx)
+		var release func()
+		if useBuildSlot {
+			release, err = t.acquireBuild(ctx)
+		}
 		if err == nil {
 			value, size, err = build(ctx)
-			release()
+			if release != nil {
+				release()
+			}
 		}
 		if err == nil {
 			err = ctx.Err()
@@ -710,7 +723,7 @@ func (t *Tree) cloudSource(ctx context.Context, f *panapi.File, ttl time.Duratio
 	if immutable {
 		metaKey = "archive-source:" + key
 	}
-	value, err := t.loadMeta(ctx, metaKey, ttl, func(ctx context.Context) (any, int64, error) {
+	value, err := t.loadMetaWithBuildSlot(ctx, metaKey, ttl, false, func(ctx context.Context) (any, int64, error) {
 		resolve := func(ctx context.Context) (string, error) { return t.api.DownloadURL(ctx, f.ID) }
 		var r *storage.Remote
 		var err error
