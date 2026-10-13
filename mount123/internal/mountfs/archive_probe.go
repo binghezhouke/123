@@ -368,12 +368,30 @@ send:
 	record := &archiveProbeRecord{Version: 1, ParentID: parentID, Created: time.Now(), Results: results}
 	persistence := t.saveProbeRecord(ctx, record)
 	if t.probeDone != nil {
-		t.probeDone(parentID)
+		if fresh, err := t.cloudDirectory(ctx, parentID); err == nil {
+			t.probeDone(parentID, directory, fresh)
+		}
 	}
 	t.probeMu.Lock()
 	job.status.Persistence = persistence
 	t.probeMu.Unlock()
 	finish("complete")
+}
+
+// Only instantiated cloud directories can hold kernel dentries. Notify each
+// matching parent after publishing aliases, using the actual pre-scan view.
+func (n *Node) notifyProbeDirectoryChange(parentID int64, previous, fresh *cloudDirectory) {
+	if n == nil || n.Operations() == nil {
+		return
+	}
+	if n.isCloudDirectory() && n.item.cloud.ID == parentID {
+		n.notifyCloudDirectoryChange(".", &metaItem{value: previous}, fresh)
+	}
+	for _, child := range n.Children() {
+		if directory, ok := child.Operations().(*Node); ok && directory.isCloudDirectory() {
+			directory.notifyProbeDirectoryChange(parentID, previous, fresh)
+		}
+	}
 }
 
 func (n *Node) probeFile(ctx context.Context, f panapi.File) archiveProbeResult {

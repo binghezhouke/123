@@ -132,7 +132,7 @@ type Tree struct {
 	probeMu           sync.Mutex
 	probeRecordMu     sync.Mutex
 	probeJobs         map[int64]*archiveProbeJob
-	probeDone         func(parentID int64)
+	probeDone         func(parentID int64, previous, fresh *cloudDirectory)
 	probeActive       int
 	probeGate         chan struct{}
 	prefetch          *imagePrefetch
@@ -340,11 +340,7 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 		t.prefetch = newImagePrefetch(t)
 	}
 	root := &Node{tree: t, item: &entry{directory: true, cloud: &panapi.File{ID: rootID, IsDir: true}}, root: true}
-	t.probeDone = func(parentID int64) {
-		if fresh, err := t.cloudDirectory(context.Background(), parentID); err == nil {
-			root.notifyCloudDirectoryChange(".", &metaItem{value: fresh}, fresh)
-		}
-	}
+	t.probeDone = root.notifyProbeDirectoryChange
 	return root
 }
 

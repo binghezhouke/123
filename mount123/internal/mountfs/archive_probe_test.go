@@ -304,11 +304,34 @@ func TestProbeAliasAndControlNameCollisions(t *testing.T) {
 	}
 }
 
+type subdirectoryProbeAPI struct{ *probeAPI }
+
+func (a *subdirectoryProbeAPI) List(ctx context.Context, parentID int64) ([]panapi.File, error) {
+	if parentID == 0 {
+		return []panapi.File{{ID: 10, Name: "folder", IsDir: true}}, nil
+	}
+	return a.probeAPI.List(ctx, parentID)
+}
+
 func TestActualFUSEArchiveProbe(t *testing.T) {
 	if os.Getenv("MOUNT123_FUSE_TEST") != "1" {
 		t.Skip("set MOUNT123_FUSE_TEST=1")
 	}
+	for _, subdirectory := range []bool{false, true} {
+		name := "root"
+		if subdirectory {
+			name = "subdirectory"
+		}
+		t.Run(name, func(t *testing.T) { testActualFUSEArchiveProbe(t, subdirectory) })
+	}
+}
+
+func testActualFUSEArchiveProbe(t *testing.T, subdirectory bool) {
+	t.Helper()
 	root, api, _ := probeFixture(t, "NO.001", probeZIP(t), nil)
+	if subdirectory {
+		root = New(root.tree.ctx, &subdirectoryProbeAPI{probeAPI: api}, root.tree.cache, 0, true)
+	}
 	point := t.TempDir()
 	hour := time.Hour
 	server, err := goFS.Mount(point, root, &goFS.Options{MountOptions: fuse.MountOptions{Options: []string{"ro"}}, EntryTimeout: &hour, AttrTimeout: &hour, NegativeTimeout: &hour})
@@ -321,8 +344,19 @@ func TestActualFUSEArchiveProbe(t *testing.T) {
 		}
 		server.Wait()
 	}()
+	directory := point
+	relativeDirectory := "."
+	probeNode := root
+	if subdirectory {
+		directory = filepath.Join(point, "folder")
+		relativeDirectory = "folder"
+		if _, err := os.Stat(directory); err != nil {
+			t.Fatal(err)
+		}
+		probeNode = root.GetChild("folder").Operations().(*Node)
+	}
 	for _, name := range []string{probeControlName, probeStatusControlName} {
-		if _, err := os.Stat(filepath.Join(point, name)); err != nil {
+		if _, err := os.Stat(filepath.Join(directory, name)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -337,10 +371,10 @@ func TestActualFUSEArchiveProbe(t *testing.T) {
 	if api.resolves.Load() != 0 {
 		t.Fatal("stat/find triggered source I/O")
 	}
-	if _, err := os.Stat(filepath.Join(point, "NO.001.zip")); !errors.Is(err, syscall.ENOENT) {
+	if _, err := os.Stat(filepath.Join(directory, "NO.001.zip")); !errors.Is(err, syscall.ENOENT) {
 		t.Fatalf("pre-scan alias=%v", err)
 	}
-	f, err := os.Open(filepath.Join(point, probeControlName))
+	f, err := os.Open(filepath.Join(directory, probeControlName))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,23 +382,23 @@ func TestActualFUSEArchiveProbe(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.Close()
-	if status := waitProbeStopped(t, root); status.Detected != 1 {
+	if status := waitProbeStopped(t, probeNode); status.Detected != 1 {
 		t.Fatalf("status=%+v", status)
 	}
-	if data, err := os.ReadFile(filepath.Join(point, probeStatusControlName)); err != nil || !strings.Contains(string(data), `"state":"complete"`) {
+	if data, err := os.ReadFile(filepath.Join(directory, probeStatusControlName)); err != nil || !strings.Contains(string(data), `"state":"complete"`) {
 		t.Fatalf("status=%s %v", data, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(point, "NO.001.zip", "hello.txt")); err != nil || string(data) != "probe fixture" {
+	if data, err := os.ReadFile(filepath.Join(directory, "NO.001.zip", "hello.txt")); err != nil || string(data) != "probe fixture" {
 		t.Fatalf("alias blocked by negative dentry: %q %v", data, err)
 	}
-	if err := os.WriteFile(filepath.Join(point, probeControlName), []byte("start"), 0600); !errors.Is(err, syscall.EROFS) {
+	if err := os.WriteFile(filepath.Join(directory, probeControlName), []byte("start"), 0600); !errors.Is(err, syscall.EROFS) {
 		t.Fatalf("write=%v", err)
 	}
 	api.files[0].Version = "v2"
-	if _, err := root.RefreshDirectory(context.Background(), "."); err != nil {
+	if _, err := root.RefreshDirectory(context.Background(), relativeDirectory); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(point, "NO.001.zip")); !errors.Is(err, syscall.ENOENT) {
+	if _, err := os.Stat(filepath.Join(directory, "NO.001.zip")); !errors.Is(err, syscall.ENOENT) {
 		t.Fatalf("kernel retained obsolete alias: %v", err)
 	}
 }
