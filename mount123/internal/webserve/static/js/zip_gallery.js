@@ -204,38 +204,45 @@
         task.promise = (async () => {
         const started = typeof performance !== 'undefined' ? performance.now() : Date.now(); stats.misses++;
             try {
-                const directUrl = directSource(item);
-                // New listings carry separate local/direct URLs. Keep legacy
-                // pages whose only URL already has ?direct=1 working as
-                // direct-first until they are refreshed.
-                const legacyDirect = Boolean(directUrl && !item.dataset.directUrl);
-                const localUrl = item.dataset.directUrl ? source(item) : (legacyDirect ? proxySource(source(item)) : source(item));
-                const useDirect = Boolean(directUrl && (!priority || legacyDirect));
-                const headers = priority ? {} : {'X-Priority': 'background'};
-                let response, responseWasDirect = false;
-                if (useDirect) {
-                    try {
-                        response = await fetch(directUrl, {signal: task.controller.signal, cache: 'force-cache'});
-                        if (!response.ok) throw new Error('直链读取失败');
-                        responseWasDirect = true;
-                    } catch (error) {
-                        if (error.name === 'AbortError') throw error;
+                let blob, timing;
+                if (globalThis.CloudImageResources) {
+                    const result = await CloudImageResources.read(item, {signal: task.controller.signal, priority: priority ? 'foreground' : 'background'});
+                    blob = result.blob; timing = result.timing;
+                    if (result.cached) { stats.misses--; stats.hits++; }
+                } else {
+                    const directUrl = directSource(item);
+                    // New listings carry separate local/direct URLs. Keep legacy
+                    // pages whose only URL already has ?direct=1 working as
+                    // direct-first until they are refreshed.
+                    const legacyDirect = Boolean(directUrl && !item.dataset.directUrl);
+                    const localUrl = item.dataset.directUrl ? source(item) : (legacyDirect ? proxySource(source(item)) : source(item));
+                    const useDirect = Boolean(directUrl && (!priority || legacyDirect));
+                    const headers = priority ? {} : {'X-Priority': 'background'};
+                    let response, responseWasDirect = false;
+                    if (useDirect) {
+                        try {
+                            response = await fetch(directUrl, {signal: task.controller.signal, cache: 'force-cache'});
+                            if (!response.ok) throw new Error('直链读取失败');
+                            responseWasDirect = true;
+                        } catch (error) {
+                            if (error.name === 'AbortError') throw error;
+                            response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
+                        }
+                    } else {
                         response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
                     }
-                } else {
-                    response = await fetch(localUrl, {signal: task.controller.signal, headers, cache: 'force-cache'});
+                    if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
+                    const contentType = response.headers.get('Content-Type') || '';
+                    // CDN direct links sometimes use application/octet-stream or
+                    // omit Content-Type. The browser can still decode the blob;
+                    // only reject a non-image response from our archive proxy,
+                    // where an HTML/error body must not enter the image cache.
+                    if (!response.ok || (!responseWasDirect && !contentType.startsWith('image/'))) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
+                    timing = response.headers.get('Server-Timing') || '';
+                    blob = await response.blob();
                 }
-                if (response.status === 401) throw new Error('解压密码已失效或不正确，请关闭预览并重新输入密码');
-                const contentType = response.headers.get('Content-Type') || '';
-                // CDN direct links sometimes use application/octet-stream or
-                // omit Content-Type. The browser can still decode the blob;
-                // only reject a non-image response from our archive proxy,
-                // where an HTML/error body must not enter the image cache.
-                if (!response.ok || (!responseWasDirect && !contentType.startsWith('image/'))) throw new Error(`图片读取失败（HTTP ${response.status}），请重试或下载原图`);
-                const timing = response.headers.get('Server-Timing') || '';
                 const extract = timing.match(/(?:^|,)\s*extract;dur=([\d.]+)/i);
                 if (extract) { stats.extracts.push(Number(extract[1])); if (stats.extracts.length > 100) stats.extracts.shift(); }
-                const blob = await response.blob();
                 if (task.controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
                 const url = URL.createObjectURL(blob);
                 const exif = typeof readImageExif === 'function' ? await readImageExif(blob).catch(() => null) : null;
@@ -391,7 +398,14 @@
         document.querySelector('[data-gallery-image], .zip-image')?.click();
     });
     el('prev').onclick = () => show(selected - 1); el('next').onclick = () => show(selected + 1);
-    el('retry').onclick = () => { const old = cache.get(selected); if (old) { URL.revokeObjectURL(old.url); stats.cacheBytes -= old.size; cache.delete(selected); } attempted.delete(selected); show(selected); };
+    el('retry').onclick = () => {
+        const index = selected, token = generation, old = cache.get(index);
+        if (old) { URL.revokeObjectURL(old.url); stats.cacheBytes -= old.size; cache.delete(index); }
+        attempted.delete(index);
+        if (globalThis.CloudImageResources && items()[index]) {
+            CloudImageResources.forget(items()[index]).then(() => { if (token === generation && dialog.open) show(index); });
+        } else show(index);
+    };
     el('close').onclick = () => dialog.close();
     el('thumb-toggle')?.addEventListener('click', () => { const rail = el('thumbs'); rail.hidden = !rail.hidden; el('thumb-toggle').setAttribute('aria-expanded', String(!rail.hidden)); if (!rail.hidden) renderThumbs(); else { thumbController?.abort(); thumbQueue=[]; } });
     el('jump-form')?.addEventListener('submit', async event => {

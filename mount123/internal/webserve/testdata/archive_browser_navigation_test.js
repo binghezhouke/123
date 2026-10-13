@@ -25,7 +25,7 @@ const document = {
         callbacks.push(fn); listeners.set(type, callbacks);
     },
 };
-const context = vm.createContext({document, URL, window: {location: {href: 'http://test/archive/7'}},
+const context = vm.createContext({document, URL, window: {location: {href: 'http://test/archive/7'}, addEventListener() {}},
     localStorage: {getItem() { return 'icons'; }, setItem() {}},
 });
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), context);

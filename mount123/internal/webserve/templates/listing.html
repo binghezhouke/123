@@ -273,6 +273,10 @@ document.addEventListener('DOMContentLoaded', function () {
     const viewportImages = new CloudViewportImages(document.querySelector('.browse-files'), previewDebugOutput);
     const renderPreviewDebug = () => viewportImages.render();
     let previewGeneration = 0;
+    let releaseImage = null;
+    const clearImage = () => { releaseImage?.(); releaseImage = null; };
+    document.addEventListener('cloudarchive:before-navigate', clearImage);
+    window.addEventListener('pagehide', clearImage);
     const remuxURL = url => {
         try {
             const target = new URL(url, window.location.href);
@@ -282,6 +286,7 @@ document.addEventListener('DOMContentLoaded', function () {
     };
 
     function showPreview(item) {
+        clearImage();
         const id = item.dataset.fileId;
         const name = item.dataset.favoriteName || '';
         const isDir = item.dataset.fileType === 'folder';
@@ -315,9 +320,6 @@ document.addEventListener('DOMContentLoaded', function () {
             stage.append(icon);
         } else if (kind === 'image') {
             const img = document.createElement('img');
-            // Prefetch stores only a client-side thumbnail. The selected item
-            // still loads the original preview URL in the right pane.
-            img.src = previewUrl;
             img.alt = name;
             img.onload = () => {
                 if (img.naturalWidth && img.naturalHeight) {
@@ -326,6 +328,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 }
             };
             stage.append(img);
+            if (globalThis.CloudImageResources) releaseImage = CloudImageResources.display(img, item);
+            else img.src = previewUrl;
         } else if (kind === 'video') {
             const video = document.createElement('video');
             video.controls = true;

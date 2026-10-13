@@ -37,8 +37,13 @@
             return target.href;
         } catch (_) { return `${url}${url.includes('?') ? '&' : '?'}transcode=mp4`; }
     };
+    let releaseImage = null;
+    const clearImage = () => { releaseImage?.(); releaseImage = null; };
+    document.addEventListener('cloudarchive:before-navigate', clearImage);
+    window.addEventListener('pagehide', clearImage);
     function show(item) {
         if (!item) return;
+        clearImage();
         const key = memberKey(item);
         document.querySelectorAll('.file-item.is-selected, .file-item.keyboard-selected').forEach(node => {
             node.classList.remove('is-selected', 'keyboard-selected');
@@ -65,9 +70,11 @@
             return;
         }
         if (kind === 'image') {
-            const image = document.createElement('img'); image.alt = name; image.src = url;
+            const image = document.createElement('img'); image.alt = name;
             image.onload = () => { meta.innerHTML += `<div>分辨率：${image.naturalWidth} × ${image.naturalHeight}</div>`; };
             stage.append(image);
+            if (globalThis.CloudImageResources) releaseImage = CloudImageResources.display(image, item);
+            else image.src = url;
         } else if (kind === 'video') {
             const video = document.createElement('video');
             video.controls = true; video.preload = 'metadata';

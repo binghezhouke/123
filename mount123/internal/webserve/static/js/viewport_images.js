@@ -156,22 +156,28 @@
                 // Prefer the platform direct URL so this fetch can reuse the
                 // browser's URL cache without another API call. Fall back to
                 // the same-origin proxy when direct access is unavailable.
-                const sources = [item.dataset.directUrl, item.dataset.url].filter(Boolean);
-                let response, lastError;
-                for (const source of sources) {
-                    try {
-                        response = await fetch(source, {cache:'force-cache', priority:'low', signal:job.controller.signal});
-                        if (!response.ok) throw Error(`HTTP ${response.status}`);
-                        break;
-                    } catch (error) {
-                        if (error.name === 'AbortError') throw error;
-                        lastError = error;
-                        response = null;
+                let original;
+                if (globalThis.CloudImageResources) {
+                    original = (await CloudImageResources.read(item, {signal: job.controller.signal, priority: 'background'})).blob;
+                } else {
+                    const sources = [item.dataset.directUrl, item.dataset.url].filter(Boolean);
+                    let response, lastError;
+                    for (const source of sources) {
+                        try {
+                            response = await fetch(source, {cache:'force-cache', priority:'low', signal:job.controller.signal});
+                            if (!response.ok) throw Error(`HTTP ${response.status}`);
+                            break;
+                        } catch (error) {
+                            if (error.name === 'AbortError') throw error;
+                            lastError = error;
+                            response = null;
+                        }
                     }
+                    if (!response) throw (lastError || Error('图片读取失败'));
+                    original = await response.blob();
                 }
-                if (!response) throw (lastError || Error('图片读取失败'));
-                const original = await response.blob();
-                blob = await thumbnail(original);
+                try { blob = await thumbnail(original); }
+                catch (error) { await globalThis.CloudImageResources?.forget(item); throw error; }
                 await this.store.put(key, blob);
             }
             if (this.closed || !this.near.has(item) || job.controller.signal.aborted || (this.jobs.get(item) && this.jobs.get(item) !== job)) return;
