@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/nwaples/rardecode/v2"
 )
@@ -60,6 +61,7 @@ type archiveIndexDTO struct {
 type archiveIndexEntryDTO struct {
 	Path                  string                   `json:"path"`
 	Name                  string                   `json:"name,omitempty"`
+	RawName               []byte                   `json:"raw_name,omitempty"`
 	Directory             bool                     `json:"directory,omitempty"`
 	Ordinal               int                      `json:"ordinal,omitempty"`
 	Size                  uint64                   `json:"size,omitempty"`
@@ -203,6 +205,11 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 			}
 			encrypted := m.encrypted
 			item := archiveIndexEntryDTO{SevenHeadersEncrypted: m.sevenHeadersEncrypted, Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize, RARGroupStartable: m.rarGroupStartable}
+			if kind == ".zip" && (!utf8.ValidString(m.name) || strings.ContainsRune(m.name, utf8.RuneError)) {
+				// encoding/json replaces invalid UTF-8 in strings. Byte slices use
+				// base64, preserving the raw header identity independently of Path.
+				item.Name, item.RawName = "", []byte(m.name)
+			}
 			if kind == ".7z" {
 				defined := m.sevenCRCDefined
 				item.SevenCRCDefined = &defined
@@ -324,14 +331,27 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 				dir = child
 				continue
 			}
-			if dir.dirs[part] != nil || record.Name == "" || record.Size >= math.MaxInt64 || record.Ordinal < 0 || record.Ordinal >= t.opts.MaxZIPEntries {
+			rawName := record.Name
+			if kind == ".zip" {
+				if record.RawName != nil {
+					if len(record.RawName) == 0 || len(record.RawName) > math.MaxUint16 {
+						return nil, errors.New("invalid persisted ZIP raw name")
+					}
+					rawName = string(record.RawName)
+				} else if strings.ContainsRune(rawName, utf8.RuneError) {
+					// Older JSON strings may already have collapsed distinct byte
+					// names. Rebuild just this derived index from the immutable ZIP.
+					return nil, errors.New("persisted ZIP raw name may be lossy")
+				}
+			}
+			if dir.dirs[part] != nil || rawName == "" || record.Size >= math.MaxInt64 || record.Ordinal < 0 || record.Ordinal >= t.opts.MaxZIPEntries {
 				return nil, errors.New("invalid persisted archive member")
 			}
 			memberFormat := kind
 			if kind == ".zip" {
 				memberFormat = ""
 			}
-			m := &member{name: record.Name, format: memberFormat, ordinal: record.Ordinal, headerOffset: record.HeaderOffset, modifiedTime: record.ModifiedTime, method: record.Method, flags: record.Flags, crc: record.CRC, compressed: record.Compressed, size: record.Size, encrypted: record.Flags&1 != 0}
+			m := &member{displayPath: record.Path, name: rawName, format: memberFormat, ordinal: record.Ordinal, headerOffset: record.HeaderOffset, modifiedTime: record.ModifiedTime, method: record.Method, flags: record.Flags, crc: record.CRC, compressed: record.Compressed, size: record.Size, encrypted: record.Flags&1 != 0}
 			if record.Encrypted != nil {
 				m.encrypted = *record.Encrypted || m.encrypted
 			} else if kind == ".rar" || kind == ".7z" {

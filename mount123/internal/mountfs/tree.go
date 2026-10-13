@@ -205,6 +205,7 @@ type member struct {
 	file                  *zip.File
 	reader                *contextZIPReaderAt
 	name                  string
+	displayPath           string // ZIP visible path; legacy web member cache identity.
 	headerOffset          int64
 	modifiedTime          uint16
 	method                uint16
@@ -1161,7 +1162,7 @@ func buildZIPWithProgress(ctx context.Context, t *Tree, source archiveReaderAt, 
 				if !f.Mode().IsRegular() || f.UncompressedSize64 > math.MaxInt64 {
 					return nil, errors.New("unsupported ZIP entry type or size")
 				}
-				m := &member{format: ".zip", ordinal: fileIndex, file: f, reader: adapter, name: f.Name, headerOffset: localOffsets[fileIndex], modifiedTime: f.ModifiedTime, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
+				m := &member{displayPath: name, format: ".zip", ordinal: fileIndex, file: f, reader: adapter, name: f.Name, headerOffset: localOffsets[fileIndex], modifiedTime: f.ModifiedTime, method: f.Method, flags: f.Flags, crc: f.CRC32, compressed: f.CompressedSize64, size: f.UncompressedSize64, encrypted: f.Flags&1 != 0}
 				if hasAES {
 					m.aes = &aesInfo
 					m.method = aesInfo.method
@@ -1451,10 +1452,13 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		defer clear(password)
 		tag := n.tree.passwordTag(n.item.archive, password)
-		key := n.tree.diskCacheScope() + ":" + identity + ":.zip:encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
+		key := n.tree.rootZIPMemberKey(identity, full, tag)
 		streamPassword := append([]byte(nil), password...)
 		if growing, err := n.tree.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
 			defer clear(streamPassword)
+			if copied, err := n.tree.copyLegacyZIPMember(fillCtx, identity, full, tag, w); copied || err != nil {
+				return err
+			}
 			release, err := n.tree.acquireBuild(fillCtx)
 			if err != nil {
 				return err
@@ -1478,6 +1482,9 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		clear(streamPassword)
 		cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
+			if copied, err := n.tree.copyLegacyZIPMember(ctx, identity, full, tag, w); copied || err != nil {
+				return err
+			}
 			release, err := n.tree.acquireBuild(ctx)
 			if err != nil {
 				return err
@@ -1515,8 +1522,11 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		return n.newArchiveInputHandle(idx.prepared.input, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
 	}
-	key := n.tree.diskCacheScope() + ":" + identity + ":.zip:member:" + m.name + fmt.Sprintf(":%08x:%d", m.crc, m.size)
+	key := n.tree.rootZIPMemberKey(identity, full, "")
 	if growing, err := n.tree.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
+		if copied, err := n.tree.copyLegacyZIPMember(fillCtx, identity, full, "", w); copied || err != nil {
+			return err
+		}
 		release, err := n.tree.acquireBuild(fillCtx)
 		if err != nil {
 			return err
@@ -1535,6 +1545,9 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		return &handle{growing: growing, closer: growing, size: m.size}, n.tree.growingCacheOpenFlags(growing), 0
 	}
 	cached, err := n.tree.cache.Acquire(ctx, key, int64(m.size), func(ctx context.Context, w io.Writer) error {
+		if copied, err := n.tree.copyLegacyZIPMember(ctx, identity, full, "", w); copied || err != nil {
+			return err
+		}
 		release, err := n.tree.acquireBuild(ctx)
 		if err != nil {
 			return err

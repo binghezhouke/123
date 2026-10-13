@@ -348,8 +348,11 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 			return nil, 0, err
 		}
 		defer clear(password)
-		key := s.tree.diskCacheScope() + ":" + identity + ":.zip:encrypted-member:" + memberPath + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, s.tree.passwordTag(archive, password))
+		key := s.tree.rootZIPMemberKey(identity, m, s.tree.passwordTag(archive, password))
 		fill, err := s.memberFillWithPassword(key, password, func(fillCtx context.Context, w io.Writer, pw []byte) error {
+			if copied, err := s.tree.copyLegacyZIPMember(fillCtx, identity, m, s.tree.passwordTag(archive, pw), w); copied || err != nil {
+				return err
+			}
 			release, releaseErr := s.tree.acquireBuild(fillCtx)
 			if releaseErr != nil {
 				return releaseErr
@@ -388,8 +391,11 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 	if m.method != zip.Deflate {
 		return nil, 0, syscall.EOPNOTSUPP
 	}
-	key := s.tree.diskCacheScope() + ":" + identity + ":.zip:member:" + memberPath + fmt.Sprintf(":%08x:%d", m.crc, m.size)
+	key := s.tree.rootZIPMemberKey(identity, m, "")
 	handle, err := s.acquireMemberReader(ctx, key, int64(m.size), true, func(fillCtx context.Context, w io.Writer) error {
+		if copied, err := s.tree.copyLegacyZIPMember(fillCtx, identity, m, "", w); copied || err != nil {
+			return err
+		}
 		release, releaseErr := s.tree.acquireBuild(fillCtx)
 		if releaseErr != nil {
 			return releaseErr

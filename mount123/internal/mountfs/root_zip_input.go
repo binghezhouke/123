@@ -3,6 +3,7 @@ package mountfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"syscall"
@@ -32,6 +33,41 @@ func rootZIPMemberIdentity(prepared *preparedArchiveInput) string {
 		}
 	}
 	return prepared.identity
+}
+
+// Both adapters key every new fill by the raw indexed member name. Display
+// paths may differ through GBK/CP437 decoding or Unicode Path extra fields.
+// Keep the released FUSE key so its verified content remains reusable.
+func (t *Tree) rootZIPMemberKey(identity string, m *member, passwordTag string) string {
+	prefix := t.diskCacheScope() + ":" + identity + ":.zip:member:"
+	suffix := fmt.Sprintf(":%08x:%d", m.crc, m.size)
+	if m.flags&1 != 0 {
+		prefix = t.diskCacheScope() + ":" + identity + ":.zip:encrypted-member:"
+		suffix += ":" + passwordTag
+	}
+	return prefix + m.name + suffix
+}
+
+// Called inside the canonical cache fill, before taking a decoder permit.
+// Preserve completed legacy web content by copying it locally into the shared
+// key. All callers still join the same flight, even during migration/eviction.
+func (t *Tree) copyLegacyZIPMember(ctx context.Context, identity string, m *member, passwordTag string, w io.Writer) (bool, error) {
+	if m.displayPath == "" || m.displayPath == m.name {
+		return false, nil
+	}
+	legacy := *m
+	legacy.name = m.displayPath
+	cached, err := t.cache.OpenCached(t.rootZIPMemberKey(identity, &legacy, passwordTag), int64(m.size))
+	if err != nil || cached == nil {
+		return false, err
+	}
+	defer cached.Close()
+	reader := archiveRequestReader{ctx: ctx, input: archivePlainInput{reader: cached}}
+	count, err := io.Copy(w, io.NewSectionReader(reader, 0, int64(m.size)))
+	if err == nil && count != int64(m.size) {
+		err = io.ErrUnexpectedEOF
+	}
+	return true, err
 }
 
 // Synthetic index bytes are already cached metadata. Only reads delegated to
