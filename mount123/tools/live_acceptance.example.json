@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "name": "split-outer-first",
+      "kind": "archive",
+      "order": "outer-first",
+      "file_id": 1,
+      "mount_path": "acceptance/small-outer.7z",
+      "directories": [
+        {"path": "", "archive_depth": 0, "count": 3},
+        {"path": "inner.7z.001", "archive_depth": 1, "count": 1},
+        {"path": "inner.7z.001/photos", "archive_depth": 1, "count": 261}
+      ],
+      "reads": [
+        {
+          "path": "inner.7z.001/photos/001.jpg",
+          "archive_depth": 1,
+          "size": 131072,
+          "magic_hex": "ffd8ff"
+        }
+      ]
+    },
+    {
+      "name": "split-direct-control",
+      "kind": "archive",
+      "order": "direct",
+      "file_id": 2,
+      "mount_path": "acceptance/untouched-control.7z",
+      "directories": [
+        {"path": "inner.7z.001", "archive_depth": 1, "count": 1},
+        {"path": "inner.7z.001/photos", "archive_depth": 1, "count": 163}
+      ]
+    },
+    {
+      "name": "three-layer-policy",
+      "kind": "archive",
+      "order": "outer-first",
+      "file_id": 3,
+      "mount_path": "acceptance/small-multilayer.7z",
+      "directories": [
+        {"path": "", "archive_depth": 0},
+        {"path": "inner.7z", "archive_depth": 1},
+        {"path": "inner.7z/deeper.rar", "archive_depth": 2}
+      ]
+    },
+    {
+      "name": "cloud-directory-pages",
+      "kind": "browse",
+      "order": "direct",
+      "parent_id": 4,
+      "mount_path": "acceptance/folder",
+      "directories": [{"path": "", "archive_depth": 0, "count": 260}]
+    }
+  ]
+}
