@@ -179,6 +179,8 @@ func nestedEncryptedInput(input archiveReaderAt) bool {
 	switch r := input.(type) {
 	case *nestedAESCopyInput:
 		return true
+	case *nestedRARStoredInput:
+		return nestedEncryptedInput(r.input)
 	case *nestedVolumeInput:
 		r.mu.Lock()
 		input := r.input

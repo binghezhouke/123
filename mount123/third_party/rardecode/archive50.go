@@ -370,6 +370,7 @@ func (a *archive50) parseFileHeader(h *blockHeader50) (*fileBlockHeader, error) 
 	flags = h.data.uvarint() // compression flags
 	f.Solid = flags&file5CompSolid > 0
 	f.arcSolid = a.solid
+	f.arcMulti = a.multi
 	method := (flags >> 7) & 7 // compression method (0 == none)
 	if f.first && method != 0 {
 		unpackver := flags & file5CompAlgorithm
@@ -411,6 +412,9 @@ func (a *archive50) parseFileHeader(h *blockHeader50) (*fileBlockHeader, error) 
 			err = a.parseFileEncryptionRecord(e.data, f)
 		case 2:
 			// TODO: hash
+			// Range reads cannot claim validation for a hash the native parser
+			// does not implement. Preserve the sequential decoder's behavior.
+			f.unsupportedHash = true
 		case 3:
 			err = a.parseFilePrecisionTimeRecord(&e.data, f)
 		case 4: // version

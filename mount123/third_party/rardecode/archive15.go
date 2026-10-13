@@ -248,6 +248,7 @@ func (a *archive15) parseFileHeader(h *blockHeader15) (*fileBlockHeader, error) 
 	f.last = h.flags&fileSplitAfter == 0
 
 	f.Solid = h.flags&fileSolid > 0
+	f.arcMulti = a.multi
 	f.arcSolid = a.solid
 	f.Encrypted = h.flags&fileEncrypted > 0
 	f.HeaderEncrypted = a.encrypted

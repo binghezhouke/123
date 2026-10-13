@@ -82,20 +82,22 @@ func (b *readBuf) uvarint() uint64 {
 // Files may comprise one or more file blocks.
 // Solid files retain decode tables and dictionary from previous solid files in the archive.
 type fileBlockHeader struct {
-	first     bool             // first block in file
-	last      bool             // last block in file
-	arcSolid  bool             // archive is solid
-	dataOff   int64            // offset to data for file block in archive volume
-	packedOff int64            // offset to data in packed file
-	blocknum  int              // number for current block in file
-	volnum    int              // archive volume number
-	winSize   int64            // decode window size
-	hash      func() hash.Hash // hash used for file checksum
-	hashKey   []byte           // optional hmac key to be used calculate file checksum
-	sum       []byte           // expected checksum for file contents
-	decVer    int              // decoder to use for file
-	key       []byte           // key for AES, non-empty if file encrypted
-	iv        []byte           // iv for AES, non-empty if file encrypted
+	first           bool             // first block in file
+	last            bool             // last block in file
+	arcSolid        bool             // archive is solid
+	arcMulti        bool             // archive declares multiple volumes
+	dataOff         int64            // offset to data for file block in archive volume
+	packedOff       int64            // offset to data in packed file
+	blocknum        int              // number for current block in file
+	volnum          int              // archive volume number
+	winSize         int64            // decode window size
+	hash            func() hash.Hash // hash used for file checksum
+	hashKey         []byte           // optional hmac key to be used calculate file checksum
+	unsupportedHash bool             // declared extra hash has no native checksum implementation
+	sum             []byte           // expected checksum for file contents
+	decVer          int              // decoder to use for file
+	key             []byte           // key for AES, non-empty if file encrypted
+	iv              []byte           // iv for AES, non-empty if file encrypted
 	FileHeader
 }
 

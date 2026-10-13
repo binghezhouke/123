@@ -159,7 +159,8 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 	// Password discovery can load cloud metadata through the same admission
 	// queue. Complete it before taking a decoder permit, including on a miss.
 	canMapZIP := n.format == ".zip" && !m.encrypted && m.flags&1 == 0 && m.method == zip.Store && m.compressed == m.size
-	if n.format == ".7z" || canMapZIP {
+	canMapRAR := n.format == ".rar" && !m.encrypted && m.rarLocator != nil && m.rarLocator.Direct()
+	if n.format == ".7z" || canMapZIP || canMapRAR {
 		operation, release, e := t.acquireNestedDecode(ctx)
 		if e != nil {
 			return nil, nil, e
@@ -185,6 +186,15 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 			return nil, nil, syscall.EIO
 		}
 		return archiveOffsetInput{input: input, start: offset, size: int64(m.size)}, nil, nil
+	}
+	if canMapRAR {
+		direct, ok, e := nestedRARStoredMemberReader(ctx, input, n.size, m, password)
+		if e != nil {
+			return nil, nil, e
+		}
+		if ok {
+			return direct, direct, nil
+		}
 	}
 	blockBytes := t.nestedBlockBytes()
 	identity, _ := json.Marshal(struct {
