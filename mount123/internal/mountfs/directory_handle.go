@@ -126,7 +126,7 @@ func (h *directoryHandle) Readdirent(context.Context) (*fuse.DirEntry, syscall.E
 	h.cursor++
 	name := h.names[h.cursor-1]
 	mode := uint32(fuse.S_IFREG)
-	if item := h.resolve(name); item != nil && item.directory {
+	if item := h.resolve(name); item != nil && (item.directory || isExpandableArchiveMember(item)) {
 		mode = fuse.S_IFDIR
 	}
 	return &fuse.DirEntry{Name: name, Mode: mode, Off: uint64(h.cursor)}, 0
@@ -158,6 +158,13 @@ func (h *directoryHandle) Lookup(ctx context.Context, name string, out *fuse.Ent
 	e := resolve(name)
 	if e == nil {
 		return nil, syscall.ENOENT
+	}
+	if isExpandableArchiveMember(e) {
+		// READDIRPLUS must not cache the unexpanded member as a file or as
+		// a directory still backed by its outer archive. A failed plus lookup
+		// leaves nodeid=0: Linux keeps the dirent without caching an inode or
+		// a negative lookup. The later explicit Node.Lookup expands it.
+		return nil, syscall.EAGAIN
 	}
 	return parent.inodeForEntry(ctx, e, out, false), 0
 }

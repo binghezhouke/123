@@ -350,12 +350,16 @@ func nestedIndexFromMembers(members []archiveMember, policy nestedArchivePolicy)
 	return idx, nil
 }
 
-func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
+func isExpandableArchiveMember(e *entry) bool {
 	if e == nil || e.member == nil || e.nested != nil {
-		return e, nil
+		return false
 	}
 	kind := archiveKind(e.member.name)
-	if kind != ".7z" && kind != ".rar" {
+	return kind == ".7z" || kind == ".rar"
+}
+
+func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
+	if !isExpandableArchiveMember(e) {
 		return e, nil
 	}
 	if n.item == nil {
