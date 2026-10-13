@@ -13,6 +13,10 @@
     // both copies in sync, while using the same class as the regular Finder
     // keyboard navigator so the visible icon gets the established highlight.
     const memberKey = item => item?.dataset.memberId || item?.dataset.favoriteUrl || '';
+    // This controller survives partial navigation back to a cloud directory.
+    // Outer archives are cloud files, while nested archives are folder rows;
+    // both must remain navigable, including archives detected without a suffix.
+    const isContainer = item => item.dataset.fileType === 'folder' || item.dataset.kind === '压缩包';
     const typeOf = name => {
         const ext = (name.split('.').pop() || '').toLowerCase();
         if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp'].includes(ext)) return 'image';
@@ -49,7 +53,7 @@
         });
         const name = item.dataset.favoriteName || '';
         const kind = typeOf(name);
-        const isFolder = item.dataset.fileType === 'folder';
+        const isFolder = isContainer(item);
         const url = item.dataset.url || item.dataset.favoriteUrl || '#';
         empty.hidden = true; title.hidden = false; title.textContent = name;
         stage.hidden = false; stage.replaceChildren(); actions.hidden = false; open.href = item.dataset.favoriteUrl || url;
@@ -98,7 +102,7 @@
         const item = event.target.closest('.file-item');
         if (!item || event.target.closest('.favorite-marker')) return;
         show(item);
-        if (item.dataset.fileType !== 'folder') event.preventDefault();
+        if (!isContainer(item)) event.preventDefault();
     }, true);
     document.addEventListener('file:keyboard-selected', event => {
         const item = event.detail?.item;
