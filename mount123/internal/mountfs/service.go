@@ -252,6 +252,7 @@ func (s *Service) listArchive(ctx context.Context, fileID int64, memberPath stri
 // stream through the shared growing cache;
 // plain ZIP Store members map directly onto the remote file instead.
 func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPath string) (io.ReaderAt, int64, error) {
+	memberPath = strings.Trim(memberPath, "/")
 	if file, fileErr := s.tree.archiveFileMetadata(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
 		return s.OpenISOMember(ctx, fileID, memberPath)
 	}
@@ -259,6 +260,22 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	defer clear(password)
 	if err != nil {
 		return nil, 0, err
+	}
+	// A clear 7z header can still describe encrypted body streams.
+	// Discover only when the selected group needs it, before creating the
+	// root identity. Plain reads must not depend on unrelated password files.
+	if archive.kind() == ".7z" && len(password) == 0 {
+		needsPassword, err := s.tree.root7zReadNeedsPassword(ctx, source, archive, idx, memberPath)
+		if err != nil {
+			return nil, 0, err
+		}
+		if needsPassword {
+			password, err = s.tree.otherPassword(ctx, archive)
+			if err != nil {
+				return nil, 0, err
+			}
+			defer clear(password)
+		}
 	}
 	root, err := s.tree.rootArchiveView(ctx, source, archive, idx, password)
 	if err != nil {
@@ -291,6 +308,12 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 		return nil, 0, err
 	}
 	key := s.tree.diskCacheScope() + ":" + identity + ":" + kind + archiveMemberCacheMarker(kind) + memberPath + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + s.tree.passwordTag(archive, password)
+	if kind == ".7z" {
+		reader, err := s.tree.tryRoot7zDemand(ctx, view, m, password, key, identity)
+		if err != nil || reader != nil {
+			return reader, int64(m.size), err
+		}
+	}
 	fill, err := s.memberFillWithPassword(key, password, func(fillCtx context.Context, w io.Writer, pw []byte) error {
 		return s.tree.extractOtherMember(fillCtx, source, archive, m, pw, w)
 	})

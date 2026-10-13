@@ -1,4 +1,4 @@
-# Nested solid 7z demand decoding
+# Solid 7z demand decoding
 
 Archive content is immutable at every depth. Parsed indexes, decompressed blocks
 and verified persistent checkpoints have no content TTL; capacity eviction can
@@ -9,7 +9,7 @@ not the durable identity of the content.
 ## Shared forward cursor
 
 Both the web service and FUSE use the same Tree member-read path. A missing block
-in an eligible nested solid 7z borrows a group cursor for that block only. Sibling
+in an eligible root or nested solid 7z borrows a group cursor for that block only. Sibling
 file handles can remain open without monopolizing the decoder. The group is keyed
 by stable parent identity, password identity and a copied layout fingerprint.
 
@@ -36,14 +36,31 @@ remain charged until closing their decoder and ancestor references finishes.
 This is separate from disk capacity and the existing ZIP continuation pool, and
 is not a bound on total process RSS or transient header parsing.
 
-The first implementation admits the pinned decoder's plain, unfiltered LZMA2
-layout only. It accounts for the actual dictionary, two worst-case literal
+Admission covers the pinned decoder's plain, unfiltered LZMA2 layout and its
+canonical single-input AES256-CBC → LZMA2 chain. It accounts for the actual dictionary, two worst-case literal
 models for transitions, the packed-input buffer, copied layout, accumulated
 ancestor indexes and known input buffers. Dictionary allocation is not clamped
 to a small group's output size. Only clear Store/Deflate ZIP ancestry with known
-raw sources qualifies. Unknown, encrypted or unsupported coder/ancestor graphs
+raw sources qualifies. AES adds 256 KiB for cipher state and the built-in
+consumer's maximum buffer growth. This excludes KDF CPU time and the existing
+process-wide key cache; it does not promise immediate cancellation during key
+derivation. Unknown or unsupported coder/ancestor graphs
 and entries over budget retain their existing read path. This does not finish
 all nested solid archive optimizations in issue #55.
+
+Root groups larger than one decoded block (1 MiB) use the same demand path.
+Previously verified whole-member and whole-group disk caches are checked first.
+Tiny groups and unsupported/over-budget layouts retain the existing batching
+route. Root admission metadata is cached in the bounded metadata LRU without
+TTL, keyed by immutable archive, password and member identity. The saved plan
+holds no view, source or request context; each open binds a copy to its current
+view. This avoids reparsing the header for every warm open.
+
+An unencrypted header can describe both encrypted and plain body groups. Web
+member reads discover a password only if the selected outer member's group
+declares AES; the immutable group fact is cached without TTL. Header-encryption
+discovery and the existing nested/FUSE password rules remain in place. A failing
+unrelated sidecar must not prevent reading an ordinary unencrypted root member.
 
 ## Integrity and lifecycle
 
@@ -98,7 +115,8 @@ semantics; an early range hit is not proof of full-group validation.
 
 A synthetic three-member fixture has one 1 MiB-dictionary LZMA2 solid group;
 each member contains 4,194,317 bytes. Through public Service listing and range
-reads, with one build slot and either Store or Deflate ZIP ancestry:
+reads, with one build slot, either raw cloud input or Store/Deflate ZIP ancestry,
+and both plain LZMA2 and AES → LZMA2 groups:
 
 - Cold A/B/C 64 KiB heads: one decoder initialization and 9,437,210 returned
   decoder bytes. Disabling admission gives three initializations and 15,728,679
@@ -114,3 +132,7 @@ lookahead, total archive decompression or measured live-cloud latency. Tests als
 cover active/idle eviction, waiter cancellation, retained parent lifetime,
 shutdown, retirement accounting, explicit zero CRCs, discarded-prefix corruption,
 source errors with final bytes, short bodies and failed final-block publication.
+Root tests additionally read verified legacy whole-group/member caches without
+decoding, check mixed clear/encrypted groups, and check that warm opens issue no
+source reads for header parsing. An opt-in real kernel FUSE test compares range
+bytes with Service reads for raw encrypted 7z and Deflate ZIP → encrypted 7z.

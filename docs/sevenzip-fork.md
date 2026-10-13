@@ -17,9 +17,10 @@ fork 已提供：
 - `Reader.PackedRanges(index)`：所选组各压缩输入在原始 ReaderAt 上的绝对区间，包含归档前缀和起始头，校验长度与溢出。
 - `Reader.OpenStreamWithReader(index, readerAt)`：保留已解析头部，替换所选组正文来源；调用者始终拥有来源，构造失败也由调用者清理。
 - `Reader.StreamLayout(index)`：复制组布局、成员偏移及明确的 CRC presence（包含值为零的 CRC），不创建解码器或保留 Reader、来源、密码。`PlainLZMA2DecoderInfo` 提供内置普通 LZMA2 的字典和缓冲事实，用于应用层决定是否保留状态；不覆盖自定义 codec 注册。
+- `StreamLayout.AESLZMA2DecoderInfo()`：识别单输入 AES→LZMA2 串联，验证属性及填充长度，不读正文、不派生密钥。额外驻留预算为 256 KiB；不包含 KDF CPU 时间或库原有的全局密钥缓存。
 - 组级正文使用 1 MiB 输入缓冲，减少网络 ReaderAt 调用；头解析及原 File.Open 缓冲不变。
 
-嵌套成员的[按需共享组游标](design/nested-solid7z-continuation.md)使用上述复制元数据与独占流接口，保留有界进程内状态；它不同于下述顶层完整组缓存策略。
+内外层成员的[按需共享组游标](design/nested-solid7z-continuation.md)使用上述复制元数据与独占流接口，保留有界进程内状态。符合准入条件的顶层组超过 1 MiB 时也按需读取；已有完整成员或组缓存优先复用。其余组保留下述完整组缓存策略。
 
 来源身份、密码身份、并发调度、取消策略、缓存预算及持久化由挂载器负责。每次组填充创建一个 Reader，直接将解压流写到共享的 growing 缓存，不跨填充保留解码器。组缓存按账户、内容版本、分卷身份、密码身份和组编号隔离，成员位置随索引持久化；旧 7z 索引缺少位置时重建，不使其他格式的索引失效。发布前也检查组内可用的成员 CRC。
 

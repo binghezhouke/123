@@ -7,12 +7,15 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"github.com/hanwen/go-fuse/v2/fs"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -98,7 +101,17 @@ func solid7zReusePayload(index int) []byte {
 	return payload
 }
 
-type solid7zReuseAPI struct{ *serviceNestedAPI }
+type solid7zReuseAPI struct {
+	*serviceNestedAPI
+	password string
+}
+
+func (a *solid7zReuseAPI) ReadSmallFile(_ context.Context, id, limit int64) ([]byte, error) {
+	if id != 78 {
+		return nil, os.ErrNotExist
+	}
+	return []byte(a.password), nil
+}
 
 func (*solid7zReuseAPI) CacheIdentity() string { return "synthetic-solid7z-reuse" }
 
@@ -160,20 +173,37 @@ func TestServiceNestedSolid7zSequentialHeadsShareDemandedDecode(t *testing.T) {
 			t.Fatalf("independent member %d oracle hash=%s", i, got)
 		}
 	}
+	encrypted, err := os.ReadFile("testdata/solid7z/encrypted.7z")
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
-		name   string
-		method uint16
-		shared bool
-	}{{"store", zip.Store, true}, {"deflate_single_build_slot", zip.Deflate, true}, {"budget_fallback", zip.Store, false}} {
+		name                    string
+		method                  uint16
+		shared, root, encrypted bool
+	}{
+		{"store", zip.Store, true, false, false},
+		{"deflate_single_build_slot", zip.Deflate, true, false, false},
+		{"budget_fallback", zip.Store, false, false, false},
+		{"root_plain", zip.Store, true, true, false},
+		{"root_encrypted", zip.Store, true, true, true},
+		{"encrypted_store", zip.Store, true, false, true},
+		{"encrypted_deflate_single_build_slot", zip.Deflate, true, false, true},
+		{"encrypted_budget_fallback", zip.Store, false, false, true},
+	} {
 		t.Run(tc.name, func(t *testing.T) {
 			counts.initializations.Store(0)
 			counts.returnedOutput.Store(0)
-			testServiceNestedSolid7zReuse(t, inner, names, payloads, counts, tc.method, tc.shared)
+			fixture, password := inner, ""
+			if tc.encrypted {
+				fixture, password = encrypted, "synthetic-solid-password"
+			}
+			testServiceNestedSolid7zReuse(t, fixture, names, payloads, counts, tc.method, tc.shared, tc.root, password)
 		})
 	}
 }
 
-func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, payloads [][]byte, counts *solid7zReuseCounts, method uint16, shared bool) {
+func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, payloads [][]byte, counts *solid7zReuseCounts, method uint16, shared, root bool, password string) {
 	var outer bytes.Buffer
 	writer := zip.NewWriter(&outer)
 	member, err := writer.CreateHeader(&zip.FileHeader{Name: "inner.7z", Method: method})
@@ -186,26 +216,36 @@ func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, p
 	if err := writer.Close(); err != nil {
 		t.Fatal(err)
 	}
+	body, archiveName, memberPrefix := outer.Bytes(), "outer.zip", "inner.7z/"
+	if root {
+		body, archiveName, memberPrefix = inner, "outer.7z", ""
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("ETag", `"synthetic-solid7z-immutable"`)
-		http.ServeContent(w, r, "outer.zip", time.Unix(100, 0), bytes.NewReader(outer.Bytes()))
+		http.ServeContent(w, r, "outer.zip", time.Unix(100, 0), bytes.NewReader(body))
 	}))
 	defer server.Close()
-	cache, err := storage.NewCache(t.TempDir(), 16<<20)
+	cache, err := storage.NewCache(t.TempDir(), 64<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer cache.Close()
 	lifetime, stop := context.WithCancel(context.Background())
 	defer stop()
-	file := panapi.File{ID: 77, Name: "outer.zip", Size: int64(outer.Len()), Version: "synthetic-solid7z-v1"}
-	api := &solid7zReuseAPI{&serviceNestedAPI{url: server.URL, files: []panapi.File{file}, detail: file}}
-	service, err := NewService(lifetime, api, cache, 0, true, Options{
+	file := panapi.File{ID: 77, Name: archiveName, Size: int64(len(body)), Version: "synthetic-solid7z-v1"}
+	files := []panapi.File{file}
+	if password != "" {
+		files = append(files, panapi.File{ID: 78, Name: archiveName + ".pwd", Size: int64(len(password))})
+	}
+	api := &solid7zReuseAPI{serviceNestedAPI: &serviceNestedAPI{url: server.URL, files: files, detail: file}, password: password}
+	rootNode := NewWithOptions(lifetime, api, cache, 0, true, Options{
 		DisableReadAhead: true, DisableStreamMembers: true, MaxConcurrentBuilds: 1, MaxArchiveDepth: 2,
 	})
-	if err != nil {
+	if err := rootNode.Prepare(lifetime); err != nil {
 		t.Fatal(err)
 	}
+	fs.NewNodeFS(rootNode, &fs.Options{})
+	service := NewServiceFromNode(rootNode)
 	defer service.tree.nestedDeflatePool.Close()
 	defer service.tree.nestedSolid7zPool.Close()
 	if !shared {
@@ -213,7 +253,7 @@ func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, p
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	entries, err := service.ListArchive(ctx, 77, "inner.7z")
+	entries, err := service.ListArchive(ctx, 77, strings.TrimSuffix(memberPrefix, "/"))
 	if err != nil || len(entries) != 3 {
 		t.Fatalf("public nested listing count=%d, error=%v", len(entries), err)
 	}
@@ -223,7 +263,7 @@ func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, p
 	// All handles remain live until after both phases, including cold reads.
 	handles := make([]io.ReaderAt, 3)
 	for i, name := range names {
-		handle, size, err := service.OpenArchiveMember(ctx, 77, "inner.7z/"+name)
+		handle, size, err := service.OpenArchiveMember(ctx, 77, memberPrefix+name)
 		if err != nil || size != 4194317 {
 			t.Fatalf("public open member %d size=%d, error=%v", i, size, err)
 		}
@@ -235,15 +275,38 @@ func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, p
 		got := make([]byte, 64<<10)
 		request, finish := context.WithCancel(ctx)
 		defer finish()
-		n, err := handles[i].(interface {
-			ReadAtContext(context.Context, []byte, int64) (int, error)
-		}).ReadAtContext(request, got, 0)
+		n, err := solidReuseRead(request, handles[i], got, 0)
 		if n != len(got) || err != nil || !bytes.Equal(got, payloads[i][:len(got)]) {
 			t.Fatalf("public member %d head n=%d, error=%v, bytes_match=%v", i, n, err, bytes.Equal(got, payloads[i][:len(got)]))
 		}
 	}
 	for _, i := range []int{0, 1, 2} {
-		readHead(i)
+		if i != 1 {
+			readHead(i)
+			continue
+		}
+		// Alternate adapters against one Tree. The FUSE open has its own archive
+		// view, but must continue the same cursor and populate the web range cache.
+		node := lookup(t, rootNode, archiveName)
+		for _, part := range strings.Split(memberPrefix+names[i], "/") {
+			node = lookup(t, node, part)
+		}
+		h, _, errno := node.Open(ctx, syscall.O_RDONLY)
+		if errno != 0 {
+			t.Fatal(errno)
+		}
+		result, errno := h.(fs.FileReader).Read(ctx, make([]byte, 64<<10), 0)
+		if errno != 0 {
+			h.(fs.FileReleaser).Release(ctx)
+			t.Fatal(errno)
+		}
+		got, status := result.Bytes(nil)
+		matched := bytes.Equal(got, payloads[i][:64<<10])
+		result.Done()
+		h.(fs.FileReleaser).Release(ctx)
+		if status != 0 || !matched {
+			t.Fatal("FUSE adapter head differs from plaintext")
+		}
 	}
 	coldInitializations, coldOutput := counts.initializations.Load(), counts.returnedOutput.Load()
 	t.Logf("cold A/B/C: decoder_initializations=%d returned_output=%d", coldInitializations, coldOutput)
@@ -275,9 +338,7 @@ func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, p
 	for _, i := range []int{0, 2} {
 		got := make([]byte, 64<<10)
 		request, finish := context.WithCancel(ctx)
-		n, err := handles[i].(interface {
-			ReadAtContext(context.Context, []byte, int64) (int, error)
-		}).ReadAtContext(request, got, 2<<20)
+		n, err := solidReuseRead(request, handles[i], got, 2<<20)
 		finish()
 		if n != len(got) || err != nil || !bytes.Equal(got, payloads[i][2<<20:(2<<20)+len(got)]) {
 			t.Fatalf("backward/forward miss member %d: n=%d error=%v", i, n, err)
@@ -286,4 +347,11 @@ func testServiceNestedSolid7zReuse(t *testing.T, inner []byte, names []string, p
 	if got := counts.initializations.Load() - coldInitializations; got != 1 {
 		t.Fatalf("backward fallback reset forward group: extra initializations=%d want 1", got)
 	}
+}
+
+func solidReuseRead(ctx context.Context, reader io.ReaderAt, p []byte, off int64) (int, error) {
+	if r, ok := reader.(archiveReaderAt); ok {
+		return r.ReadAtContext(ctx, p, off)
+	}
+	return reader.ReadAt(p, off)
 }

@@ -701,6 +701,24 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 		return nil, 0, toErrno(err)
 	}
 	key := t.diskCacheScope() + ":" + identity + ":" + a.kind() + archiveMemberCacheMarker(a.kind()) + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
+	if a.kind() == ".7z" && m.sevenStream.valid(m.size) && m.sevenStream.Size > nestedMemberBlockBytes {
+		idx, err := t.otherIndex(ctx, n.item.source, a, password)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		view, err := t.rootArchiveView(ctx, n.item.source, a, idx, password)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		defer view.Close()
+		reader, err := t.tryRoot7zDemand(ctx, view, m, password, key, identity)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		if reader != nil {
+			return &handle{reader: reader, closer: reader, size: m.size}, t.archiveCacheOpenFlags(), 0
+		}
+	}
 	protected, err := t.encryptPassword(key, password)
 	if err != nil {
 		return nil, 0, toErrno(err)

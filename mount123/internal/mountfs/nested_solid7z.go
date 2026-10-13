@@ -10,7 +10,9 @@ import (
 	"io"
 	"math"
 	"syscall"
+	"time"
 
+	"github.com/binghezhouke/123/mount123/internal/iostats"
 	"github.com/bodgit/sevenzip"
 )
 
@@ -32,7 +34,7 @@ func solidLayoutFingerprint(layout *sevenzip.StreamLayout) [32]byte {
 // including a model transition, not the group's uncompressed size. Retained
 // ancestors currently qualify only when all their compressed inputs are known
 // clear ZIP coders. Other ancestry remains readable on the existing path.
-func nestedSolid7zCharge(n *nestedArchive, layout *sevenzip.StreamLayout, decoder *sevenzip.LZMA2DecoderInfo) (int64, bool) {
+func nestedSolid7zCharge(n *nestedArchive, layout *sevenzip.StreamLayout, decoder *sevenzip.LZMA2DecoderInfo, additional uint64) (int64, bool) {
 	if n == nil || n.indexBytes < 0 || n.index == nil || n.format != ".7z" {
 		return 0, false
 	}
@@ -44,7 +46,7 @@ func nestedSolid7zCharge(n *nestedArchive, layout *sevenzip.StreamLayout, decode
 		charge += value
 		return true
 	}
-	for _, value := range []uint64{decoder.DictionarySize, 1, decoder.MaxLiteralModelBytes, decoder.MaxLiteralModelBytes,
+	for _, value := range []uint64{additional, decoder.DictionarySize, 1, decoder.MaxLiteralModelBytes, decoder.MaxLiteralModelBytes,
 		decoder.PackedBufferSize, 256 << 10, 64 << 10, uint64(len(layout.Members)) * 64, 4096} {
 		if !add(value) {
 			return 0, false
@@ -92,6 +94,14 @@ func (t *Tree) prepareNestedSolid7z(ctx context.Context, n *nestedArchive, m *me
 		return nil, err
 	}
 	decoder, err := layout.PlainLZMA2DecoderInfo()
+	var additional uint64
+	if errors.Is(err, sevenzip.ErrUnsupportedDecoderInfo) {
+		var encrypted *sevenzip.AESLZMA2DecoderInfo
+		encrypted, err = layout.AESLZMA2DecoderInfo()
+		if err == nil {
+			decoder, additional = &encrypted.LZMA2, encrypted.AdditionalMemoryBytes
+		}
+	}
 	if errors.Is(err, sevenzip.ErrUnsupportedDecoderInfo) {
 		return nil, nil
 	}
@@ -106,7 +116,7 @@ func (t *Tree) prepareNestedSolid7z(ctx context.Context, n *nestedArchive, m *me
 	if !ok || f.Name != m.name || f.UncompressedSize != m.size || f.CRC32 != m.crc || f.Checksum().Defined != m.sevenCRCDefined || f.Stream != layout.Index || offset != m.sevenStream.Offset || layout.UncompressedSize != uint64(m.sevenStream.Size) {
 		return nil, syscall.ESTALE
 	}
-	charge, ok := nestedSolid7zCharge(n, layout, decoder)
+	charge, ok := nestedSolid7zCharge(n, layout, decoder, additional)
 	if !ok || charge > t.nestedSolid7zPool.maxBytes {
 		return nil, nil
 	}
@@ -170,6 +180,10 @@ func (t *Tree) fillNestedSolid7z(ctx context.Context, plan *nestedSolid7zPlan, s
 	if e.state != nil && target < e.state.position {
 		return false, nil
 	}
+	// Count active demand work, not an entire idle cursor lifetime. This also
+	// makes sparse web/FUSE reads visible to the existing profiling endpoint.
+	started := time.Now()
+	defer t.observeStage(iostats.StageDecompression, started)
 	if e.state == nil {
 		e.state, err = t.openNestedSolid7zState(ctx, plan)
 		if err != nil {

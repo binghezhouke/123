@@ -196,6 +196,21 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 			return direct, direct, nil
 		}
 	}
+	var plan *nestedSolid7zPlan
+	var err error
+	if n.format == ".7z" {
+		plan, err = t.prepareNestedSolid7z(ctx, n, m, password)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	return t.decodedViewMemberInput(ctx, n, m, password, indexInput, plan)
+}
+
+// Shared by root and nested 7z reads; decoded blocks have one identity and
+// publication path, independent of their web or FUSE caller.
+func (t *Tree) decodedViewMemberInput(ctx context.Context, n *nestedArchive, m *member, password []byte, indexInput bool, plan *nestedSolid7zPlan) (archiveReaderAt, io.Closer, error) {
+	input := viewInput(n)
 	blockBytes := t.nestedBlockBytes()
 	identity, _ := json.Marshal(struct {
 		Parent, Name, Password string
@@ -232,17 +247,12 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 		}
 		return stream, nil
 	}}
-	if n.format == ".7z" {
-		plan, err := t.prepareNestedSolid7z(ctx, n, m, password)
-		if err != nil {
-			return nil, nil, err
-		}
-		if plan != nil {
-			r.fill = func(ctx context.Context, start, length int64, w io.Writer) (bool, error) {
-				return t.fillNestedSolid7z(ctx, plan, start, length, w)
-			}
+	if plan != nil {
+		r.fill = func(ctx context.Context, start, length int64, w io.Writer) (bool, error) {
+			return t.fillNestedSolid7z(ctx, plan, start, length, w)
 		}
 	}
+
 	// Child archive inputs commonly reach EOF while parsing their tail index.
 	// Leaf range reads rarely do: leave those on the original decoder instead
 	// of collecting checkpoints that cannot be published without full CRC.
