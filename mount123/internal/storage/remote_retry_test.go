@@ -294,14 +294,20 @@ func TestRemoteRecoveryDoesNotRequestEmptySuffixAfterExactBytes(t *testing.T) {
 		}
 		_ = conn.Close()
 	})
-	_, remote, closeAll := retryFixture(t, int64(len(data)), handler)
+	cache, remote, closeAll := retryFixture(t, int64(len(data)), handler)
 	defer closeAll()
 	n, err := remote.ReadRangeAtContext(context.Background(), make([]byte, len(data)), 0)
-	if err != nil || n != len(data) {
-		t.Fatalf("read = %d, %v", n, err)
+	// A complete non-window read now waits for publication. Even when every
+	// requested byte was staged, a missing HTTP terminator must be reported.
+	var fault *faults.Error
+	if n != len(data) || !errors.As(err, &fault) || fault.Kind != faults.Network {
+		t.Fatalf("read = %d, %v; want complete staged bytes and network error", n, err)
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("requests = %d, want no empty-suffix retry", calls.Load())
+	}
+	if len(cache.missingRanges(remote.rangeID, 0, int64(len(data)))) == 0 {
+		t.Fatal("interrupted response was published")
 	}
 }
 

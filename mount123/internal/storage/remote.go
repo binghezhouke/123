@@ -804,6 +804,24 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 			if retryFlight {
 				continue
 			}
+			if pos == flight.end && rangeWindowOwner(ctx) == nil {
+				// The last staged byte can arrive before publication releases the
+				// reservation and acquires the cache pin. Keep this reader's reference
+				// until then, so the last reader drops the completed flight's pins
+				// before its next chunk needs cache space. Partial reads still return
+				// early without waiting for the remaining read-ahead bytes.
+				// RangeWindows own their pins and explicitly wait before publication.
+				select {
+				case <-ctx.Done():
+					r.cache.releaseRangeFlight(flight)
+					return read, ctx.Err()
+				case <-flight.done:
+				}
+				if flight.err != nil {
+					r.cache.releaseRangeFlight(flight)
+					return read, flight.err
+				}
+			}
 			r.cache.releaseRangeFlight(flight)
 			if pos < coveredEnd {
 				parts, pinned, pinErr := r.cache.pinRange(r.rangeID, pos, coveredEnd, !workqueue.IsBackground(ctx))
