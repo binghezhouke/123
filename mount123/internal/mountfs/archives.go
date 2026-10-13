@@ -694,7 +694,7 @@ func (n *Node) openOtherArchive(ctx context.Context) (fs.FileHandle, uint32, sys
 	if err != nil {
 		return nil, 0, toErrno(err)
 	}
-	key := t.diskCacheScope() + ":" + identity + ":" + a.kind() + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
+	key := t.diskCacheScope() + ":" + identity + ":" + a.kind() + archiveMemberCacheMarker(a.kind()) + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + t.passwordTag(a, password)
 	protected, err := t.encryptPassword(key, password)
 	if err != nil {
 		return nil, 0, toErrno(err)

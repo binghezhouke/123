@@ -26,6 +26,7 @@ type growingFlight struct {
 	scanDir                  int8
 	lastUseStart, lastUseEnd int64
 	written                  int64
+	verified                 int64
 	refs                     int
 	retain                   bool
 	state                    uint8
@@ -52,6 +53,14 @@ type GrowingHandle struct {
 	closed     bool
 	closedC    chan struct{}
 	foreground bool
+}
+
+// VerifiedPrefixWriter is implemented by growing-fill writers. VerifyThrough
+// advances the validated prefix after the producer checks a complete logical
+// unit. It must never include bytes whose validation is still pending.
+type VerifiedPrefixWriter interface {
+	io.Writer
+	VerifyThrough(end int64) error
 }
 
 // AcquireGrowing joins or starts an asynchronous cache fill. lifetime owns the
@@ -349,6 +358,51 @@ func (h *GrowingHandle) Wait(ctx context.Context) error {
 	}
 }
 
+// WaitVerified waits for validation through end without waiting for later
+// units in a shared fill. Published cache objects are completely validated,
+// including objects restored from disk. A failed fill cannot satisfy this wait.
+func (h *GrowingHandle) WaitVerified(ctx context.Context, end int64) error {
+	if end < 0 || end > h.size {
+		return syscall.EINVAL
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	h.mu.Lock()
+	closed, ready := h.closed, h.ready
+	h.mu.Unlock()
+	if closed {
+		return os.ErrClosed
+	}
+	if ready != nil {
+		return ctx.Err()
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		h.flight.mu.Lock()
+		verified, state, fillErr, changed := h.flight.verified, h.flight.state, h.flight.err, h.flight.changed
+		h.flight.mu.Unlock()
+		if state == growingFailed {
+			if fillErr == nil {
+				fillErr = io.ErrUnexpectedEOF
+			}
+			return fillErr
+		}
+		if state == growingComplete || verified >= end {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-h.closedC:
+			return os.ErrClosed
+		case <-changed:
+		}
+	}
+}
+
 func (h *GrowingHandle) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -461,6 +515,21 @@ func (h *GrowingHandle) Close() error {
 type growingWriter struct {
 	flight *growingFlight
 	file   *os.File
+}
+
+func (w *growingWriter) VerifyThrough(end int64) error {
+	f := w.flight
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state != growingRunning {
+		return os.ErrClosed
+	}
+	if end < f.verified || end > f.written {
+		return syscall.EINVAL
+	}
+	f.verified = end
+	signalGrowingChange(f)
+	return nil
 }
 
 func (w *growingWriter) Write(p []byte) (int, error) {

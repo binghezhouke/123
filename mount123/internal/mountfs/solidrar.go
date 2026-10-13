@@ -15,12 +15,23 @@ import (
 
 const solidRARFillTimeout = 5 * time.Minute
 
+func archiveMemberCacheMarker(kind string) string {
+	if kind == ".rar" {
+		// Older member fills could publish bytes before their group producer
+		// checked the member checksum. Do not reuse those persisted objects.
+		return ":archive-member-v2:"
+	}
+	return ":archive-member:"
+}
+
 func (t *Tree) solidRARCacheable(m *member) bool {
 	if m == nil || t.cache == nil {
 		return false
 	}
 	limit := min(maxSolidRARCacheBytes, t.cache.Capacity()/4)
-	return m.format == ".rar" && m.rarLocator != nil && m.rarGroupSize > 0 && m.rarGroupOffset <= m.rarGroupSize && m.size <= m.rarGroupSize-m.rarGroupOffset && m.rarGroupSize <= uint64(limit)
+	// Empty members share the preceding member's byte boundary, so their
+	// checksum must be checked by the individual member decoder instead.
+	return m.format == ".rar" && m.rarLocator != nil && m.size > 0 && m.rarGroupSize > 0 && m.rarGroupOffset <= m.rarGroupSize && m.size <= m.rarGroupSize-m.rarGroupOffset && m.rarGroupSize <= uint64(limit)
 }
 
 func (t *Tree) solidRARKey(identity string, a *archiveDescriptor, m *member, password []byte) string {
@@ -88,6 +99,11 @@ func (t *Tree) acquireSolidRAR(ctx context.Context, source *storage.Remote, a *a
 			if written > m.rarGroupSize {
 				return syscall.EIO
 			}
+			// WriteTo reaches the member's verified EOF, unlike a bounded
+			// SectionReader over the concurrently written group bytes.
+			if err := w.(storage.VerifiedPrefixWriter).VerifyThrough(int64(written)); err != nil {
+				return err
+			}
 		}
 		if written != m.rarGroupSize {
 			return io.ErrUnexpectedEOF
@@ -114,5 +130,5 @@ func (t *Tree) extractSolidRARMember(ctx context.Context, source *storage.Remote
 	if m.crc != 0 && hash.Sum32() != m.crc {
 		return errArchiveIntegrity
 	}
-	return nil
+	return group.WaitVerified(ctx, int64(m.rarGroupOffset+m.size))
 }

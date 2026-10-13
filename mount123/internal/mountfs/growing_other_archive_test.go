@@ -33,7 +33,7 @@ func growingOtherMemberKey(t *testing.T, node *Node) string {
 		t.Fatal(err)
 	}
 	m, a := node.item.member, node.item.archive
-	return node.tree.diskCacheScope() + ":" + identity + ":" + archiveKind(a.name) + ":archive-member:" + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + node.tree.passwordTag(a, password)
+	return node.tree.diskCacheScope() + ":" + identity + ":" + archiveKind(a.name) + archiveMemberCacheMarker(archiveKind(a.name)) + m.name + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + node.tree.passwordTag(a, password)
 }
 
 func readGrowingOtherMember(t *testing.T, node *Node) []byte {

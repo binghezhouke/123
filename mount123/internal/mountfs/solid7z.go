@@ -47,14 +47,15 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 		return err
 	}
 	if t.solidRARCacheable(m) {
-		if err := t.extractSolidRARMember(ctx, source, a, m, password, identity, w); err == nil {
+		output := &solidRAROutput{Writer: w}
+		if err := t.extractSolidRARMember(ctx, source, a, m, password, identity, output); err == nil {
 			return nil
-		} else if ctx.Err() != nil {
+		} else if output.written != 0 || ctx.Err() != nil {
 			return err
 		}
-		// The group cache is an optimization. Any cache reservation, fill, or
-		// validation failure must fall back to the established member path so
-		// a cache problem cannot make a readable archive unavailable.
+		// Retry a cache failure only before any bytes reach the destination.
+		// Reusing a writer after partial output would prepend that prefix to
+		// the fallback member, corrupting its output or exceeding its cache size.
 	}
 	if t.solid7zCacheable(m) {
 		group, err := t.acquireSolid7z(ctx, source, a, m, password, identity)
@@ -88,6 +89,17 @@ func (t *Tree) extractOtherMember(ctx context.Context, source *storage.Remote, a
 	started := time.Now()
 	defer t.observeStage(iostats.StageDecompression, started)
 	return extractArchiveMember(ctx, reader, size, m, password, w)
+}
+
+type solidRAROutput struct {
+	io.Writer
+	written int64
+}
+
+func (w *solidRAROutput) Write(p []byte) (int, error) {
+	n, err := w.Writer.Write(p)
+	w.written += int64(n)
+	return n, err
 }
 
 func (t *Tree) acquireSolid7z(ctx context.Context, source *storage.Remote, a *archiveDescriptor, m *member, password []byte, identity string) (*storage.GrowingHandle, error) {

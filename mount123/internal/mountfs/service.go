@@ -334,7 +334,7 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	if err != nil {
 		return nil, 0, err
 	}
-	key := s.tree.diskCacheScope() + ":" + identity + ":" + kind + ":archive-member:" + memberPath + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + s.tree.passwordTag(archive, password)
+	key := s.tree.diskCacheScope() + ":" + identity + ":" + kind + archiveMemberCacheMarker(kind) + memberPath + fmt.Sprintf(":%d:%08x:", m.size, m.crc) + s.tree.passwordTag(archive, password)
 	fill, err := s.memberFillWithPassword(key, password, func(fillCtx context.Context, w io.Writer, pw []byte) error {
 		return s.tree.extractOtherMember(fillCtx, source, archive, m, pw, w)
 	})
