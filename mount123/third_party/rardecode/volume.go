@@ -233,7 +233,16 @@ type fileVolume struct {
 	vm *volumeManager
 }
 
-func (v *fileVolume) Close() error { return v.f.Close() }
+func (v *fileVolume) Close() error {
+	// Detach before closing: a failed next-volume open still needs cleanup,
+	// but the previous file has already been released.
+	f := v.f
+	v.f = nil
+	if f == nil {
+		return nil
+	}
+	return f.Close()
+}
 
 func (v *fileVolume) open(volnum int) error {
 	err := v.Close()

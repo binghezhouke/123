@@ -2,3 +2,34 @@ Fixtures copied from https://github.com/markokr/rarfile/tree/master/test/files
 rar5-crc.rar, rar3-solid.rar, rar5-psw.rar and rar5-hpsw.rar.
 Encrypted fixtures use the test password "password". Copyright and permission: LICENSE.
 rar5-solid.rar added from the same repository at d2f7df6fc843dae356fd6b0a85971dc36fd6e757.
+
+RAR3/RAR5 multi-volume session fixtures added from the same pinned repository:
+https://github.com/markokr/rarfile/tree/d2f7df6fc843dae356fd6b0a85971dc36fd6e757/test/files
+Permission is the accompanying LICENSE (ISC permission notice).
+These are real stored, NON-SOLID archives; they do not establish solid
+dictionary continuity across volumes. Upstream metadata is recorded in
+rar3-vols.part1.rar.exp and rar5-vols.part1.rar.exp at that commit.
+
+Known expected bytes (verified independently from the stored RAR3 blocks):
+vols/bigfile.txt: concatenate fmt.Sprintf("%40d\n", i), i=1..5000.
+  205000 bytes, CRC32 509ad74c (also in upstream .exp), SHA256
+  57613b4a0d18b31472c9abe90780dcaf834f4edf48e79008f027a99710cf3632
+vols/smallfile.txt: concatenate fmt.Sprintf("%40d\n", i), i=1..50.
+  2050 bytes, CRC32 d08a1f86 (also in upstream .exp), SHA256
+  6805973b24128edda3148235c77a7f7b5a7a9be6272bc882a6e030871b2b18d1
+Both RAR versions contain these same two members. Tests construct these bytes
+directly, without using a second rardecode decoder as the content oracle.
+
+Archive SHA256:
+rar3-vols.part1.rar 5a89fe55b4d9d32882544bd1d9b6f46134c80aa52939129b2b5de673dfbeb9c8
+rar3-vols.part2.rar abbe9191d7a8e0b165b6af24784cd5541b0de4cfb9c252fbe6def46fb5a9619f
+rar3-vols.part3.rar 3ef3d6ba040b47d9f89210cb877fcf20166bf2b6299361459b5466248fb722be
+rar5-vols.part1.rar c997e965ad319646e3bead59b372a9bd87459aa471c8bc8ad02267d43e328c2f
+rar5-vols.part2.rar 484343c1ca19e1eac8103946f1c0e7746d6df5d995f8f55395f03786ad34e709
+rar5-vols.part3.rar 0b117cf1cb7b46877124d5f07ebc45580b4a5feadc24f5578196036a32c9eadc
+
+Corrupt variants are generated only in memory by the tests. Solid fixtures
+have the second member's declared data CRC changed and header CRC recomputed;
+the original compressed stream and solid continuation remain intact. Split
+stored fixtures have one payload byte changed in part2 (offset 200), with all
+headers unchanged. Missing-volume tests expose only part1 to the session.
