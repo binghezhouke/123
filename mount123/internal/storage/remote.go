@@ -408,7 +408,7 @@ func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off 
 	}
 	want := min(int64(len(p)), r.size-off)
 	r.recordCacheHitBytes(ctx, off, off+want, false)
-	n, err := r.readRangeWithCache(ctx, p[:want], off)
+	n, err := r.readRangeWithCache(ctx, p[:want], off, nil, false)
 	if err != nil {
 		return n, err
 	}
@@ -477,10 +477,7 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 					go r.runRangeFlight(prefetch)
 				}
 			}
-			got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos)
-			if prefetch != nil {
-				r.cache.releaseRangeFlight(prefetch)
-			}
+			got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos, prefetch, copyEnd < off+int64(want))
 			read += got
 			if err != nil && err != io.EOF {
 				return read, err
@@ -490,7 +487,7 @@ func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64
 			}
 			continue
 		}
-		got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos)
+		got, err := r.readRangeWithCache(ctx, p[read:read+int(copyEnd-pos)], pos, nil, copyEnd < off+int64(want))
 		read += got
 		if err != nil && err != io.EOF {
 			return read, err
@@ -725,7 +722,15 @@ func (r *Remote) importLegacyPages(ctx context.Context, start, end int64) error 
 	return nil
 }
 
-func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (int, error) {
+func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64, prefetch *rangeFlight, moreAfter bool) (int, error) {
+	// Transfer the read-ahead reference once the demand reader joins a flight.
+	// Otherwise a shorter shared flight can make this read wait for its own
+	// prefetch reference before it advances to the rest of the block.
+	defer func() {
+		if prefetch != nil {
+			r.cache.releaseRangeFlight(prefetch)
+		}
+	}()
 	end := off + int64(len(p))
 	if err := r.importLegacyPages(ctx, off, end); err != nil {
 		return 0, err
@@ -744,7 +749,7 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 	if err != nil {
 		return read, err
 	}
-	for _, gap := range gaps {
+	for gapIndex, gap := range gaps {
 		if r.cache.max <= 0 {
 			r.cache.recordENOSPC()
 			return read, syscall.ENOSPC
@@ -758,6 +763,10 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 			flight, owner, beginErr := r.cache.beginRangeFlight(ctx, r.rangeID, pos, chunkEnd)
 			if beginErr != nil {
 				return read, beginErr
+			}
+			if prefetch != nil {
+				r.cache.releaseRangeFlight(prefetch)
+				prefetch = nil
 			}
 			if window := rangeWindowOwner(ctx); window != nil {
 				window.trackFlight(flight)
@@ -807,8 +816,8 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 			if pos == flight.end && rangeWindowOwner(ctx) == nil {
 				// The last staged byte can arrive before publication releases the
 				// reservation and acquires the cache pin. Keep this reader's reference
-				// until then, so the last reader drops the completed flight's pins
-				// before its next chunk needs cache space. Partial reads still return
+				// until then, so completed flight pins remain accounted for until
+				// all readers release their references. Partial reads still return
 				// early without waiting for the remaining read-ahead bytes.
 				// RangeWindows own their pins and explicitly wait before publication.
 				select {
@@ -823,6 +832,14 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64) (i
 				}
 			}
 			r.cache.releaseRangeFlight(flight)
+			// Ordinary reads split at read-ahead block boundaries. Their final
+			// demand flight can differ from the initial prefetch flight, so include
+			// continuation beyond this block when handing off its capacity.
+			if pos == flight.end && rangeWindowOwner(ctx) == nil && (pos < gap.end || gapIndex+1 < len(gaps) || moreAfter) {
+				if err := r.cache.waitRangeFlightCapacity(ctx, flight); err != nil {
+					return read, err
+				}
+			}
 			if pos < coveredEnd {
 				parts, pinned, pinErr := r.cache.pinRange(r.rangeID, pos, coveredEnd, !workqueue.IsBackground(ctx))
 				if pinErr != nil {

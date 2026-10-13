@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/binghezhouke/123/mount123/internal/workqueue"
 )
@@ -21,15 +22,19 @@ type cacheRange struct {
 }
 
 type rangeFlight struct {
-	start, end int64
-	done       chan struct{}
-	err        error
-	ctx        context.Context
-	cancel     context.CancelFunc
-	priority   *downloadPriority
-	progress   *rangeProgress
-	refs       int
-	finished   bool
+	start, end     int64
+	done           chan struct{}
+	err            error
+	ctx            context.Context
+	cancel         context.CancelFunc
+	priority       *downloadPriority
+	progress       *rangeProgress
+	refs           int
+	windowRefs     int
+	windowsChanged chan struct{}
+	released       chan struct{}
+	closeOnce      sync.Once
+	finished       bool
 }
 
 type byteRange struct{ start, end int64 }
@@ -196,7 +201,7 @@ func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, en
 	if !workqueue.IsBackground(ctx) {
 		priority.promoted.Store(true)
 	}
-	f := &rangeFlight{start: start, end: flightEnd, done: make(chan struct{}), ctx: flightCtx, cancel: cancel, priority: priority, progress: newRangeProgress(), refs: 1}
+	f := &rangeFlight{start: start, end: flightEnd, done: make(chan struct{}), ctx: flightCtx, cancel: cancel, priority: priority, progress: newRangeProgress(), refs: 1, windowsChanged: make(chan struct{}), released: make(chan struct{})}
 	c.rangeFlights[identity] = append(c.rangeFlights[identity], f)
 	c.mu.Unlock()
 	return f, true, nil
@@ -217,7 +222,35 @@ func (c *Cache) releaseRangeFlight(f *rangeFlight) {
 	}
 	c.mu.Unlock()
 	if closeProgress {
+		f.closeProgress()
+	}
+}
+
+func (f *rangeFlight) closeProgress() {
+	f.closeOnce.Do(func() {
 		f.progress.close()
+		close(f.released)
+	})
+}
+
+// waitRangeFlightCapacity waits for transient readers to release the completed
+// extent before another chunk is admitted. Windows explicitly own capacity and
+// may live indefinitely; leave their pins to normal bounded ENOSPC admission.
+func (c *Cache) waitRangeFlightCapacity(ctx context.Context, f *rangeFlight) error {
+	for {
+		c.mu.Lock()
+		windowRefs, changed := f.windowRefs, f.windowsChanged
+		c.mu.Unlock()
+		if windowRefs > 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-f.released:
+			return nil
+		case <-changed:
+		}
 	}
 }
 
@@ -243,7 +276,7 @@ func (c *Cache) finishRangeFlight(identity string, f *rangeFlight, err error) {
 	closeProgress := f.refs == 0
 	c.mu.Unlock()
 	if closeProgress {
-		f.progress.close()
+		f.closeProgress()
 	}
 }
 

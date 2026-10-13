@@ -60,6 +60,11 @@ func (r *Remote) OpenRangeWindow(ctx context.Context, off, size int64) (*RangeWi
 			}
 			w.flights = append(w.flights, flight)
 			w.tracked[flight] = true
+			r.cache.mu.Lock()
+			flight.windowRefs++ // classify the reference returned by beginRangeFlight
+			close(flight.windowsChanged)
+			flight.windowsChanged = make(chan struct{})
+			r.cache.mu.Unlock()
 			if owner {
 				go r.runRangeFlight(flight)
 			}
@@ -132,6 +137,9 @@ func (w *RangeWindow) trackFlight(f *rangeFlight) {
 	}
 	w.remote.cache.mu.Lock()
 	f.refs++ // the demand reader already owns a live reference
+	f.windowRefs++
+	close(f.windowsChanged)
+	f.windowsChanged = make(chan struct{})
 	w.remote.cache.mu.Unlock()
 	w.tracked[f] = true
 	w.flights = append(w.flights, f)
@@ -150,6 +158,11 @@ func (w *RangeWindow) Close() error {
 		w.flights = nil
 		w.mu.Unlock()
 		for _, f := range flights {
+			w.remote.cache.mu.Lock()
+			if f.windowRefs > 0 {
+				f.windowRefs--
+			}
+			w.remote.cache.mu.Unlock()
 			w.remote.cache.releaseRangeFlight(f)
 		}
 		closeRangeParts(w.pins)
