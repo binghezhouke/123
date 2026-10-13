@@ -16,3 +16,10 @@ add global caching to the decoder.
 next volume fails, later session cleanup must not close the previous file again.
 Repeated `fileVolume.Close` calls are consequently idempotent, including after a
 failed transition between volumes.
+
+`OpenSolidSessionFrom` / `OpenSolidSessionFromContext` in `solid_session.go`
+start at a known archive member ordinal. They walk packed headers/volume blocks
+without constructing preceding decoders, then lazily initialize only the target
+compressed independent member on the first `Next`. See `SOLID_GROUP_START.md`
+for target restrictions and checksum/cancellation semantics. Upstream `reader.go`,
+`OpenReader`, and `OpenMember` are unchanged.

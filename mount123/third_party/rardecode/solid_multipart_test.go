@@ -14,7 +14,7 @@ import (
 	"testing/fstest"
 )
 
-func solidMultipartPayload() []byte {
+func solidFixturePayload() []byte {
 	state := uint32(0x86)
 	block := make([]byte, 49152)
 	for i := range block {
@@ -31,7 +31,7 @@ func solidMultipartName(version, part int) string {
 }
 
 func TestSolidSessionCompressedSolidMultipart(t *testing.T) {
-	want := solidMultipartPayload()
+	want := solidFixturePayload()
 	if got := fmt.Sprintf("%x", sha256.Sum256(want)); got != "04bdbf62c09c8fe4899c780f22302811a45d787bbfea06df80f7ab642876099e" {
 		t.Fatalf("generated oracle hash = %s", got)
 	}
@@ -115,7 +115,7 @@ func TestSolidMultipartRequiresPrecedingDecoderState(t *testing.T) {
 				return
 			}
 			got, err := io.ReadAll(reader)
-			if err == nil || bytes.Equal(got, solidMultipartPayload()) {
+			if err == nil || bytes.Equal(got, solidFixturePayload()) {
 				t.Fatalf("second member decoded without preceding dictionary: bytes=%d, error=%v", len(got), err)
 			}
 			t.Logf("independent decoder failed as expected: %v", err)
@@ -204,8 +204,8 @@ func TestSolidSessionCompressedMultipartFailures(t *testing.T) {
 						t.Fatal(err)
 					}
 					count = len(recorded.files)
-					if count < 2 || !bytes.Equal(prefix, solidMultipartPayload()[:len(prefix)]) {
-						t.Fatalf("prefix crossed %d volumes, bytes match=%v", count, bytes.Equal(prefix, solidMultipartPayload()[:len(prefix)]))
+					if count < 2 || !bytes.Equal(prefix, solidFixturePayload()[:len(prefix)]) {
+						t.Fatalf("prefix crossed %d volumes, bytes match=%v", count, bytes.Equal(prefix, solidFixturePayload()[:len(prefix)]))
 					}
 					cancel()
 					_, err = first.Read(make([]byte, 1))

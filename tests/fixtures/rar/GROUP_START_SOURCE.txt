@@ -1,0 +1,49 @@
+Synthetic group-start fixtures (BSD permission in LICENSE.generated).
+Generated with external official Linux x64 RAR 6.24 (not bundled), tool SHA256:
+71ab9088d575e438d243672fcc6d36d2f9a39f5a8d4d26e998129cea12dbf682
+Official distribution: https://www.rarlab.com/rar/rarlinux-x64-624.tar.gz
+Generation commands and payload algorithm: generate_group_start.py.
+
+RAR3 and RAR5: four compressed members a.bin, b.bin, c.bin, d.bin, each
+98304 bytes, grouped with -s2. Official unrar lt reports a/c independent,
+b/d solid continuation. Seven 16384-byte volumes for multipart variants.
+Password variants use only the synthetic test password "password". Random
+crypto salt/IV means password archives are reproducible in structure/bytes
+when extracted, not byte-identical archives when regenerated.
+Boundary fixture is non-solid: one data file, an empty file and a directory.
+
+Expected output is xorshift32(seed=0x86) first 49152 low bytes, repeated twice.
+Per-member CRC32: 8469b249; SHA256: 04bdbf62c09c8fe4899c780f22302811a45d787bbfea06df80f7ab642876099e.
+Independent official unrar p extraction returns the four concatenated expected
+members for all six group fixtures, including password and multipart variants.
+Tests generate their expected bytes directly rather than reusing rardecode as
+an oracle. Corrupt variants mutate packed data only and remain in memory.
+
+Additional budget fixtures keep a/b at 98304 bytes and c/d at 4096 bytes (the
+first 4096 bytes of the same payload). Both group-start headers declare a 256KiB
+dictionary, capped by the decoder to member size. A 4096-byte configured budget
+therefore rejects a/b but permits c/d. Official unrar extraction independently
+matches payload*2 + payload[:4096]*2 for both RAR versions.
+
+Archive SHA256 (committed bytes):
+rar3-two-groups-multipart.part01.rar 16384 d1fe532b5fe2635e2b54f9e625366c4d88cb1a27f2ea45c8e4a713ba3ea51bc6
+rar3-two-groups-multipart.part02.rar 16384 534ef1ffe8f0cbbe5f30004aa173c64aae481b0a3d5a9c3c0dcbe5139644fd80
+rar3-two-groups-multipart.part03.rar 16384 bd7a70131fcfe59ea432c0c69b897a782d8651b14d9f8d4c35c1828866f8b374
+rar3-two-groups-multipart.part04.rar 16384 21a26ca5a4d9d41975b05c0ed4bb91f3ff3b543509404831548450bd9f4e7a3a
+rar3-two-groups-multipart.part05.rar 16384 30091ce3d7f67ca28356fa09086fb106e750602bbaf59f0f0e063e2662e2da76
+rar3-two-groups-multipart.part06.rar 16384 c5eeb0c3dd4d310270ab572377eb76a4daf0699cc1194e04cbba62780a4bc3bc
+rar3-two-groups-multipart.part07.rar 1466 dadf7acb227797536dada20d12f35e1bcae2f878c1defd8f8d132012c1e30176
+rar3-two-groups-password.rar 99375 d02d158ff163bf0f70e09267bc8af7edf0c68cdc5a54b5b30e5b3602aebe6ca5
+rar3-two-groups.rar 99295 2ade1afb4a05423066f5e2b8c4969a259d4f63e4ca84a8fd99bb65d45079208e
+rar5-two-groups-multipart.part01.rar 16384 db55a2c50ec1f011d335df0835e949abc3f5fcbb70e3c283b7e6d0e07e50088a
+rar5-two-groups-multipart.part02.rar 16384 497dfdcc946ac08c2611e78b973f34330539e3275974fd050fe2ec82566fe61c
+rar5-two-groups-multipart.part03.rar 16384 6b5f659bc8ea244310174de4c4867f60777e09c2b37763f0606739090d84996a
+rar5-two-groups-multipart.part04.rar 16384 4ca5dcb658fca12f28fae288aa3a5dc795c1ab5521ecc64d2fb76b772b4271a1
+rar5-two-groups-multipart.part05.rar 16384 7c4e9ebac05e439934faede6068d72c7be899b2200d8f0c06ea4d3ebc3f7726b
+rar5-two-groups-multipart.part06.rar 16384 cc9ef114d9468f46bccdbf9103b5b7430b8a028b4e57a73c6879c62cf820aca3
+rar5-two-groups-multipart.part07.rar 1213 3f0d4182ff226c374e419c16011c21d519764caaf6a9502a0e2dcc88eeff557d
+rar5-two-groups-password.rar 99176 66de787fecd2877fde5d8ae1c0bb08d1de8fb68dd2e8e2883927297ccdf8e120
+rar5-two-groups.rar 98830 754f699549162a2fc4e8fd3c9848b0cf00102cd33ce37aa7d2dc5aa486f87978
+rar5-group-boundaries.rar 49447 bc203fc21242dcbacc598d452a48652e6040fde8e209d86452a5b2e60d527bc2
+rar3-group-budget.rar 53917 fc4d1f2f5e73180adf58cb5aaca8c2a9fa4c03a1df20d0230e2bbabfd473947e
+rar5-group-budget.rar 53690 9933d33f26f1e58ee7fa7c8f7ffe0fc24b1f98a3ffd0a5cb74931c53ac59708a

@@ -13,7 +13,7 @@ func solidEncryptedMultipartName(version int) string {
 }
 
 func TestSolidSessionEncryptedMultipartKnownBytes(t *testing.T) {
-	want := solidMultipartPayload()
+	want := solidFixturePayload()
 	for _, version := range []int{3, 5} {
 		for _, partial := range []bool{false, true} {
 			t.Run(fmt.Sprintf("RAR%d/partial=%v", version, partial), func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestSolidSessionEncryptedMultipartWrongPasswordReleasesFiles(t *testing.T) 
 			if err == nil {
 				var data []byte
 				data, err = io.ReadAll(member)
-				if bytes.Equal(data, solidMultipartPayload()) {
+				if bytes.Equal(data, solidFixturePayload()) {
 					t.Fatal("wrong password produced the known fixture bytes")
 				}
 			}

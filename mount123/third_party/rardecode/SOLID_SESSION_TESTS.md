@@ -72,3 +72,6 @@ tests do not treat volume names as content identity. Filesystem close counts
 prove release of file handles, not physical erasure of password/key bytes
 from Go-managed memory. Cancellation is checked between bounded reads; these
 tests do not prove interruption of a blocked underlying filesystem read.
+
+Independent group-start positioning and its additional fixtures are documented
+in `SOLID_GROUP_START.md`.

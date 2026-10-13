@@ -3,6 +3,7 @@ package rardecode
 import (
 	stdcontext "context"
 	"io"
+	"io/fs"
 )
 
 // SolidSession reads RAR members in archive order while retaining the
@@ -11,13 +12,15 @@ import (
 // that need concurrent reads should materialize completed members into their
 // own cache.
 type SolidSession struct {
-	ctx     stdcontext.Context
-	err     error
-	archive *ReadCloser
-	current *solidMemberReader
-	ordinal int
-	group   int
-	closed  bool
+	ctx          stdcontext.Context
+	err          error
+	archive      *ReadCloser
+	current      *solidMemberReader
+	ordinal      int
+	startOrdinal int
+	pending      *fileBlockList
+	group        int
+	closed       bool
 }
 
 // SolidMember is one sequentially decoded member. Group identifies the
@@ -84,6 +87,80 @@ func OpenSolidSessionContext(ctx stdcontext.Context, name string, opts ...Option
 	return &SolidSession{archive: archive, ctx: ctx}, nil
 }
 
+// OpenSolidSessionFrom starts at a known, zero-based archive member ordinal.
+// It skips preceding packed members without constructing their decoders or
+// verifying their data checksums. It otherwise has the same integrity and
+// dictionary policy as OpenSolidSession.
+func OpenSolidSessionFrom(name string, startOrdinal int, opts ...Option) (*SolidSession, error) {
+	return OpenSolidSessionFromContext(stdcontext.Background(), name, startOrdinal, opts...)
+}
+
+// OpenSolidSessionFromContext reparses headers, including intervening volumes,
+// with the current password. The selected member must be a nonempty compressed
+// regular file with known size and Solid false, so its decoder resets the group
+// dictionary. A solid continuation returns ErrSolidOpen; other unsupported
+// targets and negative ordinals return fs.ErrInvalid. An ordinal beyond the
+// archive returns io.EOF. Header and volume errors are returned unchanged.
+//
+// Ordinal remains the absolute archive ordinal; Group starts at zero within
+// this session. Packed skips may read data when the FileSystem cannot seek.
+// Cancellation is checked between headers/volume blocks and decoded reads;
+// custom FileSystem implementations must cancel blocking I/O themselves.
+func OpenSolidSessionFromContext(ctx stdcontext.Context, name string, startOrdinal int, opts ...Option) (*SolidSession, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if startOrdinal < 0 {
+		return nil, fs.ErrInvalid
+	}
+	opt := getOptions(opts)
+	opt.skipCheck = false
+	v, err := openVolume(name, opt)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (*SolidSession, error) {
+		_ = v.Close()
+		return nil, err
+	}
+	pr := newPackedFileReader(v, opt)
+	for ordinal := 0; ; ordinal++ {
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		blocks, err := pr.nextFile()
+		if err != nil {
+			return fail(err)
+		}
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
+		if ordinal == startOrdinal {
+			h := blocks.firstBlock()
+			if h.Solid {
+				return fail(ErrSolidOpen)
+			}
+			if !h.Mode().IsRegular() || h.UnKnownSize || h.UnPackedSize <= 0 || h.decVer == 0 {
+				return fail(fs.ErrInvalid)
+			}
+			archive := &ReadCloser{Reader: Reader{f: pr}, cl: v, vm: v.vm}
+			return &SolidSession{archive: archive, ctx: ctx, ordinal: startOrdinal,
+				startOrdinal: startOrdinal, pending: blocks}, nil
+		}
+		// Complete split members at the packed-header layer. nextFile would
+		// perform this loop too, but checking each block bounds cancellation
+		// latency without ever initializing a preceding member decoder.
+		for !pr.currFile().last {
+			if err := ctx.Err(); err != nil {
+				return fail(err)
+			}
+			if err := pr.nextBlock(); err != nil {
+				return fail(err)
+			}
+		}
+	}
+}
+
 // Next advances to the next member. If the previous member was only partly
 // read, Next drains it first so the underlying solid decoder remains valid.
 func (s *SolidSession) Next() (*SolidMember, error) {
@@ -105,7 +182,16 @@ func (s *SolidSession) Next() (*SolidMember, error) {
 		}
 		s.current = nil
 	}
-	header, err := s.archive.Next()
+	var header *FileHeader
+	var err error
+	if s.pending != nil {
+		blocks := s.pending
+		s.pending = nil
+		s.archive.f, err = s.archive.f.newArchiveFile(blocks)
+		header = &blocks.firstBlock().FileHeader
+	} else {
+		header, err = s.archive.Next()
+	}
 	if err != nil {
 		if err == io.EOF {
 			s.err = io.EOF
@@ -115,7 +201,7 @@ func (s *SolidSession) Next() (*SolidMember, error) {
 		}
 		return nil, err
 	}
-	if s.ordinal > 0 && !header.Solid {
+	if s.ordinal > s.startOrdinal && !header.Solid {
 		s.group++
 	}
 	member := &SolidMember{
@@ -142,6 +228,7 @@ func (s *SolidSession) Close() error {
 	err := s.archive.Close()
 	s.archive = nil
 	s.current = nil
+	s.pending = nil
 	return err
 }
 
@@ -244,6 +331,8 @@ func (r *solidMemberReader) Close() error {
 
 // Volumes returns a snapshot of volume names opened so far, not a content
 // version identity. The caller must combine it with its source identities.
+// It returns nil after Close or a terminal EOF/error; take the snapshot before
+// that transition if the caller needs to retain the opened-volume list.
 func (s *SolidSession) Volumes() []string {
 	if s == nil || s.archive == nil {
 		return nil
