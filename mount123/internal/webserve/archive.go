@@ -3,6 +3,7 @@ package webserve
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -105,7 +106,7 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 	// progressive index path as FUSE so the first safe batch renders without
 	// waiting for the complete archive.
 	page, err := s.service.ListArchivePage(r.Context(), fileID, prefix, "", archiveInitialPageSize)
-	if err != nil {
+	if err != nil && !errors.Is(err, syscall.EAGAIN) {
 		s.logger.Printf("web archive list failed file_id=%d path=%q err=%v", fileID, prefix, err)
 		if err == syscall.EACCES {
 			http.Error(w, "压缩包已加密：请先在密码管理页为它设置密码。", http.StatusForbidden)
@@ -113,6 +114,9 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		}
 		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
 		return
+	}
+	if errors.Is(err, syscall.EAGAIN) {
+		w.Header().Set("Cache-Control", "no-store")
 	}
 	file, _ := s.service.ArchiveMetadata(r.Context(), fileID)
 	name := ""
@@ -178,6 +182,18 @@ func (s *Server) handleArchiveEntries(w http.ResponseWriter, r *http.Request) {
 	prefix := strings.Trim(r.URL.Query().Get("path"), "/")
 	page, err := s.service.ListArchivePage(r.Context(), fileID, prefix, r.URL.Query().Get("cursor"), archiveEntryPageSize)
 	if err != nil {
+		if errors.Is(err, syscall.EAGAIN) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Cache-Control", "no-store")
+			w.WriteHeader(http.StatusAccepted)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"code": "archive_index_pending", "retryable": true,
+				"items": []archiveEntryJSON{}, "next_cursor": r.URL.Query().Get("cursor"),
+				"total": 0, "complete": false,
+			})
+			return
+		}
 		s.logger.Printf("web archive entries failed file_id=%d path=%q cursor=%q err=%v", fileID, prefix, r.URL.Query().Get("cursor"), err)
 		http.Error(w, "无法读取压缩包："+err.Error(), http.StatusBadRequest)
 		return
