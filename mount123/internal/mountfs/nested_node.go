@@ -37,7 +37,7 @@ func (n *Node) expandNested(ctx context.Context, e *entry) (*entry, error) {
 		if archive == nil || source == nil || n.tree.cache == nil {
 			return e, nil
 		}
-		na, err = n.tree.buildNestedArchive(ctx, source, archive, nil, e.member.name, e.member)
+		na, err = n.tree.buildNestedArchive(ctx, source, archive, e.index, e.member.name, e.member)
 	}
 	if err != nil {
 		return nil, err

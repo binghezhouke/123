@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"hash"
 	"io"
-	"strings"
 	"syscall"
 	"unicode/utf8"
 
@@ -187,10 +186,7 @@ type archivePasswordFile struct {
 // snapshots are shared through cloudDirectory, so repeated lookups are cheap.
 func (t *Tree) findArchivePassword(ctx context.Context, archive *archiveDescriptor) (*archivePasswordFile, string, error) {
 	dirID := archive.parentID
-	var ownName = archive.name + ".pwd"
-	if strings.HasSuffix(strings.ToLower(archive.name), ".7z.001") {
-		ownName = archive.name[:len(archive.name)-4] + ".pwd"
-	}
+	ownName := archivePasswordName(archive.name)
 	for level := 0; level < 128; level++ {
 		directory, err := t.cloudDirectory(ctx, dirID)
 		if err != nil {

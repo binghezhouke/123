@@ -3,6 +3,7 @@ package mountfs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"path"
 	"strings"
@@ -199,9 +200,25 @@ func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescript
 	if err != nil {
 		return failedArchiveStatus(archive.size, err), nil
 	}
-	key := "status:zip:" + archiveIdentity(source, archive)
-	if idx := n.cachedZIP(ctx, source, archive); idx != nil {
-		status := ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archive.size, ArchiveSize: archive.size}
+	// Queueing must not read the archive tail. The cached parent generation
+	// changes when the ordered manifest can change, even with the same final ID.
+	var generation uint64
+	n.tree.mu.Lock()
+	if item := n.tree.meta[fmt.Sprintf("dir:%d", archive.parentID)]; item != nil {
+		if directory, ok := item.value.(*cloudDirectory); ok {
+			generation = directory.generation
+		}
+	}
+	n.tree.mu.Unlock()
+	idx, prepared, err := n.cachedZIP(ctx, source, archive)
+	if err != nil {
+		return failedArchiveStatus(archive.size, err), nil
+	}
+	key := fmt.Sprintf("status:zip:%s:g%d", archiveIdentity(source, archive), generation)
+	archiveSize := archive.size
+	if idx != nil {
+		archiveSize = prepared.size
+		status := ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archiveSize, ArchiveSize: archiveSize}
 		n.tree.indexStatuses.set(key, status)
 		return status, nil
 	}
@@ -214,53 +231,120 @@ func (n *Node) startZIPIndexStatus(ctx context.Context, archive *archiveDescript
 		return status, nil
 	}
 	if status.State == "" {
-		n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "queued", ArchiveSize: archive.size})
+		n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "queued", ArchiveSize: archiveSize})
 		status.State = "queued"
 	}
 	if n.tree.indexStatuses.start(key) {
 		go func() {
 			defer n.tree.indexStatuses.done(key)
 			n.tree.indexStatuses.update(key, func(s *ArchiveIndexStatus) { s.State = "scanning" })
-			idx, err := n.tree.getZIPWithProgress(workqueue.Background(n.tree.ctx), source, archive.size, archive, func(offset int64) {
+			idx, err := n.tree.getZIPPreparedWithProgress(workqueue.Background(n.tree.ctx), source, archive.size, archive, nil, func(offset int64) {
 				n.tree.indexStatuses.update(key, func(s *ArchiveIndexStatus) {
 					s.State = "scanning"
-					s.ArchiveSize = archive.size
+					s.ArchiveSize = archiveSize
 					if offset > s.ScanOffset {
-						s.ScanOffset = offset
+						s.ScanOffset = min(offset, archiveSize)
 					}
 				})
+			}, func(rawSize int64) {
+				archiveSize = rawSize
+				n.tree.indexStatuses.update(key, func(s *ArchiveIndexStatus) { s.ArchiveSize = rawSize })
 			})
 			if err != nil {
-				n.tree.indexStatuses.set(key, failedArchiveStatus(archive.size, err))
+				n.tree.indexStatuses.set(key, failedArchiveStatus(archiveSize, err))
 				return
 			}
-			n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archive.size, ArchiveSize: archive.size})
+			n.tree.indexStatuses.set(key, ArchiveIndexStatus{State: "complete", Members: len(idx.members), ScanOffset: archiveSize, ArchiveSize: archiveSize})
 		}()
 	}
 	status, _ = n.tree.indexStatuses.snapshot(key)
 	return status, nil
 }
 
-func (n *Node) cachedZIP(ctx context.Context, source *storage.Remote, archive *archiveDescriptor) *zipIndex {
+func (n *Node) cachedZIP(ctx context.Context, source *storage.Remote, archive *archiveDescriptor) (*zipIndex, *preparedArchiveInput, error) {
 	var password []byte
 	if _, ok := n.tree.api.(PasswordAPI); ok {
-		var err error
-		password, err = n.tree.archivePassword(ctx, archive)
-		if err != nil {
-			return nil
+		if value, err := n.tree.archivePassword(ctx, archive); err == nil {
+			password = value
 		}
 	}
 	defer clear(password)
 	identity := archiveIdentity(source, archive)
-	key := "zip:" + n.tree.diskCacheScope() + ":" + identity + ":" + n.tree.passwordTag(archive, password)
+	scope, passwordIdentity := n.tree.diskCacheScope(), n.tree.passwordTag(archive, password)
+	key := "zip:" + scope + ":" + identity + ":" + passwordIdentity
+	lookup := func(key string) *zipIndex {
+		n.tree.mu.Lock()
+		defer n.tree.mu.Unlock()
+		item := n.tree.meta[key]
+		if item == nil || (!item.expires.IsZero() && time.Now().After(item.expires)) {
+			return nil
+		}
+		index, _ := item.value.(*zipIndex)
+		return index
+	}
+	if index := lookup(key); index != nil && index.prepared != nil {
+		return index, index.prepared, nil
+	}
+	// Validate a resident split index against the immutable cached directory.
+	// This is a metadata operation; a cold tail is prepared by the worker.
 	n.tree.mu.Lock()
 	defer n.tree.mu.Unlock()
-	item := n.tree.meta[key]
-	if item == nil || (!item.expires.IsZero() && time.Now().After(item.expires)) {
-		return nil
+	item := n.tree.meta[fmt.Sprintf("dir:%d", archive.parentID)]
+	if item == nil {
+		return nil, nil, nil
 	}
-	index, _ := item.value.(*zipIndex)
-	return index
+	directory, ok := item.value.(*cloudDirectory)
+	if !ok {
+		return nil, nil, nil
+	}
+	var candidates []archiveVolumeCandidate
+	for metaKey, item := range n.tree.meta {
+		if !strings.HasPrefix(metaKey, "zip:") || (!item.expires.IsZero() && time.Now().After(item.expires)) {
+			continue
+		}
+		index, ok := item.value.(*zipIndex)
+		if !ok || index.prepared == nil || index.prepared.layout.kind == archiveSingle {
+			continue
+		}
+		prepared := index.prepared
+		if metaKey != "zip:"+scope+":"+prepared.identity+":"+passwordIdentity {
+			continue
+		}
+		volumes, ok := prepared.input.(*volumeReaderAt)
+		if !ok || len(volumes.parts) == 0 {
+			continue
+		}
+		pinned := 0
+		if prepared.layout.kind == archiveZIPDisks {
+			pinned = len(volumes.parts) - 1
+		}
+		final := volumes.parts[pinned]
+		if final.ID != archive.id || final.Version != archive.version || final.Size != archive.size || final.Name != archive.name {
+			continue
+		}
+		if candidates == nil {
+			candidates = make([]archiveVolumeCandidate, len(directory.files))
+			for i, f := range directory.files {
+				candidates[i] = archiveVolumeCandidate{f.Name, f.Size, f.IsDir}
+			}
+		}
+		indices, _, _, err := discoverArchiveVolumes(archive.name, prepared.layout.kind, uint32(len(volumes.parts)-1), candidates)
+		if err != nil || len(indices) != len(volumes.parts) {
+			continue
+		}
+		matches := true
+		for i, j := range indices {
+			f, old := directory.files[j], volumes.parts[i]
+			if f.ID != old.ID || f.Version != old.Version || f.Size != old.Size || f.Name != old.Name {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return index, prepared, nil
+		}
+	}
+	return nil, nil, nil
 }
 
 func (n *Node) startOtherIndexStatus(ctx context.Context, archive *archiveDescriptor, retry bool) (ArchiveIndexStatus, error) {

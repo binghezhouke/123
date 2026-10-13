@@ -33,6 +33,7 @@ type nestedArchive struct {
 	cachePrefix   string
 	handles       []*storage.Handle
 	lazyReaders   []*nestedMemberReader
+	lazyInputs    []io.Closer
 	parent        *nestedArchive
 	parentRelease func()
 	refs          int
@@ -79,8 +80,8 @@ func (n *nestedArchive) release() error {
 	}
 	n.refs = 0
 	n.closed = true
-	handles, readers, parentRelease := n.handles, n.lazyReaders, n.parentRelease
-	n.handles, n.lazyReaders, n.parentRelease = nil, nil, nil
+	handles, readers, inputs, parentRelease := n.handles, n.lazyReaders, n.lazyInputs, n.parentRelease
+	n.handles, n.lazyReaders, n.lazyInputs, n.parentRelease = nil, nil, nil, nil
 	n.mu.Unlock()
 	var first error
 	for _, h := range handles {
@@ -90,6 +91,11 @@ func (n *nestedArchive) release() error {
 	}
 	for _, r := range readers {
 		if err := r.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	for _, input := range inputs {
+		if err := input.Close(); err != nil && first == nil {
 			first = err
 		}
 	}

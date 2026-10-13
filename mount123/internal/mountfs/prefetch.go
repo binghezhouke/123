@@ -541,6 +541,9 @@ func (p *imagePrefetch) targetIdentity(n *Node) prefetchTarget {
 	case e.disc != nil:
 		content = fmt.Sprintf("disc:%s:%d:%d", e.disc.path, e.disc.size, e.disc.modified.UnixNano())
 	}
+	if e.index != nil && e.index.prepared != nil && e.index.prepared.layout.kind != archiveSingle {
+		content += ":volumes:" + e.index.prepared.identity
+	}
 	return prefetchTarget{directory: p.directoryIdentity(n.parent), name: e.name, content: content}
 }
 

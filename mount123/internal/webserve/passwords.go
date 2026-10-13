@@ -177,7 +177,7 @@ func validPassword(password string) bool {
 
 func isArchiveName(name string) bool {
 	lower := strings.ToLower(name)
-	for _, suffix := range []string{".zip", ".7z", ".7zz", ".rar", ".7z.001"} {
+	for _, suffix := range []string{".zip", ".7z", ".7zz", ".rar", ".7z.001", ".zip.001"} {
 		if strings.HasSuffix(lower, suffix) {
 			return true
 		}

@@ -270,7 +270,7 @@ func dependentMetadataKeys(t *Tree, parentID int64, previous *metaItem, fresh *c
 				if archiveKind(file.Name) != "" {
 					keys[fmt.Sprintf("password:%d:%s:%d:%d:%s:g%d", file.ID, file.Version, file.Size, parentID, file.Name, directory.generation)] = nil
 				}
-				if strings.HasSuffix(strings.ToLower(file.Name), ".7z.001") {
+				if _, split := byteSplitStem(file.Name); split {
 					keys[fmt.Sprintf("volumes:%d:%s:g%d", file.ID, file.Version, directory.generation)] = nil
 				}
 			}

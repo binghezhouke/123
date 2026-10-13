@@ -82,6 +82,9 @@ func archiveKind(name string) string {
 			return kind
 		}
 	}
+	if strings.HasSuffix(name, ".zip.001") {
+		return ".zip"
+	}
 	if strings.HasSuffix(name, ".7zz") || strings.HasSuffix(name, ".7z.001") {
 		return ".7z"
 	}

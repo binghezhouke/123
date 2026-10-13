@@ -889,7 +889,7 @@ func classifyEntry(name string, isDir bool) entryKindInfo {
 		return entryKinds.video
 	case audioSuffixes[extension] != "":
 		return entryKinds.audio
-	case archiveSuffixes[extension]:
+	case archiveSuffixes[extension] || isArchiveName(name):
 		return entryKinds.archive
 	case textSuffixes[extension]:
 		return entryKinds.text

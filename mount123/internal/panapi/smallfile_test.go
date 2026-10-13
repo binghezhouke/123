@@ -9,7 +9,7 @@ import (
 )
 
 func TestSaveArchivePasswordCanonicalNames(t *testing.T) {
-	for _, tc := range []struct{ name, want string }{{"NO.001", "NO.001.pwd"}, {"a.rar", "a.rar.pwd"}, {"a.7z.001", "a.7z.pwd"}, {"a.zip", "a.zip.pwd"}} {
+	for _, tc := range []struct{ name, want string }{{"NO.001", "NO.001.pwd"}, {"a.rar", "a.rar.pwd"}, {"a.7z.001", "a.7z.pwd"}, {"a.zip", "a.zip.pwd"}, {"a.zip.001", "a.zip.pwd"}, {"a.ZIP.001", "a.ZIP.pwd"}} {
 		t.Run(tc.name, func(t *testing.T) {
 			creates := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

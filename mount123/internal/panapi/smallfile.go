@@ -75,7 +75,8 @@ func PasswordSidecarName(archive File) (string, error) {
 		return "", errors.New("panapi: invalid archive metadata")
 	}
 	name := archive.Name + ".pwd"
-	if strings.HasSuffix(strings.ToLower(archive.Name), ".7z.001") {
+	lower := strings.ToLower(archive.Name)
+	if strings.HasSuffix(lower, ".7z.001") || strings.HasSuffix(lower, ".zip.001") {
 		name = archive.Name[:len(archive.Name)-4] + ".pwd"
 	}
 	if len(name) > 255 {
@@ -93,8 +94,8 @@ func (c *Client) SaveZIPPassword(ctx context.Context, archive File, password []b
 	return file, err
 }
 
-// SaveArchivePassword stores <original name>.pwd, or <name>.7z.pwd for the
-// first 7z volume. A fresh sibling listing enforces skip-existing by default.
+// SaveArchivePassword stores <original name>.pwd, omitting .001 for the first
+// 7z or ZIP byte volume. A fresh sibling listing enforces skip-existing by default.
 // The bool result reports that an existing sidecar was left unchanged.
 func (c *Client) SaveArchivePassword(ctx context.Context, archive File, password []byte, overwrite bool) (File, bool, error) {
 	name, err := PasswordSidecarName(archive)

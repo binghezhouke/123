@@ -5,11 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"math"
-	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,15 +16,25 @@ import (
 )
 
 func (t *Tree) rootArchiveView(ctx context.Context, source *storage.Remote, a *archiveDescriptor, idx *zipIndex, password []byte) (*nestedArchive, error) {
-	reader, size, identity, err := t.archiveSource(ctx, source, a)
-	if err != nil {
-		return nil, err
-	}
 	var input archiveReaderAt
-	if volumes, ok := reader.(*volumeReaderAt); ok {
-		input = volumes
+	var size int64
+	var identity string
+	if a.kind() == ".zip" {
+		if idx == nil || idx.prepared == nil {
+			return nil, syscall.EIO
+		}
+		input, size, identity = idx.prepared.input, idx.prepared.size, idx.prepared.identity
 	} else {
-		input = source
+		reader, rawSize, rawIdentity, err := t.archiveSource(ctx, source, a)
+		if err != nil {
+			return nil, err
+		}
+		size, identity = rawSize, rawIdentity
+		if volumes, ok := reader.(*volumeReaderAt); ok {
+			input = volumes
+		} else {
+			input = source
+		}
 	}
 	key := t.cache.StableDigest("nested-view-v1", t.diskCacheScope()+"\x00"+identity+"\x00"+a.kind()+"\x00"+t.passwordTag(a, password))
 	protected, err := t.encryptPassword(key, password)
@@ -144,6 +151,10 @@ func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *
 		return nil, nil, err
 	}
 	defer clear(password)
+	return t.viewMemberInputPrepared(ctx, n, m, password)
+}
+
+func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m *member, password []byte) (archiveReaderAt, *nestedMemberReader, error) {
 	input := viewInput(n)
 	// Password discovery can load cloud metadata through the same admission
 	// queue. Complete it before taking a decoder permit, including on a miss.
@@ -209,38 +220,50 @@ func (t *Tree) viewMemberInput(ctx context.Context, n *nestedArchive, original *
 	return r, r, nil
 }
 
+func nestedVolumeParts(idx *zipIndex, m *member, kind archiveSplitKind, lastDisk uint32) ([]*member, []int64, int64, error) {
+	idx.mu.RLock()
+	defer idx.mu.RUnlock()
+	candidates := make([]archiveVolumeCandidate, 0, len(idx.members))
+	members := make([]*member, 0, len(idx.members))
+	for name, candidate := range idx.members {
+		if candidate.size > math.MaxInt64 {
+			return nil, nil, 0, syscall.EFBIG
+		}
+		candidates = append(candidates, archiveVolumeCandidate{name, int64(candidate.size), false})
+		members = append(members, candidate)
+	}
+	// Directory names are candidates too: a required volume cannot silently be
+	// replaced by a directory, including one represented only by child entries.
+	parent := m.name
+	slash := strings.LastIndexByte(parent, '/')
+	prefix, directory := "", ""
+	if slash >= 0 {
+		prefix, directory = parent[:slash+1], parent[:slash]
+	}
+	if dir := idx.dirLocked(directory); dir != nil {
+		for name := range dir.dirs {
+			candidates = append(candidates, archiveVolumeCandidate{prefix + name, 0, true})
+			members = append(members, nil)
+		}
+	}
+	indices, sizes, total, err := discoverArchiveVolumes(m.name, kind, lastDisk, candidates)
+	if err != nil {
+		return nil, nil, 0, err
+	}
+	parts := make([]*member, len(indices))
+	for i, index := range indices {
+		parts[i] = members[index]
+	}
+	return parts, sizes, total, nil
+}
+
 func nestedParts(idx *zipIndex, m *member) ([]*member, int64, error) {
-	parts := []*member{m}
-	if strings.HasSuffix(strings.ToLower(m.name), ".7z.001") {
-		stem := m.name[:len(m.name)-4]
-		idx.mu.RLock()
-		for name, candidate := range idx.members {
-			if !strings.HasPrefix(name, stem+".") || name == m.name {
-				continue
-			}
-			suffix := strings.TrimPrefix(name, stem+".")
-			number, err := strconv.Atoi(suffix)
-			if err != nil || len(suffix) != 3 || number < 2 {
-				continue
-			}
-			parts = append(parts, candidate)
-		}
-		idx.mu.RUnlock()
-		sort.Slice(parts, func(i, j int) bool { return parts[i].name < parts[j].name })
-		for i, part := range parts {
-			if part.name != fmt.Sprintf("%s.%03d", stem, i+1) {
-				return nil, 0, syscall.EIO
-			}
-		}
+	kind := archiveSingle
+	if _, ok := byteSplitStem(m.name); ok {
+		kind = archiveByteSplit
 	}
-	var size int64
-	for _, part := range parts {
-		if part.size > math.MaxInt64 || int64(part.size) > math.MaxInt64-size {
-			return nil, 0, syscall.EFBIG
-		}
-		size += int64(part.size)
-	}
-	return parts, size, nil
+	parts, _, size, err := nestedVolumeParts(idx, m, kind, 0)
+	return parts, size, err
 }
 
 // enterNestedArchive is the single explicit hop used by both frontends. It
@@ -266,7 +289,22 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 			_ = child.Close()
 		}
 	}()
-	parts, size, err := nestedParts(parent.index, m)
+	splitKind := archiveSingle
+	if _, ok := byteSplitStem(m.name); ok {
+		splitKind = archiveByteSplit
+	}
+	var finalInput *nestedVolumeInput
+	var lastDisk uint32
+	if kind == ".zip" && splitKind == archiveSingle {
+		finalInput = &nestedVolumeInput{owner: t, parent: parent, member: m}
+		child.lazyInputs = append(child.lazyInputs, finalInput)
+		hint, e := readZIPVolumeHint(ctx, finalInput, int64(m.size))
+		if e != nil {
+			return nil, e
+		}
+		splitKind, lastDisk = hint.kind, hint.lastDisk
+	}
+	parts, sizes, size, err := nestedVolumeParts(parent.index, m, splitKind, lastDisk)
 	if err != nil {
 		return nil, err
 	}
@@ -286,19 +324,29 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 		Size    uint64
 		CRC     uint32
 	}
+	// Resolve possible parent secrets before an index decoder permit is held.
+	// Lazy volume mapping then only decrypts this already-discovered value.
+	discoverPassword := parent.format == ".7z"
+	for _, part := range parts {
+		discoverPassword = discoverPassword || part.encrypted
+	}
+	knownPassword, err := t.viewPassword(ctx, parent, discoverPassword)
+	if err != nil {
+		return nil, err
+	}
+	clear(knownPassword)
+	if finalInput != nil {
+		finalInput.passwordKnown = true
+	}
 	identities := make([]partIdentity, 0, len(parts))
 	inputs := make([]archiveReaderAt, 0, len(parts))
-	sizes := make([]int64, 0, len(parts))
 	for _, part := range parts {
-		input, lazy, e := t.viewMemberInput(ctx, parent, part)
-		if e != nil {
-			return nil, e
+		input := finalInput
+		if input == nil || part.name != m.name {
+			input = &nestedVolumeInput{owner: t, parent: parent, member: part, passwordKnown: true}
+			child.lazyInputs = append(child.lazyInputs, input)
 		}
 		inputs = append(inputs, input)
-		sizes = append(sizes, int64(part.size))
-		if lazy != nil {
-			child.lazyReaders = append(child.lazyReaders, lazy)
-		}
 		identities = append(identities, partIdentity{part.name, part.ordinal, part.size, part.crc})
 	}
 	child.input = inputs[0]
@@ -315,7 +363,16 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 		Parent, ParentPassword, Format string
 		Parts                          []partIdentity
 	}{parent.identity, parentPasswordTag, kind, identities})
-	child.cachePrefix = t.cache.StableDigest("nested-view-input-v1", string(encoded))
+	namespace := "nested-view-input-v1"
+	if kind == ".zip" && splitKind != archiveSingle {
+		encoded, _ = json.Marshal(struct {
+			Parent, ParentPassword, Format string
+			Parts                          []partIdentity
+			Split                          archiveSplitKind
+		}{parent.identity, parentPasswordTag, kind, identities, splitKind})
+		namespace = "nested-view-input-v2"
+	}
+	child.cachePrefix = t.cache.StableDigest(namespace, string(encoded))
 	// Parse clear headers without password discovery. For encrypted headers, try
 	// the current inner sidecar/shared password, then the effective parent secret.
 	index := func(password []byte) (*zipIndex, error) {
@@ -326,7 +383,16 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 		defer release()
 		bound := archiveRequestReader{ctx: operation, input: child.input}
 		if kind == ".zip" {
-			return buildZIP(operation, t, child.input, size)
+			raw := &preparedArchiveInput{input: child.input, size: size, identity: child.cachePrefix, layout: archiveVolumeLayout{kind: splitKind, sizes: sizes}}
+			indexInput, indexSize, e := prepareZIPIndexInput(operation, raw, defaults(t.opts).MaxZIPEntries, min(policy.MaxIndexBytes, defaults(t.opts).MetadataBytes))
+			if e != nil {
+				return nil, e
+			}
+			idx, e := buildZIP(operation, t, indexInput, indexSize)
+			if e == nil {
+				idx.attachZIPReader(child.input)
+			}
+			return idx, e
 		}
 		var members []archiveMember
 		if kind == ".rar" {

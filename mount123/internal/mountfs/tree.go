@@ -186,6 +186,7 @@ type entry struct {
 	archive     *archiveDescriptor
 	directory   bool
 	nested      *nestedArchive
+	index       *zipIndex
 }
 type member struct {
 	sevenStream      *sevenStreamLocation
@@ -745,8 +746,10 @@ func (n *Node) list(ctx context.Context) (map[string]*entry, error) {
 		if archive == nil && n.item.cloud != nil {
 			archive = &archiveDescriptor{id: n.item.cloud.ID, parentID: n.item.cloud.ParentID, name: n.item.cloud.Name, version: n.item.cloud.Version, size: n.item.cloud.Size}
 		}
-		var idx *zipIndex
-		if archive != nil && archive.kind() != ".zip" {
+		idx := n.item.index
+		if idx != nil {
+			// Directory descendants retain the same index and frozen volumes.
+		} else if archive != nil && archive.kind() != ".zip" {
 			password, e := n.tree.otherPassword(ctx, archive)
 			if e != nil {
 				return nil, e
@@ -793,10 +796,10 @@ func (t *Tree) getZIP(ctx context.Context, source *storage.Remote, size int64, a
 }
 
 func (t *Tree) getZIPWithProgress(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor, progress func(int64)) (*zipIndex, error) {
-	identity := source.Key()
-	if archive != nil {
-		identity = archiveIdentity(source, archive)
-	}
+	return t.getZIPPreparedWithProgress(ctx, source, size, archive, nil, progress)
+}
+
+func (t *Tree) getZIPPreparedWithProgress(ctx context.Context, source *storage.Remote, size int64, archive *archiveDescriptor, prepared *preparedArchiveInput, progress func(int64), preparedReady ...func(int64)) (*zipIndex, error) {
 	var password []byte
 	if archive != nil {
 		if _, ok := t.api.(PasswordAPI); ok {
@@ -807,25 +810,86 @@ func (t *Tree) getZIPWithProgress(ctx context.Context, source *storage.Remote, s
 	}
 	defer clear(password)
 	passwordIdentity := t.passwordTag(archive, password)
+	var restored *zipIndex
+	if prepared == nil && archive != nil && t.cache != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		// A validated single-source DTO proves this immutable final source was
+		// disk zero. Split inputs have a distinct identity and cannot match it.
+		singleIdentity := archiveIdentity(source, archive)
+		metaKey := "zip:" + t.diskCacheScope() + ":" + singleIdentity + ":" + passwordIdentity
+		t.mu.Lock()
+		if item := t.meta[metaKey]; item != nil && (item.expires.IsZero() || time.Now().Before(item.expires)) {
+			if idx, ok := item.value.(*zipIndex); ok && idx.prepared != nil && idx.prepared.layout.kind == archiveSingle {
+				t.seq++
+				item.seq = t.seq
+				t.mu.Unlock()
+				return idx, nil
+			}
+		}
+		t.mu.Unlock()
+		singleKey := t.archiveIndexCacheKey(".zip", singleIdentity, archive, password)
+		digest := t.cache.StableDigest("archive-index-identity-v1", singleIdentity)
+		if idx, ok := t.loadPersistentArchiveIndex(ctx, singleKey, ".zip", size, digest); ok {
+			prepared = &preparedArchiveInput{input: source, size: size, identity: singleIdentity, layout: archiveVolumeLayout{kind: archiveSingle, sizes: []int64{size}}, durable: true}
+			restored = idx
+		}
+	}
+	if prepared == nil {
+		if archive != nil {
+			var err error
+			prepared, err = t.prepareCloudArchiveInput(ctx, source, archive)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			prepared = &preparedArchiveInput{input: source, size: size, identity: source.Key(), layout: archiveVolumeLayout{kind: archiveSingle, sizes: []int64{size}}, durable: true}
+		}
+	}
+	identity := prepared.identity
+	if len(preparedReady) != 0 && preparedReady[0] != nil {
+		preparedReady[0](prepared.size)
+	}
 	cacheKey := t.archiveIndexCacheKey(".zip", identity, archive, password)
 	identityDigest := ""
 	if t.cache != nil {
 		identityDigest = t.cache.StableDigest("archive-index-identity-v1", identity)
 	}
 	value, err := t.loadMeta(ctx, "zip:"+t.diskCacheScope()+":"+identity+":"+passwordIdentity, t.opts.ZIPIndexTTL, func(ctx context.Context) (any, int64, error) {
-		if idx, ok := t.loadPersistentArchiveIndex(ctx, cacheKey, ".zip", size, identityDigest); ok {
-			idx.attachZIPReader(source)
-			return idx, idx.bytes, nil
+		if restored != nil {
+			restored.prepared = prepared
+			restored.attachZIPReader(archiveOffsetInput{input: prepared.input, size: prepared.size})
+			return restored, restored.bytes, nil
 		}
-		idx, err := buildZIPWithProgress(ctx, t, source, size, progress)
+		if prepared.durable {
+			if idx, ok := t.loadPersistentArchiveIndex(ctx, cacheKey, ".zip", prepared.size, identityDigest); ok {
+				idx.prepared = prepared
+				idx.attachZIPReader(archiveOffsetInput{input: prepared.input, size: prepared.size})
+				return idx, idx.bytes, nil
+			}
+		}
+		indexRaw := *prepared
+		if progress != nil {
+			indexRaw.input = archiveIndexProgressInput{input: prepared.input, size: prepared.size, progress: progress}
+		}
+		indexInput, indexSize, err := prepareZIPIndexInput(ctx, &indexRaw, t.opts.MaxZIPEntries, 64<<20)
 		if err != nil {
 			return nil, 0, err
 		}
+		idx, err := buildZIPWithProgress(ctx, t, indexInput, indexSize, nil)
+		if err != nil {
+			return nil, 0, err
+		}
+		idx.prepared = prepared
+		idx.attachZIPReader(archiveOffsetInput{input: prepared.input, size: prepared.size})
 		identityDigest := ""
 		if t.cache != nil {
 			identityDigest = t.cache.StableDigest("archive-index-identity-v1", identity)
 		}
-		t.persistArchiveIndex(ctx, cacheKey, ".zip", size, identityDigest, idx)
+		if prepared.durable {
+			t.persistArchiveIndex(ctx, cacheKey, ".zip", prepared.size, identityDigest, idx)
+		}
 		return idx, idx.bytes, nil
 	})
 	if err != nil {
@@ -836,6 +900,7 @@ func (t *Tree) getZIPWithProgress(ctx context.Context, source *storage.Remote, s
 
 // ZIP index paths are represented by slash-separated components on the Node.
 type zipIndex struct {
+	prepared    *preparedArchiveInput
 	mu          sync.RWMutex
 	listingID   string
 	changed     chan struct{}
@@ -867,19 +932,23 @@ func (z *zipIndex) children(path string, source *storage.Remote, archiveSize int
 			}
 		}
 	}
+	var index *zipIndex
+	if z.prepared != nil && z.complete {
+		index = z
+	}
 	out := make(map[string]*entry, len(dir.dirs)+len(dir.files))
 	for k := range dir.dirs {
 		childPath := k
 		if path != "" {
 			childPath = path + "/" + k
 		}
-		out[k] = &entry{name: k, directory: true, zipPath: childPath, source: source, archiveSize: archiveSize, archive: archive}
+		out[k] = &entry{name: k, directory: true, zipPath: childPath, source: source, archiveSize: archiveSize, archive: archive, index: index}
 	}
 	for k, m := range dir.files {
 		copy := *m
 		copy.file = nil
 		copy.reader = nil
-		out[k] = &entry{name: k, directory: isSplit7zEntry(k), member: &copy, source: source, archiveSize: archiveSize, archive: archive}
+		out[k] = &entry{name: k, directory: isSplit7zEntry(k), member: &copy, source: source, archiveSize: archiveSize, archive: archive, index: index}
 	}
 	return out
 }
@@ -1203,6 +1272,9 @@ func stableAttrForEntry(parentIno uint64, e *entry) fs.StableAttr {
 	if e.source != nil {
 		fmt.Fprint(hash, ":", e.source.Key())
 	}
+	if e.index != nil && e.index.prepared != nil && e.index.prepared.layout.kind != archiveSingle {
+		fmt.Fprint(hash, ":volumes:", e.index.prepared.identity)
+	}
 	if e.nested != nil {
 		identity := e.nested.identity
 		if identity == "" {
@@ -1316,10 +1388,19 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 	}
 	m := n.item.member
 	src := n.item.source
-	idx, err := n.tree.getZIP(ctx, src, n.item.archiveSize, n.item.archive)
-	if err != nil {
-		return nil, 0, toErrno(err)
+	idx := n.item.index
+	if idx == nil {
+		var err error
+		idx, err = n.tree.getZIP(ctx, src, n.item.archiveSize, n.item.archive)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
 	}
+	if idx.prepared == nil {
+		return nil, 0, syscall.EIO
+	}
+	raw := archiveOffsetInput{input: idx.prepared.input, size: idx.prepared.size}
+	identity := rootZIPMemberIdentity(idx.prepared)
 	full := idx.members[m.name]
 	if full == nil {
 		return nil, 0, syscall.EIO
@@ -1331,7 +1412,7 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		defer clear(password)
 		tag := n.tree.passwordTag(n.item.archive, password)
-		key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
+		key := n.tree.diskCacheScope() + ":" + identity + ":.zip:encrypted-member:" + m.name + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, tag)
 		streamPassword := append([]byte(nil), password...)
 		if growing, err := n.tree.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
 			defer clear(streamPassword)
@@ -1341,7 +1422,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			}
 			defer release()
 			started := time.Now()
-			err = encryptedMember(fillCtx, src, full, streamPassword, w)
+			if _, err := rootZIPDataOffset(fillCtx, full, idx.prepared); err != nil {
+				return err
+			}
+			err = encryptedMember(fillCtx, raw, full, streamPassword, w)
 			n.tree.observeStage(iostats.StageDecompression, started)
 			return err
 		}); err != nil {
@@ -1361,7 +1445,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			}
 			defer release()
 			started := time.Now()
-			err = encryptedMember(ctx, src, full, password, w)
+			if _, err := rootZIPDataOffset(ctx, full, idx.prepared); err != nil {
+				return err
+			}
+			err = encryptedMember(ctx, raw, full, password, w)
 			n.tree.observeStage(iostats.StageDecompression, started)
 			return err
 		})
@@ -1380,13 +1467,16 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		if m.compressed != m.size {
 			return nil, 0, syscall.EIO
 		}
-		offset, err := full.dataOffset(ctx)
+		offset, err := rootZIPDataOffset(ctx, full, idx.prepared)
 		if err != nil {
 			return nil, 0, toErrno(err)
 		}
-		return n.newRemoteHandle(src, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
+		if remote, ok := idx.prepared.input.(*storage.Remote); ok {
+			return n.newRemoteHandle(remote, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
+		}
+		return n.newArchiveInputHandle(idx.prepared.input, offset, m.size), fuse.FOPEN_DIRECT_IO, 0
 	}
-	key := n.tree.diskCacheScope() + ":" + src.Key() + ":.zip:member:" + m.name + fmt.Sprintf(":%08x:%d", m.crc, m.size)
+	key := n.tree.diskCacheScope() + ":" + identity + ":.zip:member:" + m.name + fmt.Sprintf(":%08x:%d", m.crc, m.size)
 	if growing, err := n.tree.acquireGrowingZIPMember(ctx, key, m.size, func(fillCtx context.Context, w io.Writer) error {
 		release, err := n.tree.acquireBuild(fillCtx)
 		if err != nil {
@@ -1394,7 +1484,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		defer release()
 		started := time.Now()
-		err = inflateMember(fillCtx, src, full, w)
+		if _, err := rootZIPDataOffset(fillCtx, full, idx.prepared); err != nil {
+			return err
+		}
+		err = inflateMember(fillCtx, raw, full, w)
 		n.tree.observeStage(iostats.StageDecompression, started)
 		return err
 	}); err != nil {
@@ -1409,7 +1502,10 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 		}
 		defer release()
 		started := time.Now()
-		err = inflateMember(ctx, src, full, w)
+		if _, err := rootZIPDataOffset(ctx, full, idx.prepared); err != nil {
+			return err
+		}
+		err = inflateMember(ctx, raw, full, w)
 		n.tree.observeStage(iostats.StageDecompression, started)
 		return err
 	})
@@ -1530,6 +1626,7 @@ func (r *contextReader) Read(p []byte) (int, error) {
 }
 
 type handle struct {
+	input     archiveReaderAt
 	reader    io.ReaderAt
 	closer    io.Closer
 	remote    *storage.Remote
@@ -1559,7 +1656,9 @@ func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 	}
 	var n int
 	var err error
-	if h.remote != nil {
+	if h.input != nil {
+		n, err = h.input.ReadAtContext(ctx, dest, h.base+off)
+	} else if h.remote != nil {
 		n, err = h.remote.ReadAtContext(ctx, dest, h.base+off)
 	} else if h.growing != nil {
 		n, err = h.growing.ReadAt(ctx, dest, off)
@@ -1574,7 +1673,7 @@ func (h *handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 	if h.stats != nil && n > 0 {
 		h.stats.RecordForegroundRead(uint64(n), time.Since(started))
 	}
-	if h.remote != nil && h.readAhead != nil && n > 0 {
+	if h.readAhead != nil && n > 0 {
 		h.readAhead.observe(off, int64(n), time.Since(started))
 	}
 	return fuse.ReadResultData(dest[:n]), 0

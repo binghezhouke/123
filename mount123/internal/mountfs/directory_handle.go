@@ -108,7 +108,7 @@ func newIndexedDirectoryHandle(parent *Node, idx *zipIndex, path string, source 
 		resolve: func(name string) *entry {
 			idx.mu.RLock()
 			defer idx.mu.RUnlock()
-			return indexEntry(idx.dirLocked(path), path, name, source, archive)
+			return indexEntry(idx.dirLocked(path), path, name, source, archive, idx)
 		},
 		release: release,
 	}

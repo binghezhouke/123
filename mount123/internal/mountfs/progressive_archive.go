@@ -71,7 +71,13 @@ func (z *zipIndex) displayMemberLocked(path string) *member {
 	return dir.files[path]
 }
 
-func indexEntry(d *zipDir, path, name string, source *storage.Remote, a *archiveDescriptor) *entry {
+func indexEntry(d *zipDir, path, name string, source *storage.Remote, a *archiveDescriptor, indexes ...*zipIndex) *entry {
+	var index *zipIndex
+	if len(indexes) > 0 && indexes[0] != nil && indexes[0].complete && indexes[0].prepared != nil {
+		// ZIP metadata and raw inputs share one frozen preparation. Other formats
+		// keep their existing password-discovery path when entering nested members.
+		index = indexes[0]
+	}
 	if d == nil {
 		return nil
 	}
@@ -80,23 +86,23 @@ func indexEntry(d *zipDir, path, name string, source *storage.Remote, a *archive
 		if path != "" {
 			childPath = path + "/" + name
 		}
-		return &entry{name: name, directory: true, zipPath: childPath, source: source, archiveSize: a.size, archive: a}
+		return &entry{name: name, directory: true, zipPath: childPath, source: source, archiveSize: a.size, archive: a, index: index}
 	}
 	if m := d.files[name]; m != nil {
 		copied := *m
 		copied.file = nil
 		copied.reader = nil
-		// A split 7z archive is entered through its .001 volume.  Mark that
+		// A byte-split archive is entered through its .001 volume.  Mark that
 		// volume as a directory in the listing so a prior readdir/getattr does
 		// not cache it as a regular file before Lookup can expand it.
-		return &entry{name: name, directory: isSplit7zEntry(name), member: &copied, source: source, archiveSize: a.size, archive: a}
+		return &entry{name: name, directory: isSplit7zEntry(name), member: &copied, source: source, archiveSize: a.size, archive: a, index: index}
 	}
 	return nil
 }
 
 func isSplit7zEntry(name string) bool {
-	name = strings.ToLower(name)
-	return strings.HasSuffix(name, ".7z.001")
+	_, ok := byteSplitStem(name)
+	return ok
 }
 
 func indexEntryNested(d *zipDir, path, name string, nested *nestedArchive) *entry {
@@ -146,7 +152,7 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 		defer timer.Stop()
 		for {
 			idx.mu.RLock()
-			e := indexEntry(idx.dirLocked(n.item.zipPath), n.item.zipPath, name, source, a)
+			e := indexEntry(idx.dirLocked(n.item.zipPath), n.item.zipPath, name, source, a, idx)
 			done, scanErr, changed := idx.complete, idx.scanErr, idx.changed
 			started := len(idx.root.order) > 0
 			idx.mu.RUnlock()
@@ -194,8 +200,10 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 			return nil, false, err
 		}
 	}
-	var index *zipIndex
-	if archive.kind() == ".zip" {
+	index := n.item.index
+	if index != nil {
+		// Descendants retain the index and volumes selected by their parent.
+	} else if archive.kind() == ".zip" {
 		index, err = n.tree.getZIP(ctx, packedSource, archive.size, archive)
 	} else {
 		password, passwordErr := n.tree.otherPassword(ctx, archive)
@@ -209,7 +217,7 @@ func (n *Node) lookupEntries(ctx context.Context, name string) (map[string]*entr
 		return nil, false, err
 	}
 	index.mu.RLock()
-	e := indexEntry(index.dirLocked(n.item.zipPath), n.item.zipPath, name, packedSource, archive)
+	e := indexEntry(index.dirLocked(n.item.zipPath), n.item.zipPath, name, packedSource, archive, index)
 	index.mu.RUnlock()
 	if e == nil {
 		return nil, false, nil
@@ -280,7 +288,7 @@ func (n *Node) OpendirHandle(ctx context.Context, flags uint32) (fs.FileHandle, 
 				names = append([]string(nil), dir.order...)
 				bytes += int64(16 * len(names))
 				for _, name := range names {
-					if e := indexEntry(dir, n.item.zipPath, name, source, archive); e != nil {
+					if e := indexEntry(dir, n.item.zipPath, name, source, archive, idx); e != nil {
 						entries[name] = e
 						if e.directory {
 							bytes += int64(128 + len(name))
@@ -329,8 +337,10 @@ func (n *Node) archiveDirectoryIndex(ctx context.Context) (*zipIndex, *storage.R
 			return nil, nil, nil, err
 		}
 	}
-	var idx *zipIndex
-	if archive.kind() == ".zip" {
+	idx := n.item.index
+	if idx != nil {
+		// Directory handles use the same frozen input as the inode.
+	} else if archive.kind() == ".zip" {
 		idx, err = n.tree.getZIP(ctx, source, archive.size, archive)
 	} else {
 		password, passwordErr := n.tree.otherPassword(ctx, archive)

@@ -301,6 +301,11 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 			return nil, 0, err
 		}
 	}
+	if idx.prepared == nil {
+		return nil, 0, syscall.EIO
+	}
+	raw := archiveOffsetInput{input: idx.prepared.input, size: idx.prepared.size}
+	identity := rootZIPMemberIdentity(idx.prepared)
 	idx.mu.RLock()
 	m := idx.displayMemberLocked(memberPath)
 	idx.mu.RUnlock()
@@ -313,7 +318,7 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 			return nil, 0, err
 		}
 		defer clear(password)
-		key := s.tree.diskCacheScope() + ":" + source.Key() + ":.zip:encrypted-member:" + memberPath + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, s.tree.passwordTag(archive, password))
+		key := s.tree.diskCacheScope() + ":" + identity + ":.zip:encrypted-member:" + memberPath + fmt.Sprintf(":%08x:%d:%s", m.crc, m.size, s.tree.passwordTag(archive, password))
 		fill, err := s.memberFillWithPassword(key, password, func(fillCtx context.Context, w io.Writer, pw []byte) error {
 			release, releaseErr := s.tree.acquireBuild(fillCtx)
 			if releaseErr != nil {
@@ -321,7 +326,10 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 			}
 			defer release()
 			started := time.Now()
-			fillErr := encryptedMember(fillCtx, source, m, pw, w)
+			if _, err := rootZIPDataOffset(fillCtx, m, idx.prepared); err != nil {
+				return err
+			}
+			fillErr := encryptedMember(fillCtx, raw, m, pw, w)
 			s.tree.observeStage(iostats.StageDecompression, started)
 			return fillErr
 		})
@@ -338,16 +346,19 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 		return handle, int64(m.size), nil
 	}
 	if m.method == zip.Store {
-		offset, err := m.dataOffset(ctx)
+		if m.compressed != m.size {
+			return nil, 0, syscall.EIO
+		}
+		offset, err := rootZIPDataOffset(ctx, m, idx.prepared)
 		if err != nil {
 			return nil, 0, err
 		}
-		return io.NewSectionReader(source, offset, int64(m.size)), int64(m.size), nil
+		return io.NewSectionReader(archiveRequestReader{ctx: ctx, input: raw}, offset, int64(m.size)), int64(m.size), nil
 	}
 	if m.method != zip.Deflate {
 		return nil, 0, syscall.EOPNOTSUPP
 	}
-	key := s.tree.diskCacheScope() + ":" + source.Key() + ":.zip:member:" + memberPath + fmt.Sprintf(":%08x:%d", m.crc, m.size)
+	key := s.tree.diskCacheScope() + ":" + identity + ":.zip:member:" + memberPath + fmt.Sprintf(":%08x:%d", m.crc, m.size)
 	handle, err := s.acquireMemberReader(ctx, key, int64(m.size), true, func(fillCtx context.Context, w io.Writer) error {
 		release, releaseErr := s.tree.acquireBuild(fillCtx)
 		if releaseErr != nil {
@@ -355,7 +366,10 @@ func (s *Service) openZIPMember(ctx context.Context, source *storage.Remote, arc
 		}
 		defer release()
 		started := time.Now()
-		fillErr := inflateMember(fillCtx, source, m, w)
+		if _, err := rootZIPDataOffset(fillCtx, m, idx.prepared); err != nil {
+			return err
+		}
+		fillErr := inflateMember(fillCtx, raw, m, w)
 		s.tree.observeStage(iostats.StageDecompression, started)
 		return fillErr
 	})

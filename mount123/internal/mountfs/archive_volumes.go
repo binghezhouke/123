@@ -2,10 +2,9 @@ package mountfs
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
-	"math"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -29,6 +28,9 @@ func (r *volumeReaderAt) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (r *volumeReaderAt) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if len(p) == 0 {
 		return 0, nil
 	}
@@ -104,76 +106,100 @@ func (r *volumeReaderAt) sourceAt(ctx context.Context, index int) (*storage.Remo
 	}
 }
 
-func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *archiveDescriptor) (io.ReaderAt, int64, string, error) {
-	if !strings.HasSuffix(strings.ToLower(a.name), ".7z.001") {
-		return contextRemote{ctx: ctx, source: source}, a.size, archiveIdentity(source, a), nil
+func (t *Tree) prepareCloudArchiveInput(ctx context.Context, source *storage.Remote, a *archiveDescriptor) (*preparedArchiveInput, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-	stem := a.name[:len(a.name)-4]
+	if source == nil || a == nil || a.size <= 0 {
+		return nil, syscall.EIO
+	}
+	kind := archiveSingle
+	if _, ok := byteSplitStem(a.name); ok {
+		kind = archiveByteSplit
+	}
+	var lastDisk uint32
+	if kind == archiveSingle && a.kind() == ".zip" {
+		hint, err := readZIPVolumeHint(ctx, source, a.size)
+		if err != nil {
+			return nil, err
+		}
+		kind, lastDisk = hint.kind, hint.lastDisk
+	}
+	if kind == archiveSingle {
+		// Archive content is immutable; the API file ID pins this input even
+		// when the API omits a content version.
+		return &preparedArchiveInput{input: source, size: a.size, identity: archiveIdentity(source, a), layout: archiveVolumeLayout{kind: archiveSingle, sizes: []int64{a.size}}, durable: true}, nil
+	}
 	directory, err := t.cloudDirectory(ctx, a.parentID)
 	if err != nil {
-		return nil, 0, "", err
+		return nil, err
 	}
-	key := fmt.Sprintf("volumes:%d:%s:g%d", a.id, a.version, directory.generation)
-	value, err := t.loadMeta(ctx, key, t.opts.DirectoryTTL, func(ctx context.Context) (any, int64, error) {
-		parts := map[int]panapi.File{}
-		for _, f := range directory.files {
-			if !strings.HasPrefix(f.Name, stem+".") {
-				continue
-			}
-			suffix := strings.TrimPrefix(f.Name, stem+".")
-			number, e := strconv.Atoi(suffix)
-			if e != nil || len(suffix) < 3 || strings.Trim(suffix, "0123456789") != "" {
-				continue
-			}
-			if number < 1 || number > 1000 || f.IsDir || f.Size <= 0 {
-				return nil, 0, syscall.EIO
-			}
-			if _, exists := parts[number]; exists {
-				return nil, 0, syscall.EIO
-			}
-			parts[number] = f
+	candidates := make([]archiveVolumeCandidate, len(directory.files))
+	for i, f := range directory.files {
+		candidates[i] = archiveVolumeCandidate{f.Name, f.Size, f.IsDir}
+	}
+	indices, sizes, total, err := discoverArchiveVolumes(a.name, kind, lastDisk, candidates)
+	if err != nil {
+		return nil, err
+	}
+	parts := make([]panapi.File, len(indices))
+	pinned := 0
+	if kind == archiveZIPDisks {
+		pinned = len(indices) - 1
+	}
+	for i, index := range indices {
+		parts[i] = directory.files[index]
+	}
+	f := parts[pinned]
+	if f.ID != a.id || f.Version != a.version || f.Size != a.size {
+		return nil, syscall.ESTALE
+	}
+	lifetime := t.ctx
+	if lifetime == nil {
+		lifetime = context.Background()
+	}
+	reader := &volumeReaderAt{ctx: lifetime, owner: t, parts: parts, sources: make([]*storage.Remote, len(parts)), sizes: sizes}
+	reader.sources[pinned] = source
+	type partIdentity struct {
+		ID      int64
+		Version string
+		Size    int64
+	}
+	identities := make([]partIdentity, len(parts))
+	for i, f := range parts {
+		identities[i] = partIdentity{f.ID, f.Version, f.Size}
+	}
+	encoded, _ := json.Marshal(struct {
+		Kind  archiveSplitKind
+		Parts []partIdentity
+	}{kind, identities})
+	identity := "archive-split-v2:" + string(encoded)
+	if a.kind() == ".7z" && kind == archiveByteSplit {
+		// Existing canonical 7z sets keep their warm index and member keys.
+		keys := make([]string, len(parts))
+		for i, part := range parts {
+			keys[i] = t.cloudCacheKey(&part)
 		}
-		result := make([]panapi.File, 0, len(parts))
-		cost := int64(128)
-		for i := 1; i <= len(parts); i++ {
-			f, ok := parts[i]
-			if !ok {
-				return nil, 0, syscall.EIO
-			}
-			result = append(result, f)
-			cost += int64(256 + len(f.Name) + len(f.Version))
-		}
-		if len(result) == 0 || result[0].ID != a.id || result[0].Version != a.version || result[0].Size != a.size {
-			return nil, 0, syscall.ESTALE
-		}
-		return result, cost, nil
-	})
+		identity = archiveIdentity(source, a) + ":" + strings.Join(keys, "|")
+	}
+	return &preparedArchiveInput{input: reader, size: total, identity: identity, layout: archiveVolumeLayout{kind: kind, sizes: sizes}, durable: true}, nil
+}
+
+func (t *Tree) archiveSource(ctx context.Context, source *storage.Remote, a *archiveDescriptor) (io.ReaderAt, int64, string, error) {
+	prepared, err := t.prepareCloudArchiveInput(ctx, source, a)
 	if err != nil {
 		return nil, 0, "", err
 	}
-	parts := value.([]panapi.File)
-	reader := &volumeReaderAt{ctx: ctx, owner: t, parts: parts, sources: make([]*storage.Remote, len(parts))}
-	reader.sources[0] = source
-	size := int64(0)
-	keys := make([]string, 0, len(parts))
-	for _, f := range parts {
-		if size > math.MaxInt64-f.Size {
-			return nil, 0, "", syscall.EFBIG
-		}
-		size += f.Size
-		reader.sizes = append(reader.sizes, f.Size)
-		keys = append(keys, t.cloudCacheKey(&f))
+	if volumes, ok := prepared.input.(*volumeReaderAt); ok {
+		return volumes, prepared.size, prepared.identity, nil
 	}
-	// The ordered parts and their pinned remote versions form the cache identity.
-	return reader, size, archiveIdentity(source, a) + ":" + strings.Join(keys, "|"), nil
+	// Preserve the packed 7z window adapter used by existing single sources.
+	return contextRemote{ctx: ctx, source: source}, prepared.size, prepared.identity, nil
 }
 
-// API identity survives renames, moves and changes of CDN URLs/validators.
-// Without a cloud version, keep the remote reader's conservative identity.
+// Archive contents are immutable under a cloud file ID. Identity survives
+// renames, moves, omitted API versions and changes of CDN URLs/validators.
 func archiveIdentity(source *storage.Remote, a *archiveDescriptor) string {
-	if a.version == "" {
-		return source.Key()
-	}
 	return fmt.Sprintf("cloud:%d:%s:%d", a.id, a.version, a.size)
 }
 func (t *Tree) archiveTaskKey(source *storage.Remote, a *archiveDescriptor, password []byte) string {
