@@ -243,6 +243,7 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 				}
 				return openZIPDeflateCheckpointStream(readCtx, input, &bound, offset, point, points.hooks(readCtx))
 			}
+			r.finishCachedTail = true
 			r.open = func(ctx context.Context) (io.ReadCloser, error) { return openCheckpoint(ctx, nil) }
 			r.resume = func(ctx context.Context, target, after int64) (io.ReadCloser, int64, error) {
 				point := points.nearest(ctx, target, after)

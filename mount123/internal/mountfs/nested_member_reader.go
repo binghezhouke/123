@@ -53,7 +53,10 @@ type nestedMemberReader struct {
 	position int64
 	idle     *time.Timer
 	poolIdle bool // Pool generation/timer owns idle expiry for leased readers.
-	closed   atomic.Bool
+	// A child-index checkpoint collector may finish an already-open stream
+	// through a cached final block, but never opens or replays to create points.
+	finishCachedTail bool
+	closed           atomic.Bool
 }
 
 func (r *nestedMemberReader) blockSize() int64 {
@@ -252,18 +255,8 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 				return err
 			}
 			if r.position == r.size {
-				// CopyN may stop exactly at the advertised size before the decoder
-				// checks its CRC/authentication trailer. Publish only after EOF.
-				var trailing [1]byte
-				n, endErr := input.Read(trailing[:])
-				if n != 0 {
-					endErr = errArchiveIntegrity
-				} else if endErr == nil {
-					endErr = io.ErrNoProgress
-				}
-				r.reset()
-				if endErr != io.EOF {
-					return endErr
+				if err := r.finishEOF(ctx); err != nil {
+					return err
 				}
 			}
 			return nil
@@ -287,6 +280,23 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 			return total, io.ErrUnexpectedEOF
 		}
 	}
+	// A preceding uncached block can advance this collector almost to EOF,
+	// while the final block is already cached by a different reading role.
+	// Finish only that bounded remainder inside the admitted operation. Pure
+	// disk hits and collectors farther from EOF never enter this path.
+	remaining := r.size - r.position
+	if r.finishCachedTail && off == r.size && r.stream != nil && remaining > 0 && remaining <= r.blockSize() {
+		input := &contextReader{ctx: ctx, r: r.stream}
+		n, err := io.CopyN(io.Discard, input, remaining)
+		r.position += n
+		if err != nil {
+			r.reset()
+			return total, err
+		}
+		if err := r.finishEOF(ctx); err != nil {
+			return total, err
+		}
+	}
 	// Bound retained codec state while preserving a continuation point for the
 	// next nearby demand. Disk blocks remain reusable after the decoder closes.
 	if r.stream != nil && !r.poolIdle {
@@ -299,6 +309,23 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 		return total, io.EOF
 	}
 	return total, nil
+}
+
+// CopyN can stop at the advertised size before surfacing a checksum/source
+// error supplied with the final bytes. Always confirm terminal EOF, then close.
+func (r *nestedMemberReader) finishEOF(ctx context.Context) error {
+	var trailing [1]byte
+	n, err := (&contextReader{ctx: ctx, r: r.stream}).Read(trailing[:])
+	if n != 0 {
+		err = errArchiveIntegrity
+	} else if err == nil {
+		err = io.ErrNoProgress
+	}
+	r.reset()
+	if err == io.EOF {
+		return nil
+	}
+	return err
 }
 
 var _ io.ReaderAt = (*nestedMemberReader)(nil)
