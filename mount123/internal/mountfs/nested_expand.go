@@ -225,6 +225,11 @@ func (t *Tree) viewMemberInputPrepared(ctx context.Context, n *nestedArchive, m 
 		}
 		return stream, nil
 	}}
+	if resident, ok := nestedDeflateResidentBytes(n, m); ok {
+		if lease, borrowed := t.nestedDeflatePool.acquire(ctx, key, resident, n, r); borrowed {
+			return lease, lease, nil
+		}
+	}
 	return r, r, nil
 }
 
@@ -548,7 +553,9 @@ func (t *Tree) openNestedArchiveMember(ctx context.Context, n *nestedArchive, m 
 		release()
 		return nil, 0, err
 	}
-	if _, decoded := input.(*nestedMemberReader); !decoded {
+	switch input.(type) {
+	case *nestedMemberReader, *nestedDeflateLease:
+	default:
 		integrityErr := errArchiveIntegrity
 		if n.format == ".zip" {
 			integrityErr = zip.ErrChecksum

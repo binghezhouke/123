@@ -49,6 +49,7 @@ type nestedMemberReader struct {
 	stream     io.ReadCloser
 	position   int64
 	idle       *time.Timer
+	poolIdle   bool // Pool generation/timer owns idle expiry for leased readers.
 	closed     atomic.Bool
 }
 
@@ -270,7 +271,7 @@ func (r *nestedMemberReader) readUncached(ctx context.Context, p []byte, off int
 	}
 	// Bound retained codec state while preserving a continuation point for the
 	// next nearby demand. Disk blocks remain reusable after the decoder closes.
-	if r.stream != nil {
+	if r.stream != nil && !r.poolIdle {
 		if r.idle != nil {
 			r.idle.Stop()
 		}

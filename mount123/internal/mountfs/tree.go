@@ -129,6 +129,7 @@ func defaults(o Options) Options {
 }
 
 type Tree struct {
+	nestedDeflatePool *nestedDeflatePool
 	passwordSaveOnce  sync.Once
 	passwordSaveGate  chan struct{}
 	probeMu           sync.Mutex
@@ -323,6 +324,10 @@ func NewWithOptions(ctx context.Context, api API, cache *storage.Cache, rootID i
 		ctx = context.Background()
 	}
 	t := &Tree{ctx: ctx, api: api, cache: cache, zipDirs: zipDirs, opts: defaults(opts), meta: map[string]*metaItem{}, builds: make(chan struct{}, defaults(opts).MaxConcurrentBuilds), sources: map[string]*sourceCall{}, indexStatuses: newIndexStatusTracker()}
+	if cache != nil {
+		t.nestedDeflatePool = newNestedDeflatePool(8, min(t.opts.MetadataBytes/4, cache.Capacity()/8), 30*time.Second)
+		context.AfterFunc(ctx, t.nestedDeflatePool.Close)
+	}
 	if cache != nil {
 		if profiled, ok := api.(interface{ SetIOStats(*iostats.Tracker) }); ok {
 			profiled.SetIOStats(cache.IOStats())
