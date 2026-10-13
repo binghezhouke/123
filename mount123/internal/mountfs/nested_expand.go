@@ -393,7 +393,7 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 	child.cachePrefix = t.cache.StableDigest(namespace, string(encoded))
 	// Parse clear headers without password discovery. For encrypted headers, try
 	// the current inner sidecar/shared password, then the effective parent secret.
-	index := func(password []byte) (result *zipIndex, err error) {
+	parseIndex := func(password []byte) (result *zipIndex, err error) {
 		operation, release, e := t.acquireNestedDecode(ctx)
 		if e != nil {
 			return nil, e
@@ -443,6 +443,39 @@ func (t *Tree) enterNestedArchive(ctx context.Context, parent *nestedArchive, me
 			}
 		}
 		return idx, e
+	}
+	// Completed DTOs contain only member metadata. Each view restores its own
+	// index and binds ZIP members to the current ancestor inputs; readers and
+	// protected secrets never enter the persistent cache.
+	index := func(password []byte) (*zipIndex, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		key := "archive-index-nested-dto-v1:" + t.archiveIndexCacheKey(kind, child.cachePrefix, &a, password)
+		identity := t.cache.StableDigest("nested-index-identity-v1", child.cachePrefix)
+		idx, restored := t.loadPersistentArchiveIndex(ctx, key, kind, size, identity)
+		var err error
+		if !restored {
+			idx, err = parseIndex(password)
+			if err != nil {
+				return nil, err
+			}
+		} else if kind == ".zip" {
+			idx.attachZIPReader(child.input)
+		}
+		if idx.bytes > policy.MaxIndexBytes || parent.indexBytes > defaults(t.opts).MetadataBytes-idx.bytes {
+			return nil, syscall.EFBIG
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !restored {
+			t.persistArchiveIndex(ctx, key, kind, size, identity, idx)
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return idx, nil
 	}
 	child.index, err = index(nil)
 	if needsPassword(err) || errors.Is(err, syscall.EACCES) {

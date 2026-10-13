@@ -54,6 +54,7 @@ type archiveIndexEntryDTO struct {
 	CRC            uint32                   `json:"crc,omitempty"`
 	Method         uint16                   `json:"method,omitempty"`
 	Flags          uint16                   `json:"flags,omitempty"`
+	Encrypted      *bool                    `json:"encrypted,omitempty"`
 	ModifiedTime   uint16                   `json:"modified_time,omitempty"`
 	HeaderOffset   int64                    `json:"header_offset,omitempty"`
 	AES            *archiveAESDTO           `json:"aes,omitempty"`
@@ -80,7 +81,7 @@ func (t *Tree) archiveIndexCacheKey(kind, identity string, a *archiveDescriptor,
 }
 
 func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind string, size int64, identity string) (*zipIndex, bool) {
-	if t.cache == nil || cacheKey == "" {
+	if t.cache == nil || cacheKey == "" || ctx.Err() != nil {
 		return nil, false
 	}
 	h, err := t.cache.OpenArchiveIndex(cacheKey)
@@ -104,13 +105,21 @@ func (t *Tree) loadPersistentArchiveIndex(ctx context.Context, cacheKey, kind st
 		_ = t.cache.Remove(cacheKey)
 		return nil, false
 	}
-	// Older completed indexes predate the completion marker; only the
-	// checkpoint namespace is allowed to represent an incomplete prefix.
-	if !strings.HasSuffix(cacheKey, ":checkpoint") {
+	// Nested snapshots require an explicit completion marker. Older outer
+	// indexes predate it; checkpoints retain their separate prefix semantics.
+	if strings.HasPrefix(cacheKey, "archive-index-nested-dto-v1:") {
+		if !dto.Complete {
+			_ = t.cache.Remove(cacheKey)
+			return nil, false
+		}
+	} else if !strings.HasSuffix(cacheKey, ":checkpoint") {
 		dto.Complete = true
 	}
 	idx, err := t.indexFromDTO(ctx, kind, dto, size)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, false
+		}
 		_ = t.cache.Remove(cacheKey)
 		return nil, false
 	}
@@ -168,7 +177,8 @@ func (t *Tree) persistArchiveIndex(ctx context.Context, cacheKey, kind string, s
 			if prefix != "" {
 				path = prefix + "/" + key
 			}
-			item := archiveIndexEntryDTO{Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize}
+			encrypted := m.encrypted
+			item := archiveIndexEntryDTO{Encrypted: &encrypted, Path: path, Name: m.name, Ordinal: m.ordinal, Size: m.size, Compressed: m.compressed, CRC: m.crc, Method: m.method, Flags: m.flags, ModifiedTime: m.modifiedTime, HeaderOffset: m.headerOffset, SevenStream: m.sevenStream, RARSolid: m.rarSolid, RARGroupStart: m.rarGroupStart, RARGroupOffset: m.rarGroupOffset, RARGroupSize: m.rarGroupSize}
 			if m.aes != nil {
 				item.AES = &archiveAESDTO{Version: m.aes.version, Strength: m.aes.strength, Method: m.aes.method}
 			}
@@ -217,7 +227,8 @@ func (t *Tree) persistArchiveCheckpoint(ctx context.Context, cacheKey, kind stri
 			if prefix != "" {
 				p = prefix + "/" + name
 			}
-			e := archiveIndexEntryDTO{Path: p, Name: m.name, Ordinal: m.ordinal, Size: m.size, CRC: m.crc}
+			encrypted := m.encrypted
+			e := archiveIndexEntryDTO{Encrypted: &encrypted, Path: p, Name: m.name, Ordinal: m.ordinal, Size: m.size, CRC: m.crc}
 			if m.rarLocator != nil {
 				l := rardecode.ExportLocator(*m.rarLocator)
 				e.RARLocator = &l
@@ -293,9 +304,14 @@ func (t *Tree) indexFromDTO(ctx context.Context, kind string, dto archiveIndexDT
 				memberFormat = ""
 			}
 			m := &member{name: record.Name, format: memberFormat, ordinal: record.Ordinal, headerOffset: record.HeaderOffset, modifiedTime: record.ModifiedTime, method: record.Method, flags: record.Flags, crc: record.CRC, compressed: record.Compressed, size: record.Size, encrypted: record.Flags&1 != 0}
+			if record.Encrypted != nil {
+				m.encrypted = *record.Encrypted || m.encrypted
+			} else if kind == ".rar" {
+				return nil, errors.New("persisted RAR encryption state is missing")
+			}
 			if kind == ".7z" {
-				// Rebuild only old 7z indexes that lack stream locations. ZIP/RAR
-				// keep their existing persistent index schema and cache keys.
+				// Old 7z indexes lack the stream locations needed for direct
+				// nested member reads and must be rebuilt.
 				if record.Size > 0 && (record.SevenStream == nil || !record.SevenStream.valid(record.Size) || record.SevenStream.Stream >= t.opts.MaxZIPEntries) {
 					return nil, errors.New("persisted 7z stream location is missing or invalid")
 				}
