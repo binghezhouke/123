@@ -15,10 +15,11 @@ import (
 
 const archiveIndexFormatVersion = 1
 
-// Earlier sevenzip parsers miscounted compact CRC tables and could persist
-// incorrect member CRCs. Rebuild only old 7z metadata, once on access. Archive
-// bytes remain immutable; this is a schema migration, not content expiration.
-const sevenZIPCRCMetadataVersion = 1
+// Revision 1 fixed compact CRC counts; revision 2 also fixes default single-file
+// group assignments, which affect member sizes, offsets and CRCs.
+// Rebuild only old 7z metadata, once on access. Archive bytes remain immutable;
+// this is a schema migration, not content expiration.
+const sevenZIPCRCMetadataVersion = 2
 
 // Checkpoint version is separate from the completed index format. Older
 // checkpoints recorded only an HTTP high-water mark and cannot be resumed

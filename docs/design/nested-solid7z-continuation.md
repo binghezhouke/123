@@ -69,10 +69,15 @@ counts as present. Synthetic archives exercise both group orders, bitmap byte
 boundaries and absent digests, with a 7-Zip CLI-validated fixture covering the
 public Service through Store and Deflate ZIP parents.
 
+When SubStreamsInfo is absent, each group contains one nonempty file. Empty
+files and directories do not consume group ordinals. File metadata and reads use
+that default mapping; inconsistent file/group counts are rejected before mapping.
+
 Older parsers could save incorrect file CRCs even when parsing succeeded. The
 `seven_crc_version` field therefore rejects older persisted 7z indexes on first
-access, for both top-level and nested archives. Rebuilt indexes are reusable
-across restarts. This one-time metadata format migration neither expires archive
+access, for both top-level and nested archives. Revision 1 corrected compact
+digests; revision 2 also corrects default file/group assignments. Rebuilt indexes
+are reusable across restarts. This metadata format migration neither expires archive
 content nor removes ZIP/RAR indexes, source ranges or decompressed body blocks.
 
 ## Controlled acceptance

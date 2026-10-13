@@ -17,8 +17,11 @@ import (
 // archive. Immutable input bytes do not make that derived metadata trustworthy.
 func TestArchiveIndexCRCMetadataMigration(t *testing.T) {
 	for _, kind := range []string{".7z", ".zip", ".rar"} {
-		for _, nested := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/nested=%t", kind, nested), func(t *testing.T) {
+		for _, prior := range []struct {
+			nested  bool
+			version int
+		}{{false, 0}, {true, 0}, {false, 1}, {true, 1}} {
+			t.Run(fmt.Sprintf("%s/nested=%t/revision=%d", kind, prior.nested, prior.version), func(t *testing.T) {
 				ctx := context.Background()
 				cache, err := storage.NewCache(t.TempDir(), 1<<20)
 				if err != nil {
@@ -27,13 +30,13 @@ func TestArchiveIndexCRCMetadataMigration(t *testing.T) {
 				defer cache.Close()
 				tree := New(ctx, indexStoreTestAPI{}, cache, 0, true).tree
 				key := tree.archiveIndexCacheKey(kind, "synthetic-source", &archiveDescriptor{id: 77}, nil)
-				if nested {
+				if prior.nested {
 					key = "archive-index-nested-dto-v1:" + key
 				}
 				// A directory-only DTO is valid for all three formats and lets
 				// this compatibility check remain independent of parser changes.
 				legacy := archiveIndexDTO{Version: archiveIndexFormatVersion, Kind: kind, ArchiveSize: 100, IdentityDigest: "identity", Complete: true,
-					Entries: []archiveIndexEntryDTO{{Path: "folder", Directory: true}}}
+					Entries: []archiveIndexEntryDTO{{Path: "folder", Directory: true}}, SevenCRCVersion: prior.version}
 				idx, err := tree.indexFromDTO(ctx, kind, legacy, 100)
 				if err != nil {
 					t.Fatal(err)
