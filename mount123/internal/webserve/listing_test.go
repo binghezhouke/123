@@ -22,10 +22,11 @@ import (
 // listingFixtureAPI is a small cloud API stand-in that serves directory
 // listings and metadata from maps.
 type listingFixtureAPI struct {
-	url     string
-	files   map[int64][]panapi.File
-	details map[int64]panapi.File
-	lists   atomic.Int32
+	url         string
+	files       map[int64][]panapi.File
+	details     map[int64]panapi.File
+	lists       atomic.Int32
+	detailCalls atomic.Int32
 }
 
 func (a *listingFixtureAPI) CacheIdentity() string { return "webserve-listing-test" }
@@ -50,6 +51,7 @@ func (a *listingFixtureAPI) Infos(_ context.Context, ids []int64) ([]panapi.File
 }
 
 func (a *listingFixtureAPI) Detail(_ context.Context, id int64) (panapi.File, error) {
+	a.detailCalls.Add(1)
 	file, ok := a.details[id]
 	if !ok {
 		return panapi.File{}, syscall.ENOENT

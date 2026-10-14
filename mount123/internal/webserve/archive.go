@@ -41,16 +41,16 @@ func archiveTemplate() (*template.Template, error) {
 
 type archivePageData struct {
 	pageData
-	FileID     int64
-	FileName   string
-	Prefix     string
-	Parent     string
-	Rows       []archiveRow
-	ImageCount int
-	Total      int
-	NextCursor string
-	EntriesURL string
-	Complete   bool
+	FileID      int64
+	FileName    string
+	Prefix      string
+	Breadcrumbs []breadcrumb
+	Rows        []archiveRow
+	ImageCount  int
+	Total       int
+	NextCursor  string
+	EntriesURL  string
+	Complete    bool
 }
 
 type archiveRow struct {
@@ -119,13 +119,19 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	file, _ := s.service.ArchiveMetadata(r.Context(), fileID)
-	name := ""
+	name := strconv.FormatInt(fileID, 10)
+	var breadcrumbs []breadcrumb
 	if file != nil {
-		name = file.Name
+		name = displayName(file)
+		breadcrumbs = s.folderPath(r.Context(), file.ParentID)
 	}
-	parent := path.Dir(prefix)
-	if parent == "." {
-		parent = ""
+	archiveURL := "/archive/" + strconv.FormatInt(fileID, 10)
+	breadcrumbs = append(breadcrumbs, breadcrumb{Name: name, Href: archiveURL})
+	segments := strings.Split(prefix, "/")
+	for i, segment := range segments {
+		if segment != "" {
+			breadcrumbs = append(breadcrumbs, breadcrumb{Name: segment, Href: archiveURL + "?path=" + url.QueryEscape(strings.Join(segments[:i+1], "/"))})
+		}
 	}
 	rows := archiveRows(fileID, prefix, page.Items)
 	imageCount := 0
@@ -135,17 +141,17 @@ func (s *Server) handleArchiveList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.renderArchive(w, archivePageData{
-		pageData:   pageData{Info: s.info, Title: "压缩包浏览", Authenticated: s.authEnabled},
-		FileID:     fileID,
-		FileName:   name,
-		Prefix:     prefix,
-		Parent:     parent,
-		Rows:       rows,
-		ImageCount: imageCount,
-		Total:      page.Total,
-		NextCursor: page.NextCursor,
-		EntriesURL: archiveEntriesURL(fileID, prefix),
-		Complete:   page.Complete,
+		pageData:    pageData{Info: s.info, Title: "压缩包浏览", Authenticated: s.authEnabled},
+		FileID:      fileID,
+		FileName:    name,
+		Prefix:      prefix,
+		Breadcrumbs: breadcrumbs,
+		Rows:        rows,
+		ImageCount:  imageCount,
+		Total:       page.Total,
+		NextCursor:  page.NextCursor,
+		EntriesURL:  archiveEntriesURL(fileID, prefix),
+		Complete:    page.Complete,
 	})
 }
 

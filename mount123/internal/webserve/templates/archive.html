@@ -16,7 +16,8 @@
 {{define "content"}}
 <div data-file-page hidden></div>
 <nav class="browser-path" aria-label="压缩包路径"><div class="path-bar" style="min-width:0;overflow-x:auto;white-space:nowrap;">
-    <a href="/browse?parent_id=0" class="path-item"><i class="fas fa-hdd" style="margin-right:4px;"></i>123云盘</a><span class="path-separator"><i class="fas fa-chevron-right"></i></span><a href="/file/{{.FileID}}" class="path-item">{{.FileName}}</a>{{if .Prefix}}<span class="path-separator"><i class="fas fa-chevron-right"></i></span><span class="path-item">{{.Prefix}}</span>{{end}}
+    <a href="/browse?parent_id={{.RootID}}" class="path-item"><i class="fas fa-hdd" style="margin-right:4px;"></i>123云盘</a>
+    {{range .Breadcrumbs}}<span class="path-separator"><i class="fas fa-chevron-right"></i></span><a href="{{.Href}}" class="path-item">{{.Name}}</a>{{end}}
 </div></nav>
 <header class="browser-heading directory-heading"><div><p class="eyebrow">压缩包文件夹</p><h1>{{if .Prefix}}{{.Prefix}}{{else}}{{.FileName}}{{end}}</h1></div><div class="directory-heading-actions"><span class="item-count" data-file-count data-pagination-total="{{.Total}}">{{if .Complete}}{{.Total}}{{else}}{{len .Rows}}{{end}} 个项目</span>{{if .ImageCount}}<span class="item-count">{{.ImageCount}} 张图片</span>{{end}}</div></header>
 <div class="browse-layout"><div class="browse-files">
