@@ -6,7 +6,9 @@
     const targetURL = link => {
         try {
             const url = new URL(link.href, location.href);
-            return url.origin === location.origin && (url.pathname === '/browse' || url.pathname.startsWith('/archive/')) ? url : null;
+            // Only page routes belong to the HTML navigator. Archive member
+            // URLs also start with /archive/, but can stream gigabytes of media.
+            return url.origin === location.origin && (url.pathname === '/browse' || /^\/archive\/\d+$/.test(url.pathname)) ? url : null;
         } catch (_) { return null; }
     };
     const resetPreview = () => {
@@ -134,7 +136,11 @@
         document.querySelector('.finder-main')?.classList.add('is-navigating');
         try {
             const response = await fetch(url.href, {headers: {'X-Requested-With': 'XMLHttpRequest'}, signal: controller.signal});
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const contentType = (response.headers.get('Content-Type') || '').split(';')[0].trim().toLowerCase();
+            if (!response.ok || contentType !== 'text/html') {
+                try { await response.body?.cancel(); } catch (_) { /* Navigation still falls back if cancellation fails. */ }
+                throw new Error('响应不是可导航的 HTML 页面');
+            }
             const html = await response.text();
             if (active !== controller || controller.signal.aborted) return;
             const parsed = new DOMParser().parseFromString(html, 'text/html');

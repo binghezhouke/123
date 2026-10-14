@@ -15,6 +15,7 @@ function setup({saved = null, initial = 'A', delayNavigation = false, delayPage 
     const document = events(), window = events(), storage = new Map(), timers = new Map(), frames = [], requests = [];
     let nextTimer = 0;
     const location = {href: `http://test/browse?parent=${initial}`, origin: 'http://test', assign(url) {this.assigned = url;}};
+    window.location = location;
     const scroller = () => ({_top: 0, _left: 0, scrollHeight: 1000, clientHeight: 500,
         get scrollTop() {return this._top;}, set scrollTop(value) {this._top = Math.max(0, Math.min(this.scrollHeight - this.clientHeight, value));},
         get scrollLeft() {return this._left;}, set scrollLeft(value) {this._left = value;},
@@ -52,8 +53,9 @@ function setup({saved = null, initial = 'A', delayNavigation = false, delayPage 
         clearTimeout: id => timers.delete(id),
         requestAnimationFrame: fn => frames.push(fn),
         fetch: (url, {signal}) => {
-            if (!delayNavigation) return Promise.resolve({ok: true, text: async () => new URL(url).searchParams.get('parent')});
-            return new Promise(resolve => requests.push({url, signal, respond: html => resolve({ok: true, text: async () => html})}));
+            const htmlHeaders = {get: () => 'text/html; charset=utf-8'};
+            if (!delayNavigation) return Promise.resolve({ok: true, headers: htmlHeaders, text: async () => new URL(url).searchParams.get('parent')});
+            return new Promise(resolve => requests.push({url, signal, respond: html => resolve({ok: true, headers: htmlHeaders, text: async () => html}), respondRaw: resolve}));
         },
     });
     const navigate = name => document.dispatchEvent({type: 'click', button: 0, preventDefault() {}, target: {
@@ -133,4 +135,42 @@ test('partial-navigation capture allows a directory load-more retry to use its o
     assert.equal(pageLoads, 1);
     assert.equal(s.requests.length, 0, 'load-more must not start a full partial navigation');
     assert.equal(prevented, false);
+});
+
+test('archive member streams and metadata retain native navigation', () => {
+    for (const suffix of ['/member?path=inner.zip%2Fclip.mp4', '/member?path=clip.mp4&download=1', '/entries', '/index', '/unlock']) {
+        const s = setup({delayNavigation: true});
+        const link = {href: `http://test/archive/7${suffix}`, hasAttribute: () => false};
+        let prevented = false;
+        s.document.dispatchEvent({type: 'click', button: 0, preventDefault() {prevented = true;}, target: {
+            closest: selector => selector === 'a[href]' ? link : null,
+        }});
+        assert.equal(prevented, false, suffix);
+        assert.equal(s.requests.length, 0, 'binary/API endpoints must not be fetched as HTML');
+    }
+});
+
+test('nested archive HTML pages still use partial navigation', () => {
+    const s = setup({delayNavigation: true});
+    const link = {href: 'http://test/archive/7?path=inner.zip%2Ffolder', hasAttribute: () => false};
+    let prevented = false;
+    s.document.dispatchEvent({type: 'click', button: 0, preventDefault() {prevented = true;}, target: {
+        closest: selector => selector === 'a[href]' ? link : null,
+    }});
+    assert.equal(prevented, true);
+    assert.equal(s.requests.length, 1);
+});
+
+test('a non-HTML response is cancelled before its binary body can be read as text', async () => {
+    const s = setup({delayNavigation: true});
+    let reads = 0, cancellations = 0;
+    s.navigate('B');
+    s.requests[0].respondRaw({ok: true, headers: {get: () => 'video/mp4'},
+        body: {cancel: async () => {cancellations++;}},
+        text: async () => {reads++; return 'binary';},
+    });
+    await tick();
+    assert.equal(reads, 0);
+    assert.equal(cancellations, 1);
+    assert.equal(s.location.assigned, 'http://test/browse?parent=B');
 });
