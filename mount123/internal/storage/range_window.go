@@ -36,7 +36,7 @@ func (r *Remote) OpenRangeWindow(ctx context.Context, off, size int64) (*RangeWi
 	if off < 0 || size <= 0 || off > r.size || size > r.size-off {
 		return nil, syscall.EINVAL
 	}
-	if size > r.cache.Capacity() {
+	if size > r.cache.SourceCapacity() {
 		return nil, syscall.ENOSPC
 	}
 	ctx, cancel := combineContexts(r.lifetimeCtx, ctx)

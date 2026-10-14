@@ -126,6 +126,7 @@ func run() error {
 	cacheDir := flag.String("cache-dir", filepath.Join(userCache, "mount123"), "private disk cache directory")
 	controlSocket := flag.String("control-socket", "", "local status socket (default: <cache-dir>/control.sock)")
 	cacheGiB := flag.Int64("cache-gib", 50, "maximum disk cache size in GiB")
+	cacheFilePercent := flag.Int("cache-file-percent", storage.DefaultSourceCachePercent, "maximum retained data share per remote file, including nested members (percent, 0 disables)")
 	cacheMinFreeGiB := flag.Int64("cache-min-free-gib", 0, "minimum free space to keep on the cache filesystem in GiB (0 disables)")
 	indexBudgetMiB := flag.Int64("index-budget-mib", 0, "protected archive index cache budget in MiB (0 derives it from the cache size)")
 	statsInterval := flag.Duration("stats-interval", 30*time.Second, "append aggregate I/O statistics to io-stats.jsonl (0 disables)")
@@ -170,7 +171,7 @@ func run() error {
 	if *mountpoint == "" {
 		return fmt.Errorf("-mountpoint is required (see -help)")
 	}
-	if *cacheGiB < 1 || *cacheGiB > 1<<20 || *cacheMinFreeGiB < 0 || *cacheMinFreeGiB > 1<<20 || *indexBudgetMiB < 0 || *indexBudgetMiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *entryTTL < 0 || *attrTTL < 0 || *statsInterval < 0 {
+	if *cacheFilePercent < 0 || *cacheFilePercent > 100 || *cacheGiB < 1 || *cacheGiB > 1<<20 || *cacheMinFreeGiB < 0 || *cacheMinFreeGiB > 1<<20 || *indexBudgetMiB < 0 || *indexBudgetMiB > 1<<20 || *rootID < 0 || *metadataMiB < 1 || *metadataMiB > 1<<20 || *directoryTTL <= 0 || *sourceTTL <= 0 || *entryTTL < 0 || *attrTTL < 0 || *statsInterval < 0 {
 		return fmt.Errorf("invalid cache size, freshness interval or root ID")
 	}
 	mountAbs, err := filepath.Abs(*mountpoint)
@@ -241,6 +242,9 @@ func run() error {
 		return err
 	}
 	defer cache.Close()
+	if err := cache.ConfigureSourceLimit(*cacheFilePercent); err != nil {
+		return err
+	}
 	api, err := panapi.New(panapi.Config{ClientID: config.ClientID, ClientSecret: config.ClientSecret, AccessToken: token, TokenCache: filepath.Join(cacheAbs, "token.json")})
 	if err != nil {
 		return err
@@ -254,6 +258,7 @@ func run() error {
 	// Fail authentication/list errors before installing a mount.
 	executable, _ := os.Executable()
 	mountInfo := fmt.Sprintf("version=%s\ncommit=%s\nbuild_time=%s\ngo=%s\nos_arch=%s/%s\nexecutable=%s\nmountpoint=%s\ncache_dir=%s\ncache_capacity_bytes=%d\nindex_budget_mib=%d\ncache_durability=%s\ncontrol_socket=%s\nroot_id=%d\nzip_dirs=%t\niso_dirs=%t\ndirectory_ttl=%s\nsource_ttl=%s\nentry_ttl=%s\nattr_ttl=%s\nmetadata_mib=%d\nprefetch_files=%d\nprefetch_workers=%d\nprefetch_mib=%d\ndownload_requests=%d\ndownload_bytes_mib=%d\nread_ahead_mib=%d\n", version, commit, buildTime, runtime.Version(), runtime.GOOS, runtime.GOARCH, executable, mountAbs, cacheAbs, *cacheGiB<<30, indexBudget, *cacheDurability, socketPath, *rootID, *zipDirs, *isoDirs, directoryTTL.String(), sourceTTL.String(), entryTTL.String(), attrTTL.String(), *metadataMiB, *prefetchFiles, *prefetchWorkers, *prefetchMiB, *downloadRequests, *downloadBytesMiB, *readAheadMiB)
+	mountInfo += fmt.Sprintf("cache_file_percent=%d\ncache_file_limit_bytes=%d\n", *cacheFilePercent, cache.Stats().SourceLimitBytes)
 	root := mountfs.NewWithOptions(ctx, api, cache, *rootID, *zipDirs, mountfs.Options{MountInfo: mountInfo, DisableISODirs: !*isoDirs, MaxZIPEntries: *archiveEntries, MaxExpandedNodes: 2 * *archiveEntries, PrefetchFiles: *prefetchFiles, PrefetchWorkers: *prefetchWorkers, PrefetchBytes: *prefetchMiB << 20, MetadataBytes: *metadataMiB << 20, DirectoryTTL: *directoryTTL, SourceTTL: *sourceTTL, RefreshFileMetadata: *fileInfo, DisableStreamMembers: !*streamMembers, DisableArchivePageCache: !*archivePageCache, ReadAheadMaxBytes: *readAheadMiB << 20, DisableReadAhead: *readAheadMiB == 0})
 	if err = root.Prepare(ctx); err != nil {
 		return fmt.Errorf("cloud root: %w", err)

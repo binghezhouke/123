@@ -756,6 +756,9 @@ func (t *Tree) cloudSource(ctx context.Context, f *panapi.File, ttl time.Duratio
 		if err != nil {
 			return nil, 0, err
 		}
+		if err := r.SetCacheOwner(t.cacheSourceOwner(f.ID)); err != nil {
+			return nil, 0, err
+		}
 		return r, int64(4096 + len(key) + len(r.Key())), nil
 	})
 	if err != nil {
@@ -1398,6 +1401,7 @@ func (n *Node) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 }
 
 func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32, syscall.Errno) {
+	ctx = n.tree.archiveCacheContext(ctx, n.item.archive)
 	if flags&(syscall.O_ACCMODE|syscall.O_TRUNC|syscall.O_APPEND|syscall.O_CREAT) != syscall.O_RDONLY {
 		return nil, 0, syscall.EROFS
 	}
@@ -1416,6 +1420,37 @@ func (n *Node) openRaw(ctx context.Context, flags uint32) (fs.FileHandle, uint32
 			return nil, 0, toErrno(err)
 		}
 		return n.newRemoteHandle(source, 0, uint64(n.item.cloud.Size)), fuse.FOPEN_DIRECT_IO, 0
+	}
+	if n.tree.demandCacheMember(n.item.member) {
+		idx := n.item.index
+		var err error
+		var password []byte
+		if n.item.archive.kind() != ".zip" {
+			idx, password, err = n.tree.otherIndexWithPassword(ctx, n.item.source, n.item.archive, false)
+		} else if idx == nil {
+			idx, err = n.tree.getZIP(ctx, n.item.source, n.item.archiveSize, n.item.archive)
+		}
+		if err != nil {
+			clear(password)
+			return nil, 0, toErrno(err)
+		}
+		if len(password) == 0 && n.item.member.needsPassword() {
+			password, err = n.tree.otherPassword(ctx, n.item.archive)
+		}
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		defer clear(password)
+		view, err := n.tree.rootArchiveView(ctx, n.item.source, n.item.archive, idx, password)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		defer view.Close()
+		reader, size, err := n.tree.openNestedArchiveMember(ctx, view, n.item.member)
+		if err != nil {
+			return nil, 0, toErrno(err)
+		}
+		return &handle{reader: reader, closer: reader, size: uint64(size)}, n.tree.archiveCacheOpenFlags(), 0
 	}
 	if n.item.member.format != "" && n.item.member.format != ".zip" {
 		return n.openOtherArchive(ctx)

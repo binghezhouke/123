@@ -40,7 +40,7 @@ func (t *Tree) solidRARCacheable(m *member) bool {
 	if m == nil || t.cache == nil {
 		return false
 	}
-	limit := min(maxSolidRARCacheBytes, t.cache.Capacity()/4)
+	limit := min(maxSolidRARCacheBytes, t.cache.SourceCapacity()/4)
 	// Empty members share the preceding member's byte boundary, so their
 	// checksum must be checked by the individual member decoder instead.
 	return m.format == ".rar" && m.rarLocator != nil && m.size > 0 && m.rarGroupSize > 0 && m.rarGroupOffset <= m.rarGroupSize && m.size <= m.rarGroupSize-m.rarGroupOffset && m.rarGroupSize <= uint64(limit)
@@ -51,6 +51,7 @@ func (t *Tree) solidRARKey(identity string, a *archiveDescriptor, m *member, pas
 }
 
 func (t *Tree) acquireSolidRAR(ctx context.Context, source *storage.Remote, a *archiveDescriptor, m *member, password []byte, identity string) (*storage.GrowingHandle, error) {
+	ctx = t.archiveCacheContext(ctx, a)
 	key := t.solidRARKey(identity, a, m, password)
 	protected, err := t.encryptPassword(key, password)
 	if err != nil {

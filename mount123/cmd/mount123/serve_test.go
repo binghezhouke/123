@@ -233,17 +233,33 @@ func TestValidateServeSettings(t *testing.T) {
 		t.Fatalf("valid settings were rejected: %v", err)
 	}
 	for name, mutate := range map[string]func(*serveSettings){
-		"empty address":        func(s *serveSettings) { s.addr = "" },
-		"bad durability":       func(s *serveSettings) { s.cacheDurability = "maybe" },
-		"negative session ttl": func(s *serveSettings) { s.sessionTTL = -time.Second },
-		"zero archive entries": func(s *serveSettings) { s.archiveEntries = 0 },
-		"reserve over budget":  func(s *serveSettings) { s.downloadReserveMiB = s.downloadBytesMiB },
-		"zero cache":           func(s *serveSettings) { s.cacheGiB = 0 },
+		"empty address":           func(s *serveSettings) { s.addr = "" },
+		"bad durability":          func(s *serveSettings) { s.cacheDurability = "maybe" },
+		"negative session ttl":    func(s *serveSettings) { s.sessionTTL = -time.Second },
+		"zero archive entries":    func(s *serveSettings) { s.archiveEntries = 0 },
+		"reserve over budget":     func(s *serveSettings) { s.downloadReserveMiB = s.downloadBytesMiB },
+		"zero cache":              func(s *serveSettings) { s.cacheGiB = 0 },
+		"negative source share":   func(s *serveSettings) { s.cacheFilePercent = -1 },
+		"source share over total": func(s *serveSettings) { s.cacheFilePercent = 101 },
 	} {
 		settings := valid()
 		mutate(&settings)
 		if err := validateServeSettings(settings); err == nil {
 			t.Fatalf("%s was accepted", name)
+		}
+	}
+}
+
+func TestParseServeSourceQuota(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		want int
+	}{
+		{nil, 20}, {[]string{"-cache-file-percent=0"}, 0}, {[]string{"-cache-file-percent=35"}, 35},
+	} {
+		settings, err := parseServeSettings(tc.args, io.Discard, io.Discard)
+		if err != nil || settings.cacheFilePercent != tc.want {
+			t.Fatalf("source share %v: settings=%+v err=%v", tc.args, settings, err)
 		}
 	}
 }

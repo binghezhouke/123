@@ -19,7 +19,7 @@ const nestedMemberBlockBytes int64 = 1 << 20
 // Normal caches retain 1 MiB blocks; small caches use power-of-two blocks.
 func (t *Tree) nestedBlockBytes() int64 {
 	depth := int64(defaults(t.opts).MaxArchiveDepth)
-	budget := t.cache.Capacity() / 2 / (depth + 1)
+	budget := t.cache.SourceCapacity() / 2 / (depth + 1)
 	block := nestedMemberBlockBytes
 	for block > budget && block > 1 {
 		block /= 2
@@ -42,6 +42,7 @@ type nestedMemberReader struct {
 	ctx        context.Context
 	cache      *storage.Cache
 	key        string
+	cacheOwner string
 	size       int64
 	blockBytes int64
 	open       func(context.Context) (io.ReadCloser, error)
@@ -99,6 +100,7 @@ func (r *nestedMemberReader) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (r *nestedMemberReader) ReadAtContext(ctx context.Context, p []byte, off int64) (int, error) {
+	ctx = storage.WithCacheOwner(ctx, r.cacheOwner)
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -141,7 +143,7 @@ func (r *nestedMemberReader) readCached(ctx context.Context, p []byte, off int64
 		blockBytes := r.blockSize()
 		start := off / blockBytes * blockBytes
 		length := min(blockBytes, r.size-start)
-		h, err := r.cache.OpenCached(fmt.Sprintf("%s:block:%d", r.key, start), length)
+		h, err := r.cache.OpenCachedContext(ctx, fmt.Sprintf("%s:block:%d", r.key, start), length)
 		if err != nil || h == nil {
 			return total, err
 		}

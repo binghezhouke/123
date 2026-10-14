@@ -68,6 +68,8 @@ func (c *Cache) Stats() iostats.CacheSummary {
 	defer c.mu.Unlock()
 
 	summary := iostats.CacheSummary{
+		SourceLimitPercent: c.sourcePercent, SourceLimitBytes: c.sourceLimit,
+		SourceCount: len(c.sources), SourceEvictions: c.sourceEvictions, SourceEvictionBytes: c.sourceEvictedBytes,
 		Status:                "measured",
 		CapacityBytes:         c.max,
 		UsedBytes:             c.used,
@@ -103,6 +105,9 @@ func (c *Cache) Stats() iostats.CacheSummary {
 		}
 	}
 	for _, entry := range c.entries {
+		if entry.owner == "" && entry.class != cacheIndex && entry.kind == indexKindUnknown {
+			summary.UnattributedDataBytes += entry.size
+		}
 		class := int(entry.class)
 		if class < 0 || class >= len(summary.Classes) {
 			continue
@@ -132,6 +137,14 @@ func (c *Cache) Stats() iostats.CacheSummary {
 		summary.IndexKinds[kind].CapacityEvictionBytes = counter.capacityEvictionBytes
 	}
 	summary.Foreground = c.telemetry.rangeReads[0].summary()
+	for _, source := range c.sources {
+		if source.used+source.reserved > summary.LargestSourceBytes+summary.LargestSourceReservedBytes {
+			summary.LargestSourceBytes, summary.LargestSourceReservedBytes = source.used, source.reserved
+		}
+		if c.sourceLimit > 0 && source.used+source.reserved > c.sourceLimit {
+			summary.SourceOverLimitCount++
+		}
+	}
 	summary.Background = c.telemetry.rangeReads[1].summary()
 	return summary
 }

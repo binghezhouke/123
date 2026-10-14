@@ -37,6 +37,8 @@ type cacheEntry struct {
 	lastTouch            time.Time
 	pins                 int
 	lru                  *list.Element
+	owner                string
+	ownerLRU             *list.Element
 	rangeID              string
 	rangeStart, rangeEnd int64
 }
@@ -80,6 +82,12 @@ type Cache struct {
 	remoteRecovery      remoteRecoveryCounters
 	ghost               map[string]*list.Element
 	ghostLRU            *list.List
+	sourcePercent       int
+	sourceLimit         int64
+	sources             map[string]*sourceResidency
+	rangeOwners         map[string]string
+	sourceEvictions     uint64
+	sourceEvictedBytes  int64
 }
 
 // NewCache opens an exclusive cache directory with the requested byte limit.
@@ -395,6 +403,7 @@ func (c *Cache) pathForKey(key string, class cacheClass) string {
 }
 
 func parseObjectFilename(name string) (string, cacheClass, indexKind, bool) {
+	name, _ = splitOwnedCacheName(name)
 	base := strings.TrimSuffix(name, ".blob")
 	parts := strings.Split(base, ".")
 	if len(parts) == 1 && len(parts[0]) == 64 {
@@ -422,9 +431,13 @@ func parseObjectFilename(name string) (string, cacheClass, indexKind, bool) {
 
 func (c *Cache) pathForEntry(id string, e *cacheEntry, class cacheClass) string {
 	if e.rangeID != "" {
-		return filepath.Join(c.dir, rangeFilename(e.rangeID, e.rangeStart, e.rangeEnd, id, class))
+		p := filepath.Join(c.dir, rangeFilename(e.rangeID, e.rangeStart, e.rangeEnd, id, class))
+		if e.owner == e.rangeID[:32] {
+			return p
+		}
+		return ownedCachePath(p, e.owner)
 	}
-	return filepath.Join(c.dir, id+"."+entrySuffix(class, e.kind)+".blob")
+	return ownedCachePath(filepath.Join(c.dir, id+"."+entrySuffix(class, e.kind)+".blob"), e.owner)
 }
 
 func newClassLRUs() [cacheClassCount]*list.List {
@@ -457,6 +470,7 @@ func (c *Cache) load() error {
 	var loaded []loadedEntry
 	for _, item := range items {
 		name := item.Name()
+		_, owner := splitOwnedCacheName(name)
 		if strings.HasPrefix(name, ".fill-") || strings.HasPrefix(name, ".metadata-") {
 			// Only remove regular files created by our atomic-fill paths. A
 			// directory, symlink, or other process' object is left untouched.
@@ -500,9 +514,12 @@ func (c *Cache) load() error {
 			_ = os.Remove(p)
 			continue
 		}
-		entry := &cacheEntry{path: p, size: st.Size(), class: class, kind: kind, used: st.ModTime(), lastTouch: st.ModTime()}
+		entry := &cacheEntry{path: p, size: st.Size(), class: class, kind: kind, used: st.ModTime(), lastTouch: st.ModTime(), owner: owner}
 		if ranged != nil {
 			entry.rangeID, entry.rangeStart, entry.rangeEnd = ranged.identity, ranged.start, ranged.end
+			if entry.owner == "" {
+				entry.owner = ranged.identity[:32]
+			}
 		}
 		loaded = append(loaded, loadedEntry{id: id, entry: entry})
 		c.used += st.Size()
@@ -515,6 +532,7 @@ func (c *Cache) load() error {
 		// the older duplicate instead of leaving it outside the eviction index,
 		// where it would inflate the resident byte total forever.
 		if previous := c.entries[item.id]; previous != nil {
+			c.removeSourceEntryLocked(previous)
 			if previous.lru != nil {
 				c.lru[previous.class].Remove(previous.lru)
 				previous.lru = nil
@@ -530,6 +548,13 @@ func (c *Cache) load() error {
 		}
 		item.entry.lru = c.lru[item.entry.class].PushFront(item.id)
 		c.entries[item.id] = item.entry
+		c.addSourceEntryLocked(item.id, item.entry)
+		if item.entry.rangeID != "" {
+			if c.rangeOwners == nil {
+				c.rangeOwners = make(map[string]string)
+			}
+			c.rangeOwners[item.entry.rangeID] = item.entry.owner
+		}
 		if item.entry.class == cacheIndex {
 			c.indexUsed += item.entry.size
 		}
@@ -582,6 +607,9 @@ func (c *Cache) evictLocked(need int64) error {
 
 func (c *Cache) touchLRULocked(id string, e *cacheEntry) {
 	e.used = time.Now()
+	if e.ownerLRU != nil {
+		c.sources[e.owner].lru[e.class].MoveToFront(e.ownerLRU)
+	}
 	if e.lru != nil {
 		c.lru[e.class].MoveToFront(e.lru)
 	} else {
@@ -678,6 +706,11 @@ func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
 			c.recordIndexDemotionLocked(e)
 		}
 	}
+	if e.ownerLRU != nil {
+		s := c.sources[e.owner]
+		s.lru[e.class].Remove(e.ownerLRU)
+		e.ownerLRU = s.lru[class].PushFront(id)
+	}
 	e.class = class
 	if class == cacheIndex {
 		c.indexUsed += e.size
@@ -685,6 +718,7 @@ func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
 }
 
 func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
+	c.removeSourceEntryLocked(e)
 	if e.rangeID != "" {
 		c.removeRangeLocked(e.rangeID, id)
 	}
@@ -723,6 +757,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 	}
 	for {
 		c.mu.Lock()
+		owner := c.fillOwnerLocked(ctx, key, class)
 		if c.closed {
 			c.mu.Unlock()
 			return nil, ErrClosed
@@ -748,6 +783,10 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			}
 		}
 		if e := c.entries[id]; e != nil && e.size == size {
+			if err := c.adoptSourceLocked(id, e, owner); err != nil {
+				c.mu.Unlock()
+				return nil, err
+			}
 			f, err := os.Open(e.path)
 			if err == nil {
 				e.pins++
@@ -814,6 +853,10 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 			return nil, err
 		}
 		c.consumeCacheGhostLocked(id)
+		if err := c.trimSourceLocked(owner, size); err != nil {
+			c.mu.Unlock()
+			return nil, err
+		}
 		if err := c.evictLocked(size); err != nil {
 			c.mu.Unlock()
 			return nil, err
@@ -821,6 +864,8 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 		f := &flight{done: make(chan struct{})}
 		c.flights[id] = f
 		c.reserved += size
+		c.reserveSourceLocked(owner, size)
+		targetPath = ownedFillPath(key, targetPath, owner)
 		if class == cacheIndex {
 			c.reservedIndex += size
 		}
@@ -828,6 +873,7 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 		f.err = c.fill(ctx, targetPath, key, size, class, progress, fill)
 		c.mu.Lock()
 		c.reserved -= size
+		c.reserveSourceLocked(owner, -size)
 		if class == cacheIndex {
 			c.reservedIndex -= size
 		}
@@ -845,15 +891,16 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 				}
 				finalPath := targetPath
 				if state.class != class {
-					finalPath = c.pathForKey(key, state.class)
+					finalPath = ownedFillPath(key, c.pathForKey(key, state.class), owner)
 					if err := os.Rename(targetPath, finalPath); err != nil {
 						f.err = err
 					}
 				}
 				if f.err == nil {
-					entry := &cacheEntry{path: finalPath, size: size, class: state.class, kind: indexKindForKey(key), hasUse: state.hasUse, scanDir: state.scanDir, lastUseStart: state.lastUseStart, lastUseEnd: state.lastUseEnd, used: time.Now(), lastTouch: time.Now()}
+					entry := &cacheEntry{path: finalPath, size: size, class: state.class, kind: indexKindForKey(key), hasUse: state.hasUse, scanDir: state.scanDir, lastUseStart: state.lastUseStart, lastUseEnd: state.lastUseEnd, used: time.Now(), lastTouch: time.Now(), owner: owner}
 					entry.lru = c.lru[entry.class].PushFront(id)
 					c.entries[id] = entry
+					c.addSourceEntryLocked(id, entry)
 					if start, end, identity, ok := parseRangeKey(key); ok {
 						entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
 						c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: id})
@@ -1065,6 +1112,9 @@ func (h *Handle) Close() error {
 	c.mu.Lock()
 	if e := c.entries[h.key]; e != nil && e.pins > 0 {
 		e.pins--
+		if trimErr := c.trimSourceLocked(e.owner, 0); err == nil {
+			err = trimErr
+		}
 	}
 	c.mu.Unlock()
 	return err

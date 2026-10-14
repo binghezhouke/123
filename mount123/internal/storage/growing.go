@@ -22,6 +22,7 @@ type growingFlight struct {
 	target                   string
 	size                     int64
 	class                    cacheClass
+	owner                    string
 	hasUse                   bool
 	scanDir                  int8
 	lastUseStart, lastUseEnd int64
@@ -95,7 +96,7 @@ func (c *Cache) acquireGrowing(ctx, lifetime context.Context, key string, size i
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if h, err := c.existing(key, size); err != nil {
+		if h, err := c.OpenCachedContext(ctx, key, size); err != nil {
 			return nil, err
 		} else if h != nil {
 			h.promoteOnRead = !workqueue.IsBackground(ctx)
@@ -162,7 +163,12 @@ func (c *Cache) acquireGrowing(ctx, lifetime context.Context, key string, size i
 			c.mu.Unlock()
 			return reader, nil
 		}
+		owner := c.fillOwnerLocked(ctx, key, foregroundClass(workqueue.IsBackground(ctx)))
 		c.consumeCacheGhostLocked(id)
+		if err := c.trimSourceLocked(owner, size); err != nil {
+			c.mu.Unlock()
+			return nil, err
+		}
 		if err := c.evictLocked(size); err != nil {
 			c.mu.Unlock()
 			return nil, err
@@ -185,11 +191,12 @@ func (c *Cache) acquireGrowing(ctx, lifetime context.Context, key string, size i
 			c.mu.Unlock()
 			return nil, err
 		}
-		fillCtx, cancel := context.WithCancel(lifetime)
+		fillCtx, cancel := context.WithCancel(WithCacheOwner(lifetime, owner))
 		class := foregroundClass(workqueue.IsBackground(ctx))
-		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: c.filename(key, class), size: size, class: class, refs: 1, retain: retain, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
+		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: ownedFillPath(key, c.filename(key, class), owner), size: size, class: class, owner: owner, refs: 1, retain: retain, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
 		c.growing[id] = f
 		c.reserved += size
+		c.reserveSourceLocked(owner, size)
 		reader := &GrowingHandle{flight: f, file: readerFile, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}
 		c.mu.Unlock()
 		go f.run(fillCtx, writer, fill)
@@ -234,15 +241,18 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 	}
 	if err == nil {
 		c.reserved -= f.size
+		c.reserveSourceLocked(f.owner, -f.size)
 		now := time.Now()
-		entry := &cacheEntry{path: f.target, size: f.size, class: f.class, hasUse: f.hasUse, scanDir: f.scanDir, lastUseStart: f.lastUseStart, lastUseEnd: f.lastUseEnd, used: now, lastTouch: now, pins: f.refs}
+		entry := &cacheEntry{path: f.target, size: f.size, class: f.class, hasUse: f.hasUse, scanDir: f.scanDir, lastUseStart: f.lastUseStart, lastUseEnd: f.lastUseEnd, used: now, lastTouch: now, pins: f.refs, owner: f.owner}
 		entry.lru = c.lru[entry.class].PushFront(f.id)
 		if start, end, identity, ok := parseRangeKey(f.key); ok {
 			entry.rangeID, entry.rangeStart, entry.rangeEnd = identity, start, end
 			c.addRangeLocked(&cacheRange{identity: identity, start: start, end: end, id: f.id})
 		}
 		c.entries[f.id] = entry
+		c.addSourceEntryLocked(f.id, entry)
 		c.used += f.size
+		_ = c.trimSourceLocked(f.owner, 0)
 		delete(c.growing, f.id)
 		f.mu.Lock()
 		f.state = growingComplete
@@ -258,6 +268,7 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 		return
 	}
 	c.reserved -= f.size
+	c.reserveSourceLocked(f.owner, -f.size)
 	delete(c.growing, f.id)
 	if c.statsReady {
 		c.telemetry.fillFailures++
@@ -283,6 +294,7 @@ func (f *growingFlight) release() {
 	if f.state == growingComplete {
 		if entry := c.entries[f.id]; entry != nil && entry.pins > 0 {
 			entry.pins--
+			_ = c.trimSourceLocked(entry.owner, 0)
 		}
 	} else if f.state == growingRunning && f.refs == 0 && !f.retain {
 		f.cancel()
@@ -486,7 +498,7 @@ func (c *Cache) consumeGrowing(f *growingFlight, start, end int64) {
 		oldClass := f.class
 		consumeClass(&f.class, &f.hasUse, &f.scanDir, &f.lastUseStart, &f.lastUseEnd, start, end)
 		if oldClass != f.class {
-			f.target = c.pathForKey(f.key, f.class)
+			f.target = ownedFillPath(f.key, c.pathForKey(f.key, f.class), f.owner)
 		}
 	}
 	c.mu.Unlock()

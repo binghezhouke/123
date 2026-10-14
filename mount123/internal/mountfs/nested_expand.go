@@ -244,6 +244,9 @@ func (t *Tree) decodedViewMemberInput(ctx context.Context, n *nestedArchive, m *
 			return t.fillNestedSolid7z(ctx, plan, start, length, w)
 		}
 	}
+	if n.archive != nil {
+		r.cacheOwner = t.cacheSourceOwner(n.archive.id)
+	}
 
 	// Child archive inputs commonly reach EOF while parsing their tail index.
 	// Leaf range reads rarely do: leave those on the original decoder instead

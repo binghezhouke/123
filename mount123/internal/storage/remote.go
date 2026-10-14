@@ -420,6 +420,9 @@ func (r *Remote) ReadRangeAtContext(operationCtx context.Context, p []byte, off 
 }
 
 func (r *Remote) readAtContext(operationCtx context.Context, p []byte, off int64, fetchSize int64, applicationRead bool) (int, error) {
+	if capacity := r.cache.SourceCapacity(); capacity > 0 {
+		fetchSize = min(fetchSize, capacity)
+	}
 	ctx, cancel := combineContexts(r.lifetimeCtx, operationCtx)
 	defer cancel()
 	if err := ctx.Err(); err != nil {
@@ -519,7 +522,7 @@ func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error 
 	if start >= end {
 		return nil
 	}
-	if end-start > r.cache.max {
+	if end-start > r.cache.SourceCapacity() {
 		r.cache.recordENOSPC()
 		return syscall.ENOSPC
 	}
@@ -538,6 +541,10 @@ func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error 
 		missing := r.cache.missingRanges(r.rangeID, start, end)
 		if len(missing) == 0 {
 			return nil
+		}
+		missingBytes := int64(0)
+		for _, gap := range missing {
+			missingBytes += gap.end - gap.start
 		}
 		run := missing[0]
 		flight, owner, err := r.cache.beginRangeFlight(ctx, r.rangeID, run.start, run.end)
@@ -559,6 +566,16 @@ func (r *Remote) ensureCachedRange(ctx context.Context, start, end int64) error 
 			}
 			if err != nil {
 				return err
+			}
+			remaining := int64(0)
+			for _, gap := range r.cache.missingRanges(r.rangeID, start, end) {
+				remaining += gap.end - gap.start
+			}
+			if remaining >= missingBytes {
+				// Competing pins/reservations may evict the just-published
+				// range. Prefetch must not repeatedly download it forever.
+				r.cache.recordENOSPC()
+				return syscall.ENOSPC
 			}
 		}
 	}
@@ -582,6 +599,7 @@ func (r *Remote) runRangeFlight(flight *rangeFlight) {
 		if limit < 1 {
 			limit = r.cache.downloads.cfg.MaxInFlightBytes
 		}
+		limit = min(limit, r.cache.SourceCapacity())
 		for start := gap.start; start < gap.end; {
 			end := min(gap.end, start+limit)
 			release, stageErr := r.cache.staging.Acquire(recoveryCtx, end-start, r.rangeID, flight.priority)
@@ -760,7 +778,7 @@ func (r *Remote) readRangeWithCache(ctx context.Context, p []byte, off int64, pr
 			if err := ctx.Err(); err != nil {
 				return read, err
 			}
-			chunkEnd := min(gap.end, pos+r.cache.max)
+			chunkEnd := min(gap.end, pos+r.cache.SourceCapacity())
 			flight, owner, beginErr := r.cache.beginRangeFlight(ctx, r.rangeID, pos, chunkEnd)
 			if beginErr != nil {
 				return read, beginErr

@@ -39,6 +39,7 @@ type serveSettings struct {
 	sessionTTL         time.Duration
 	cacheDir           string
 	cacheGiB           int64
+	cacheFilePercent   int
 	cacheMinFreeGiB    int64
 	indexBudgetMiB     int64
 	cacheDurability    string
@@ -108,6 +109,9 @@ func runServeWith(ctx context.Context, args []string, stderr, stdout io.Writer, 
 			log.Printf("serve: close cache: %v", closeErr)
 		}
 	}()
+	if err := cache.ConfigureSourceLimit(settings.cacheFilePercent); err != nil {
+		return err
+	}
 	api, err := deps.newAPI(panapi.Config{
 		ClientID:     config.ClientID,
 		ClientSecret: config.ClientSecret,
@@ -220,6 +224,7 @@ func parseServeSettings(args []string, stderr, stdout io.Writer) (*serveSettings
 	fs.DurationVar(&settings.sessionTTL, "session-ttl", webserve.DefaultSessionTTL, "how long a web login stays valid")
 	fs.StringVar(&settings.cacheDir, "cache-dir", defaultCache, "private disk cache directory (share it with the mount)")
 	fs.Int64Var(&settings.cacheGiB, "cache-gib", 50, "maximum disk cache size in GiB")
+	fs.IntVar(&settings.cacheFilePercent, "cache-file-percent", storage.DefaultSourceCachePercent, "maximum retained data share per remote file, including nested members (percent, 0 disables)")
 	fs.Int64Var(&settings.cacheMinFreeGiB, "cache-min-free-gib", 0, "minimum free space to keep on the cache filesystem in GiB (0 disables)")
 	fs.Int64Var(&settings.indexBudgetMiB, "index-budget-mib", 0, "protected archive index cache budget in MiB (0 derives it from the cache size)")
 	fs.StringVar(&settings.cacheDurability, "cache-durability", "durable", "cache durability: durable or ephemeral")
@@ -264,7 +269,7 @@ func validateServeSettings(settings serveSettings) error {
 	if settings.downloadRequests < 1 || settings.downloadRequests > 256 || settings.downloadBytesMiB < 1 || settings.downloadBytesMiB > 1<<20 || settings.downloadReserveMiB < 0 || settings.downloadReserveMiB >= settings.downloadBytesMiB {
 		return fmt.Errorf("invalid download request or in-flight byte limits")
 	}
-	if settings.cacheGiB < 1 || settings.cacheGiB > 1<<20 || settings.cacheMinFreeGiB < 0 || settings.cacheMinFreeGiB > 1<<20 || settings.indexBudgetMiB < 0 || settings.indexBudgetMiB > 1<<20 || settings.rootID < 0 || settings.metadataMiB < 1 || settings.metadataMiB > 1<<20 || settings.directoryTTL <= 0 || settings.sourceTTL <= 0 || settings.cacheDir == "" {
+	if settings.cacheFilePercent < 0 || settings.cacheFilePercent > 100 || settings.cacheGiB < 1 || settings.cacheGiB > 1<<20 || settings.cacheMinFreeGiB < 0 || settings.cacheMinFreeGiB > 1<<20 || settings.indexBudgetMiB < 0 || settings.indexBudgetMiB > 1<<20 || settings.rootID < 0 || settings.metadataMiB < 1 || settings.metadataMiB > 1<<20 || settings.directoryTTL <= 0 || settings.sourceTTL <= 0 || settings.cacheDir == "" {
 		return fmt.Errorf("invalid cache size, freshness interval or root ID")
 	}
 	return nil

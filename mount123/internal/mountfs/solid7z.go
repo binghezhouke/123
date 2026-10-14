@@ -31,7 +31,7 @@ const maxSolid7zCacheBytes int64 = 1 << 30
 const solid7zFillTimeout = 5 * time.Minute
 
 func (t *Tree) solid7zCacheable(m *member) bool {
-	return m.format == ".7z" && m.sevenStream.valid(m.size) && m.sevenStream.Size <= min(maxSolid7zCacheBytes, t.cache.Capacity()/4)
+	return m.format == ".7z" && m.sevenStream.valid(m.size) && m.sevenStream.Size <= min(maxSolid7zCacheBytes, t.cache.SourceCapacity()/4)
 }
 
 func (t *Tree) solid7zKey(identity string, a *archiveDescriptor, m *member, password []byte) string {
@@ -115,6 +115,7 @@ func (w *solidRAROutput) Write(p []byte) (int, error) {
 }
 
 func (t *Tree) acquireSolid7z(ctx context.Context, source *storage.Remote, a *archiveDescriptor, m *member, password []byte, identity string) (*storage.GrowingHandle, error) {
+	ctx = t.archiveCacheContext(ctx, a)
 	location := *m.sevenStream
 	key := t.solid7zKey(identity, a, m, password)
 	// The asynchronous fill outlives this member's request and password buffer.

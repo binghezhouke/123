@@ -74,6 +74,7 @@ func rangeFilename(identity string, start, end int64, id string, class cacheClas
 }
 
 func parseRangeFilename(name string) (*cacheRange, string, cacheClass, error) {
+	name, _ = splitOwnedCacheName(name)
 	parts := strings.Split(strings.TrimSuffix(strings.TrimPrefix(name, "extent-"), ".blob"), "-")
 	if (len(parts) != 4 && len(parts) != 5) || len(parts[0]) != 64 || len(parts[3]) != 64 {
 		return nil, "", cacheProbation, errors.New("invalid extent filename")

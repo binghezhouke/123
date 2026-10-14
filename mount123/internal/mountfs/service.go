@@ -258,6 +258,7 @@ func (s *Service) listArchive(ctx context.Context, fileID int64, memberPath stri
 // stream through the shared growing cache;
 // plain ZIP Store members map directly onto the remote file instead.
 func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPath string) (io.ReaderAt, int64, error) {
+	ctx = storage.WithCacheOwner(ctx, s.tree.cacheSourceOwner(fileID))
 	memberPath = strings.Trim(memberPath, "/")
 	if file, fileErr := s.tree.archiveFileMetadata(ctx, fileID); fileErr == nil && strings.EqualFold(path.Ext(file.Name), ".iso") {
 		return s.OpenISOMember(ctx, fileID, memberPath)
@@ -289,6 +290,9 @@ func (s *Service) OpenArchiveMember(ctx context.Context, fileID int64, memberPat
 	}
 	defer view.Close()
 	if view.depth > 0 {
+		return s.tree.openNestedArchiveMember(ctx, view, nestedMember)
+	}
+	if s.tree.demandCacheMember(nestedMember) {
 		return s.tree.openNestedArchiveMember(ctx, view, nestedMember)
 	}
 
