@@ -185,7 +185,7 @@
     }
     function cancelOutside() {
         for (const [idx, task] of pending) {
-            if (Math.abs(idx - selected) > settings.count) { task.controller.abort(); pending.delete(idx); attempted.delete(idx); }
+            if ((idx !== selected && task.priority) || Math.abs(idx - selected) > settings.count) { task.controller.abort(); pending.delete(idx); attempted.delete(idx); }
         }
     }
     function enforceConcurrency() {
@@ -199,7 +199,14 @@
         const list = items(), item = list[index];
         if (!item) return Promise.reject(new Error('图片不存在'));
         if (cache.has(index)) { stats.hits++; const value = cache.get(index); cache.delete(index); cache.set(index, value); return Promise.resolve(value.url); }
-        if (pending.has(index)) { const task=pending.get(index); if (priority) { task.thumbOnly=false; task.priority=true; } return task.promise; }
+        if (pending.has(index)) {
+            const task = pending.get(index);
+            if (priority) {
+                task.thumbOnly = false; task.priority = true;
+                globalThis.CloudImageResources?.promote?.(item);
+            }
+            return task.promise;
+        }
         const task = {controller: new AbortController(), priority, thumbOnly:Boolean(ownerSignal), failed:false};
         if (ownerSignal) ownerSignal.addEventListener('abort', () => { if (task.thumbOnly && pending.get(index) === task) { task.controller.abort(); pending.delete(index); } }, {once:true});
         task.promise = (async () => {

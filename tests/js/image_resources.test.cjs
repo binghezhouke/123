@@ -42,6 +42,129 @@ test('last cancellation aborts abandoned transfer and a fresh request can retry'
     global.fetch = async () => response();
     assert.equal((await reader.read(item())).blob.size, 16);
 });
+test('clicking an in-flight prefetch obtains foreground service before background work completes', async () => {
+    const reader = new ImageResources(store()), background = new AbortController(), foreground = new AbortController();
+    const requests = [];
+    global.fetch = (_, opts) => {
+        requests.push(opts);
+        if (opts.priority === 'high') return Promise.resolve(response());
+        return new Promise((resolve, reject) => {
+            opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+    };
+    const prefetch = reader.read(item(), {signal: background.signal, priority: 'background'});
+    prefetch.catch(() => {});
+    await tick();
+    assert.equal(requests[0].priority, 'low');
+    const selected = reader.read(item(), {signal: foreground.signal});
+    selected.catch(() => {});
+    let timer;
+    try {
+        const result = await Promise.race([selected.then(() => 'displayed'), new Promise(resolve => timer = setTimeout(() => resolve('blocked behind background'), 100))]);
+        assert.equal(result, 'displayed');
+        assert.equal((await prefetch).blob, (await selected).blob, 'promotion preserves other consumers');
+        assert.equal(requests.length, 2, 'replace the low-priority attempt only once');
+        assert.equal(requests[0].signal.aborted, true);
+        assert.equal(requests[1].priority, 'high');
+        assert.deepEqual(requests[1].headers, {});
+    } finally {
+        clearTimeout(timer); background.abort(); foreground.abort();
+    }
+});
+test('queued prefetch is promoted ahead of a full shared background pool without duplication', async () => {
+    const reader = new ImageResources(store()), owner = new AbortController();
+    const requests = [];
+    let releaseForeground;
+    global.fetch = (url, opts) => {
+        requests.push({url, opts});
+        return new Promise((resolve, reject) => {
+            if (opts.priority === 'high') releaseForeground = () => resolve(response());
+            opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+    };
+    const reads = Array.from({length: 9}, (_, i) => reader.read(item(`/file/${i}/preview`), {signal: owner.signal, priority: 'background'}));
+    const all = Promise.allSettled(reads);
+    await tick();
+    assert.equal(requests.length, 4, 'all speculative callers share four slots');
+    const next = item('/file/8/preview');
+    const foreground = reader.read(next, {signal: owner.signal});
+    await tick();
+    assert.equal(requests.length, 5);
+    assert.equal(requests[4].url, 'http://local.test/file/8/preview');
+    assert.equal(requests[4].opts.priority, 'high');
+    assert.equal(requests.filter(r => r.url.endsWith('/8/preview')).length, 1);
+    releaseForeground(); await foreground;
+    owner.abort(); await all;
+    assert.equal(reader.backgroundActive, 0); assert.equal(reader.waiting.length, 0);
+});
+test('new speculation waits for selected bytes, and selection cancellation releases admission', async () => {
+    const reader = new ImageResources(store()), selected = new AbortController(), bg = new AbortController();
+    const requests = [];
+    global.fetch = (url, opts) => {
+        requests.push(url);
+        return new Promise((resolve, reject) => opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+    };
+    const first = reader.read(item(), {signal: selected.signal});
+    const firstCancelled = assert.rejects(first, {name: 'AbortError'});
+    const second = reader.read(item('/file/9/preview'), {priority: 'background', signal: bg.signal});
+    const secondCancelled = assert.rejects(second, {name: 'AbortError'});
+    await tick(); assert.equal(requests.length, 1);
+    selected.abort(); await firstCancelled; await tick();
+    assert.equal(requests.length, 2);
+    bg.abort(); await secondCancelled;
+});
+test('completed image displays before persistent storage finishes and remains reusable', async () => {
+    const cache = new OriginalStore(), reader = new ImageResources(cache);
+    let unlock, calls = 0;
+    const put = cache.put.bind(cache);
+    cache.put = (key, version, blob) => {
+        cache.db = new Promise(resolve => unlock = resolve);
+        return put(key, version, blob);
+    };
+    global.fetch = async () => { calls++; return response(); };
+    const displayed = await reader.read(item());
+    assert.equal(displayed.blob.size, 16);
+    assert.equal((await reader.read(item())).cached, true);
+    assert.equal(calls, 1);
+    unlock(null);
+});
+test('CDN bodies do not consume application-origin background slots after redirect', async () => {
+    const reader = new ImageResources(store()), owner = new AbortController();
+    let calls = 0;
+    global.fetch = async (_, {signal}) => {
+        calls++;
+        return {ok: true, url: 'https://cdn.example/image.png', headers: new Headers({'Content-Type': 'image/png'}),
+            blob: () => new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))};
+    };
+    const reads = Array.from({length: 9}, (_, i) => {
+        const node = item(`/file/${i}/preview`);
+        node.dataset.directUrl = `/file/${i}/preview?direct=1`;
+        return reader.read(node, {priority: 'background', signal: owner.signal});
+    });
+    const all = Promise.allSettled(reads);
+    await tick();
+    assert.equal(calls, 9); assert.equal(reader.backgroundActive, 0);
+    owner.abort(); await all;
+});
+test('gallery promotion replaces a stalled response body while keeping the shared result', async () => {
+    const reader = new ImageResources(store());
+    let calls = 0;
+    global.fetch = async (_, opts) => {
+        calls++;
+        if (opts.priority === 'high') return response();
+        return new Response(new ReadableStream({start(controller) {
+            controller.enqueue(new Uint8Array([1, 2, 3]));
+            opts.signal.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')));
+        }}), {headers: {'Content-Type': 'image/png'}});
+    };
+    const pending = reader.read(item(), {priority: 'background'});
+    await tick();
+    reader.promote(item());
+    assert.equal((await pending).blob.size, 16);
+    assert.equal(calls, 2);
+    assert.equal(reader.pending.size, 0);
+    assert.equal(reader.foreground.size, 0);
+});
 test('HTTP errors do not poison encoded cache; explicit forget forces retry', async () => {
     const cache = store(), reader = new ImageResources(cache);
     global.fetch = async () => new Response('denied', {status: 403});

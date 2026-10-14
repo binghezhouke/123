@@ -186,13 +186,17 @@ func (s *Server) requestLog(next http.Handler) http.Handler {
 			return
 		}
 		started := time.Now()
+		priority := "foreground"
+		if r.Header.Get("X-Priority") == "background" {
+			priority = "background"
+		}
 		rw := &requestLogWriter{ResponseWriter: w, traffic: &s.traffic}
 		s.traffic.active.Add(1)
 		defer s.traffic.active.Add(-1)
-		s.logger.Printf("web request start method=%s path=%s query=%q", r.Method, r.URL.Path, r.URL.RawQuery)
+		s.logger.Printf("web request start method=%s path=%s query=%q priority=%s", r.Method, r.URL.Path, r.URL.RawQuery, priority)
 		next.ServeHTTP(rw, r)
 		s.traffic.finish(rw.status, time.Since(started), r.Context().Err() != nil)
-		s.logger.Printf("web request done method=%s path=%s status=%d bytes=%d duration=%s canceled=%t", r.Method, r.URL.Path, rw.status, rw.bytes, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil)
+		s.logger.Printf("web request done method=%s path=%s status=%d bytes=%d duration=%s canceled=%t priority=%s", r.Method, r.URL.Path, rw.status, rw.bytes, time.Since(started).Round(time.Millisecond), r.Context().Err() != nil, priority)
 	})
 }
 

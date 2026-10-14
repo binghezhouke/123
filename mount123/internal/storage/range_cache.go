@@ -184,9 +184,7 @@ func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, en
 			active.refs++
 			c.recordExistingFillWaitLocked()
 			c.mu.Unlock()
-			if !workqueue.IsBackground(ctx) {
-				c.promotePriority(active.priority)
-			}
+			c.inheritRangePriority(ctx, active)
 			return active, false, nil
 		}
 		if active.start > start && active.start < flightEnd {
@@ -205,7 +203,30 @@ func (c *Cache) beginRangeFlight(ctx context.Context, identity string, start, en
 	f := &rangeFlight{start: start, end: flightEnd, done: make(chan struct{}), ctx: flightCtx, cancel: cancel, priority: priority, progress: newRangeProgress(), refs: 1, windowsChanged: make(chan struct{}), released: make(chan struct{})}
 	c.rangeFlights[identity] = append(c.rangeFlights[identity], f)
 	c.mu.Unlock()
+	c.inheritRangePriority(ctx, f)
 	return f, true, nil
+}
+
+// A decoder can become foreground after its range has already queued for
+// staging or network capacity. Propagate that change to both schedulers. A
+// joined reader only watches for its own lifetime, never beyond the flight.
+func (c *Cache) inheritRangePriority(ctx context.Context, f *rangeFlight) {
+	if !workqueue.IsBackground(ctx) {
+		c.promotePriority(f.priority)
+		return
+	}
+	promoted := workqueue.PromotionDone(ctx)
+	if promoted == nil || f.priority.promoted.Load() {
+		return
+	}
+	go func() {
+		select {
+		case <-promoted:
+			c.promotePriority(f.priority)
+		case <-ctx.Done():
+		case <-f.done:
+		}
+	}()
 }
 
 func (c *Cache) releaseRangeFlight(f *rangeFlight) {

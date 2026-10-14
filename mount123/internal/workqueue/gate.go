@@ -4,9 +4,40 @@ package workqueue
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 )
 
 type backgroundKey struct{}
+
+type priority struct {
+	foreground atomic.Bool
+	promoted   chan struct{}
+}
+
+// WithPromotion gives a shared producer its own priority. Calling promote is
+// idempotent and wakes queued work; it neither cancels nor restarts the producer.
+// Explicit Background children remain speculative after their parent promotes.
+func WithPromotion(ctx context.Context) (context.Context, func()) {
+	p := &priority{promoted: make(chan struct{})}
+	promote := func() {
+		if !p.foreground.Swap(true) {
+			close(p.promoted)
+		}
+	}
+	if !IsBackground(ctx) {
+		promote()
+	}
+	return context.WithValue(ctx, backgroundKey{}, p), promote
+}
+
+// PromotionDone is nil for fixed-priority contexts. Otherwise it closes once
+// the shared producer becomes foreground, including promotion before this call.
+func PromotionDone(ctx context.Context) <-chan struct{} {
+	if p, ok := ctx.Value(backgroundKey{}).(*priority); ok {
+		return p.promoted
+	}
+	return nil
+}
 
 // Background marks speculative work and refreshes. It is inherited by child
 // contexts, so downloads caused by a background decoder keep its priority.
@@ -19,8 +50,14 @@ func IsBackground(ctx context.Context) bool {
 	if ctx == nil {
 		return false
 	}
-	bg, _ := ctx.Value(backgroundKey{}).(bool)
-	return bg
+	switch p := ctx.Value(backgroundKey{}).(type) {
+	case bool:
+		return p
+	case *priority:
+		return !p.foreground.Load()
+	default:
+		return false
+	}
 }
 
 // Gate reserves one slot for foreground work when capacity is at least two.
@@ -84,11 +121,16 @@ func (g *Gate) notify() {
 // Acquire returns an idempotent release function. The wait observes ctx.
 func (g *Gate) Acquire(ctx context.Context) (func(), error) {
 	bg := IsBackground(ctx)
+	promoted := PromotionDone(ctx)
 	g.mu.Lock()
 	if !bg {
 		g.waiting++
 	}
 	for {
+		if bg && !IsBackground(ctx) {
+			bg = false
+			g.waiting++
+		}
 		if err := ctx.Err(); err != nil {
 			if !bg {
 				g.waiting--
@@ -124,6 +166,8 @@ func (g *Gate) Acquire(ctx context.Context) (func(), error) {
 		select {
 		case <-changed:
 		case <-ctx.Done():
+		case <-promoted:
+			promoted = nil
 		}
 		g.mu.Lock()
 	}

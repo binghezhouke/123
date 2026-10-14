@@ -90,6 +90,19 @@ function setup({count = 5, blobSize = 1, viewport = null, resources = null, inde
 }
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
+test('moving while a selected image is still loading cancels its obsolete gallery demand', async () => {
+    const {buttons, get, requests, images} = setup({count: 3});
+    buttons[0].handlers.click();
+    get('zip-gallery-next').onclick();
+    await tick();
+    assert.equal(requests[0].signal.aborted, true);
+    assert.equal(requests[1].signal.aborted, false);
+    requests[1].resolve(); await tick();
+    assert.equal(get('zip-gallery-title').textContent, '1.jpg');
+    assert.equal(images.length, 1);
+    get('zip-gallery-close').onclick(); await tick();
+});
+
 test('resetting diagnostics during an original-cache read cannot make misses negative', async () => {
     let finish;
     const {buttons, get, requests} = setup({count: 1, resources: {

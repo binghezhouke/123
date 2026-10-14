@@ -40,6 +40,10 @@
             });
         }
         async put(key, version, blob) {
+            // Hand completed bytes to subsequent displays immediately, even
+            // while IndexedDB is busy. Only four encoded blobs stay in RAM.
+            this.fallback.delete(key); this.fallback.set(key, {version, blob});
+            while (this.fallback.size > 4) this.fallback.delete(this.fallback.keys().next().value);
             const db = await this.db;
             const stored = db && await new Promise(resolve => {
                 try {
@@ -63,11 +67,7 @@
                     tx.onerror = tx.onabort = () => resolve(false);
                 } catch { resolve(false); }
             });
-            if (stored) { this.fallback.delete(key); return; }
-            // Private mode, a full quota or unavailable IndexedDB must not
-            // prevent viewing. Retain at most four encoded originals in RAM.
-            this.fallback.delete(key); this.fallback.set(key, {version, blob});
-            while (this.fallback.size > 4) this.fallback.delete(this.fallback.keys().next().value);
+            if (stored && this.fallback.get(key)?.blob === blob) this.fallback.delete(key);
         }
         async remove(key) {
             this.fallback.delete(key);
@@ -95,7 +95,56 @@
         return item.dataset.updated || item.dataset.size ? JSON.stringify([item.dataset.updated || '', item.dataset.size || '']) : '';
     }
     class ImageResources {
-        constructor(store = new OriginalStore()) { this.store = store; this.pending = new Map(); }
+        constructor(store = new OriginalStore()) {
+            this.store = store; this.pending = new Map();
+            // The local HTTP/1 origin has a small browser connection pool.
+            // This is shared transfer admission, not a platform API limiter.
+            this.backgroundLimit = 4; this.backgroundActive = 0;
+            this.waiting = []; this.foreground = new Set();
+        }
+        promote(item) {
+            const job = this.pending.get(JSON.stringify([identity(item), version(item)]));
+            if (job) this.promoteJob(job);
+        }
+        promoteJob(job) {
+            if (job.done || job.priority === 'foreground') return;
+            job.priority = 'foreground'; this.foreground.add(job);
+            // Fetch priority/headers cannot be changed after dispatch. Keep
+            // the shared promise and consumers, replace only this attempt.
+            if (job.attempt?.background) {
+                job.attempt.promoted = true;
+                job.attempt.controller.abort();
+            }
+            this.pump();
+        }
+        acquire(job, localPool = true) {
+            return new Promise((resolve, reject) => {
+                const entry = {job, resolve, reject, localPool};
+                entry.cancel = () => {
+                    this.waiting = this.waiting.filter(value => value !== entry);
+                    reject(aborted());
+                };
+                if (job.controller.signal.aborted) return entry.cancel();
+                job.controller.signal.addEventListener('abort', entry.cancel, {once: true});
+                this.waiting.push(entry); this.pump();
+            });
+        }
+        pump() {
+            for (const entry of [...this.waiting]) {
+                const background = entry.job.priority !== 'foreground';
+                if (background && (this.foreground.size || (entry.localPool && this.backgroundActive >= this.backgroundLimit))) continue;
+                this.waiting.splice(this.waiting.indexOf(entry), 1);
+                entry.job.controller.signal.removeEventListener('abort', entry.cancel);
+                if (background && entry.localPool) this.backgroundActive++;
+                let released = false;
+                entry.resolve(() => {
+                    if (released) return;
+                    released = true;
+                    if (background && entry.localPool) this.backgroundActive--;
+                    this.pump();
+                });
+            }
+        }
         read(item, {signal, priority = 'foreground'} = {}) {
             if (signal?.aborted) return Promise.reject(aborted());
             const key = identity(item), revision = version(item), jobKey = JSON.stringify([key, revision]);
@@ -103,11 +152,13 @@
             if (!job) {
                 job = {controller: new AbortController(), users: new Set(), priority, done: false};
                 this.pending.set(jobKey, job);
+                if (priority === 'foreground') this.foreground.add(job);
                 job.promise = this.load(item, key, revision, job).finally(() => {
                     job.done = true;
                     if (this.pending.get(jobKey) === job) this.pending.delete(jobKey);
+                    this.foreground.delete(job); this.pump();
                 });
-            } else if (priority === 'foreground') job.priority = priority;
+            } else if (priority === 'foreground') this.promoteJob(job);
             const owner = {};
             job.users.add(owner);
             return new Promise((resolve, reject) => {
@@ -117,6 +168,7 @@
                     if (!job.done && job.users.size === 0) {
                         job.controller.abort();
                         if (this.pending.get(jobKey) === job) this.pending.delete(jobKey);
+                        this.foreground.delete(job); this.pump();
                     }
                 };
                 const cancel = () => { release(); reject(aborted()); };
@@ -131,24 +183,48 @@
             const data = item.dataset, local = key;
             const legacyDirect = new URL(data.url || local, location.href).searchParams.get('direct') === '1';
             const direct = data.directUrl || (legacyDirect ? data.url : '');
-            const sources = direct && (job.priority !== 'foreground' || legacyDirect) ? [direct, local] : [local];
-            let lastError;
-            for (const source of [...new Set(sources)]) {
-                try {
-                    const response = await fetch(source, {signal: job.controller.signal, cache: 'force-cache', priority: job.priority === 'foreground' ? 'high' : 'low',
-                        headers: job.priority === 'foreground' || source !== local ? {} : {'X-Priority': 'background'}});
-                    const contentType = response.headers.get('Content-Type') || '';
-                    if (!response.ok || (source === local && !contentType.startsWith('image/')) || /text\/html|application\/json/i.test(contentType)) throw new Error(`图片读取失败（HTTP ${response.status}）`);
-                    const blob = await response.blob();
-                    if (job.controller.signal.aborted) throw aborted();
-                    await this.store.put(key, revision, blob);
-                    return {blob, cached: false, timing: response.headers.get('Server-Timing') || ''};
-                } catch (error) {
-                    if (error.name === 'AbortError') throw error;
-                    lastError = error;
+            for (;;) {
+                const priority = job.priority;
+                const sources = direct && (priority !== 'foreground' || legacyDirect) ? [direct, local] : [local];
+                let lastError, promoted = false;
+                for (const source of [...new Set(sources)]) {
+                    const localOrigin = new URL(local).origin;
+                    const release = await this.acquire(job, new URL(source, local).origin === localOrigin);
+                    if (priority !== job.priority) { release(); promoted = true; break; }
+                    const attempt = {controller: new AbortController(), background: priority !== 'foreground', promoted: false};
+                    job.attempt = attempt;
+                    const cancel = () => attempt.controller.abort();
+                    job.controller.signal.addEventListener('abort', cancel, {once: true});
+                    try {
+                        if (job.controller.signal.aborted) throw aborted();
+                        const response = await fetch(source, {signal: attempt.controller.signal, cache: 'force-cache', priority: attempt.background ? 'low' : 'high',
+                            headers: !attempt.background || source !== local ? {} : {'X-Priority': 'background'}});
+                        // A redirect has released the application's HTTP
+                        // connection. CDN body transfers use their own pool.
+                        if (response.url && new URL(response.url, local).origin !== localOrigin) release();
+                        const contentType = response.headers.get('Content-Type') || '';
+                        if (!response.ok || (source === local && !contentType.startsWith('image/')) || /text\/html|application\/json/i.test(contentType)) {
+                            await response.body?.cancel();
+                            throw new Error(`图片读取失败（HTTP ${response.status}）`);
+                        }
+                        const blob = await response.blob();
+                        if (job.controller.signal.aborted || attempt.controller.signal.aborted) throw aborted();
+                        // Persistence is useful for the next visit, not a
+                        // prerequisite for displaying bytes already received.
+                        this.store.put(key, revision, blob).catch(() => {});
+                        return {blob, cached: false, timing: response.headers.get('Server-Timing') || ''};
+                    } catch (error) {
+                        if (attempt.promoted && !job.controller.signal.aborted) { promoted = true; break; }
+                        if (error.name === 'AbortError') throw error;
+                        lastError = error;
+                    } finally {
+                        job.controller.signal.removeEventListener('abort', cancel);
+                        if (job.attempt === attempt) job.attempt = null;
+                        release();
+                    }
                 }
+                if (!promoted) throw lastError || new Error('图片读取失败');
             }
-            throw lastError || new Error('图片读取失败');
         }
         forget(item) { return this.store.remove(identity(item)); }
         // A display owns only its object URL. Replacing the preview never

@@ -2,9 +2,60 @@ package workqueue
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
+
+type observedWaitContext struct {
+	context.Context
+	waiting chan struct{}
+	once    sync.Once
+}
+
+func (c *observedWaitContext) Done() <-chan struct{} {
+	c.once.Do(func() { close(c.waiting) })
+	return c.Context.Done()
+}
+
+func TestQueuedPromotionWakesReservedSlotAndPreservesBackgroundChildren(t *testing.T) {
+	base, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	g := New(2)
+	background, err := g.Acquire(Background(base))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer background()
+	observed := &observedWaitContext{Context: base, waiting: make(chan struct{})}
+	ctx, promote := WithPromotion(Background(observed))
+	child := Background(ctx)
+	result := make(chan error, 1)
+	go func() {
+		release, err := g.Acquire(ctx)
+		if err == nil {
+			release()
+			release()
+		}
+		result <- err
+	}()
+	select {
+	case <-observed.waiting:
+	case <-base.Done():
+		t.Fatal("producer did not queue")
+	}
+	promote()
+	promote()
+	if err := <-result; err != nil {
+		t.Fatalf("promoted producer stayed blocked: %v", err)
+	}
+	if IsBackground(ctx) || !IsBackground(child) || PromotionDone(child) != nil {
+		t.Fatal("promotion did not preserve explicitly speculative children")
+	}
+	if stats := g.Stats(); stats.Active != 1 || stats.Background != 1 || stats.Waiting != 0 {
+		t.Fatalf("promotion leaked gate capacity: %+v", stats)
+	}
+}
 
 func TestReservationCancellationAndRelease(t *testing.T) {
 	g := New(2)

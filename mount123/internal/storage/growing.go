@@ -35,6 +35,7 @@ type growingFlight struct {
 	changed                  chan struct{}
 	done                     chan struct{}
 	cancel                   context.CancelFunc
+	promote                  func()
 }
 
 const (
@@ -161,6 +162,9 @@ func (c *Cache) acquireGrowing(ctx, lifetime context.Context, key string, size i
 			reader := &GrowingHandle{flight: f, file: file, size: size, closedC: make(chan struct{}), foreground: !workqueue.IsBackground(ctx)}
 			f.mu.Unlock()
 			c.mu.Unlock()
+			if reader.foreground {
+				f.promote()
+			}
 			return reader, nil
 		}
 		owner := c.fillOwnerLocked(ctx, key, foregroundClass(workqueue.IsBackground(ctx)))
@@ -191,9 +195,14 @@ func (c *Cache) acquireGrowing(ctx, lifetime context.Context, key string, size i
 			c.mu.Unlock()
 			return nil, err
 		}
-		fillCtx, cancel := context.WithCancel(WithCacheOwner(lifetime, owner))
+		fillCtx, promote := workqueue.WithPromotion(WithCacheOwner(lifetime, owner))
+		if !workqueue.IsBackground(ctx) {
+			promote()
+		}
+		fillCtx, cancel := context.WithCancel(fillCtx)
 		class := foregroundClass(workqueue.IsBackground(ctx))
 		f := &growingFlight{cache: c, id: id, key: key, temp: writer.Name(), target: ownedFillPath(key, c.filename(key, class), owner), size: size, class: class, owner: owner, refs: 1, retain: retain, changed: make(chan struct{}), done: make(chan struct{}), cancel: cancel}
+		f.promote = promote
 		c.growing[id] = f
 		c.reserved += size
 		c.reserveSourceLocked(owner, size)

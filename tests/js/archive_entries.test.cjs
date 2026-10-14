@@ -37,14 +37,14 @@ function setup({cursor = 'A:60', complete = true} = {}) {
     }
     window.IntersectionObserver = IntersectionObserver;
     vm.runInNewContext(fs.readFileSync('mount123/internal/webserve/static/js/archive_entries.js', 'utf8'), {
-        document, window, URL, location: {href: 'http://test/archive/A'}, AbortController, IntersectionObserver,
+        document, window, URL, location: {href: 'http://test/archive/A'}, AbortController, DOMException, IntersectionObserver,
         CustomEvent: class {constructor(type, options = {}) {this.type = type; this.detail = options.detail;}},
         setTimeout: (fn, delay) => {const id = ++timerId; timers.set(id, {fn, delay}); return id;},
         clearTimeout: id => timers.delete(id),
         // Deliberately let aborted requests complete: the owner check must
         // protect the new DOM even when a fetch implementation ignores abort.
         fetch: (url, options) => new Promise(resolve => requests.push({url: String(url), signal: options.signal,
-            respond(page, ok = true) {resolve({ok, status: 500, json: async () => page});}})),
+            respond(page, ok = true) {resolve({ok, status: ok ? 200 : 500, headers: {get: () => null}, json: async () => page});}})),
     });
     return {...state, document, window, requests, observers, timers, notices,
         get view() {return state.view;},
@@ -53,7 +53,7 @@ function setup({cursor = 'A:60', complete = true} = {}) {
             state.view = makeView(name);
             document.dispatchEvent({type: 'cloudarchive:navigated'});
         },
-        runPoll() { const [id, timer] = timers.entries().next().value; timers.delete(id); timer.fn(); },
+        runPoll() { const [id, timer] = [...timers].sort((a, b) => a[1].delay - b[1].delay)[0]; timers.delete(id); timer.fn(); },
     };
 }
 
@@ -80,7 +80,7 @@ test('a delayed archive reply cannot append to a new directory or overwrite its 
     assert.equal(s.window.hasArchiveNextPage(), false);
 });
 
-test('a growing archive with no initial cursor is pageable and empty pages poll once per second', async () => {
+test('a growing archive with no initial cursor waits with bounded backoff and cancels on navigation', async () => {
     const s = setup({cursor: '', complete: false});
     assert.equal(s.window.hasArchiveNextPage(), true);
     s.observers[0].intersect();
@@ -88,12 +88,12 @@ test('a growing archive with no initial cursor is pageable and empty pages poll 
     s.requests[0].respond({items: [], next_cursor: 'opaque:0', complete: false});
     await tick();
     assert.equal(s.observers[0].targets.size, 0, 'empty response must not immediately rearm the observer');
-    assert.equal(s.timers.size, 1);
-    assert.equal([...s.timers.values()][0].delay, 1000);
+    assert.deepEqual([...s.timers.values()].map(t => t.delay).sort((a, b) => a - b), [1000, 90000]);
     s.runPoll();
+    await tick();
     s.requests[1].respond({items: [], next_cursor: 'opaque:0', complete: false});
     await tick();
-    assert.equal(s.timers.size, 1);
+    assert.deepEqual([...s.timers.values()].map(t => t.delay).sort((a, b) => a - b), [2000, 90000]);
     s.navigate('B');
     assert.equal(s.timers.size, 0, 'navigation cancels every poll');
     s.observers[0].intersect();
@@ -121,7 +121,7 @@ test('navigation from a page-complete listener cannot leave an old archive poll 
     const s = setup({complete: false});
     s.document.addEventListener('files:load-complete', () => s.navigate('B'));
     const pending = s.window.loadArchiveNextPage();
-    s.requests[0].respond({items: [], next_cursor: 'A:60', complete: false});
+    s.requests[0].respond({items: [], complete: true});
     await pending;
     assert.equal(s.timers.size, 0);
     assert.equal(s.observers[0].targets.size, 0);
