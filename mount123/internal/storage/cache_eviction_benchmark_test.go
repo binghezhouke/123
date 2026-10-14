@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func BenchmarkEvictFindsRareSpeculativeEntryAmongHotCache(b *testing.B) {
+func BenchmarkEvictHotOverflowWithoutScanningWholeCache(b *testing.B) {
 	const entries = 20_000
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -31,6 +31,9 @@ func newEvictionBenchmarkCache(count int) *Cache {
 		e := &cacheEntry{path: "/nonexistent/cache-entry", size: 1, class: class}
 		e.lru = c.lru[class].PushFront(id)
 		c.entries[id] = e
+		if class == cacheHot {
+			c.hotUsed += e.size
+		}
 	}
 	return c
 }

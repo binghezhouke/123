@@ -77,6 +77,8 @@ func (c *Cache) Stats() iostats.CacheSummary {
 		Entries:               uint64(len(c.entries)),
 		IndexBudgetBytes:      c.indexBudget,
 		IndexUsedBytes:        c.indexUsed,
+		HotUsedBytes:          c.hotUsed,
+		HotBudgetBytes:        c.hotBudgetLocked(),
 		CapacityEvictions:     c.telemetry.capacityEvictions,
 		CapacityEvictionBytes: c.telemetry.capacityEvictionBytes,
 		ENOSPC:                c.telemetry.enospc,

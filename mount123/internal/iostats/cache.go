@@ -21,6 +21,8 @@ type CacheSummary struct {
 	PinnedBytes                int64                   `json:"pinned_bytes"`
 	IndexBudgetBytes           int64                   `json:"index_budget_bytes"`
 	IndexUsedBytes             int64                   `json:"index_used_bytes"`
+	HotUsedBytes               int64                   `json:"hot_used_bytes"`
+	HotBudgetBytes             int64                   `json:"hot_budget_bytes"`
 	Classes                    []CacheClassSummary     `json:"classes"`
 	IndexKinds                 []CacheIndexKindSummary `json:"index_kinds"`
 	CapacityEvictions          uint64                  `json:"capacity_evictions"`

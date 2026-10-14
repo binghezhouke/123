@@ -64,6 +64,7 @@ type Cache struct {
 	statfs              func(string) (int64, error)
 	indexBudget         int64
 	indexUsed           int64
+	hotUsed             int64
 	reservedIndex       int64
 	entries             map[string]*cacheEntry
 	lru                 [cacheClassCount]*list.List // one newest-first queue per retention class
@@ -540,6 +541,9 @@ func (c *Cache) load() error {
 			if previous.class == cacheIndex {
 				c.indexUsed -= previous.size
 			}
+			if previous.class == cacheHot {
+				c.hotUsed -= previous.size
+			}
 			if previous.rangeID != "" {
 				c.removeRangeLocked(previous.rangeID, item.id)
 			}
@@ -557,6 +561,9 @@ func (c *Cache) load() error {
 		}
 		if item.entry.class == cacheIndex {
 			c.indexUsed += item.entry.size
+		}
+		if item.entry.class == cacheHot {
+			c.hotUsed += item.entry.size
 		}
 		if item.entry.rangeID != "" {
 			c.addRangeLocked(&cacheRange{identity: item.entry.rangeID, start: item.entry.rangeStart, end: item.entry.rangeEnd, id: item.id})
@@ -581,14 +588,15 @@ func (c *Cache) load() error {
 func (c *Cache) evictLocked(need int64) error {
 	for c.used+c.reserved+need > c.max {
 		var victim *list.Element
+		// Old hot history must not monopolize the cache forever. Reclaim its
+		// oldest unpinned entry while it exceeds the protection budget, so a
+		// new speculative working set can survive its first reuse. This is an
+		// eviction preference, not an eager purge or a second capacity limit.
+		if c.hotUsed > c.hotBudgetLocked() {
+			victim = c.oldestUnpinnedLocked(cacheHot)
+		}
 		for class := cacheSpeculative; class <= cacheIndex && victim == nil; class++ {
-			for node := c.lru[class].Back(); node != nil; node = node.Prev() {
-				id := node.Value.(string)
-				if e := c.entries[id]; e != nil && e.pins == 0 {
-					victim = node
-					break
-				}
-			}
+			victim = c.oldestUnpinnedLocked(class)
 		}
 		if victim == nil {
 			c.recordENOSPCLocked()
@@ -601,6 +609,22 @@ func (c *Cache) evictLocked(need int64) error {
 		}
 		c.recordCapacityEvictionLocked(id, e)
 		c.removeEntryLocked(id, e)
+	}
+	return nil
+}
+
+// Protect up to 80% of capacity not currently occupied by indexes. Unused
+// index budget stays available to data; subtraction avoids integer overflow.
+func (c *Cache) hotBudgetLocked() int64 {
+	data := max(int64(0), c.max-c.indexUsed)
+	return data - (data/5 + min(int64(1), data%5))
+}
+
+func (c *Cache) oldestUnpinnedLocked(class cacheClass) *list.Element {
+	for node := c.lru[class].Back(); node != nil; node = node.Prev() {
+		if e := c.entries[node.Value.(string)]; e != nil && e.pins == 0 {
+			return node
+		}
 	}
 	return nil
 }
@@ -706,6 +730,9 @@ func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
 			c.recordIndexDemotionLocked(e)
 		}
 	}
+	if e.class == cacheHot {
+		c.hotUsed -= e.size
+	}
 	if e.ownerLRU != nil {
 		s := c.sources[e.owner]
 		s.lru[e.class].Remove(e.ownerLRU)
@@ -714,6 +741,9 @@ func (c *Cache) setClassLocked(id string, e *cacheEntry, class cacheClass) {
 	e.class = class
 	if class == cacheIndex {
 		c.indexUsed += e.size
+	}
+	if class == cacheHot {
+		c.hotUsed += e.size
 	}
 }
 
@@ -730,6 +760,9 @@ func (c *Cache) removeEntryLocked(id string, e *cacheEntry) {
 	c.used -= e.size
 	if e.class == cacheIndex {
 		c.indexUsed -= e.size
+	}
+	if e.class == cacheHot {
+		c.hotUsed -= e.size
 	}
 }
 
@@ -908,6 +941,9 @@ func (c *Cache) acquireWithProgress(ctx context.Context, key string, size int64,
 					c.used += size
 					if entry.class == cacheIndex {
 						c.indexUsed += size
+					}
+					if entry.class == cacheHot {
+						c.hotUsed += size
 					}
 					file, openErr := os.Open(finalPath)
 					if openErr != nil {

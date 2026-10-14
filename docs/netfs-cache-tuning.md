@@ -43,6 +43,16 @@ The `cache` snapshot includes:
   last-resort removal of a still-protected object. `-index-budget-mib` sets the
   share; the default is the cache limit divided by eight, with no 64 MiB
   ceiling, so a 50 GiB cache protects 6.25 GiB of metadata.
+- `hot_used_bytes` and `hot_budget_bytes` report hot residency and its
+  protection budget: 80% of capacity not currently occupied by indexes. Under
+  global capacity pressure, the oldest unpinned hot entries above that budget
+  are eligible before speculative data, allowing a new browsing working set to
+  survive reuse. Below the budget, speculative data is still evicted first.
+  This is a bounded protection preference, not a hard partition or an eager
+  purge: unused space remains available, indexes retain their existing priority,
+  and pinned entries are never evicted. The initial 80% share is a conservative
+  policy choice, not a measured optimum; use refault and eviction deltas to
+  evaluate it. Per-source limits continue to apply independently.
 - Capacity evictions and bytes, by retention class. Explicit removals and
   corruption cleanup are not capacity evictions. Startup capacity trimming is
   outside operation counters.

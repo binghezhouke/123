@@ -176,6 +176,9 @@ func (c *Cache) ReplaceArchiveIndex(ctx context.Context, key string, data []byte
 					if oldClass == cacheIndex {
 						c.indexUsed += delta
 					}
+					if oldClass == cacheHot {
+						c.hotUsed += delta
+					}
 					old.size = size
 					if newClass != oldClass {
 						c.setClassLocked(id, old, newClass)

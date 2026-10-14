@@ -261,6 +261,9 @@ func (f *growingFlight) run(ctx context.Context, writer *os.File, fill func(cont
 		c.entries[f.id] = entry
 		c.addSourceEntryLocked(f.id, entry)
 		c.used += f.size
+		if entry.class == cacheHot {
+			c.hotUsed += f.size
+		}
 		_ = c.trimSourceLocked(f.owner, 0)
 		delete(c.growing, f.id)
 		f.mu.Lock()
