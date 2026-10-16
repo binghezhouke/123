@@ -183,7 +183,10 @@ func (br *bufVolumeReader) findSig() (int, error) {
 		}
 		n := bytes.IndexByte(br.buf[br.i:br.n], sigPrefix[0])
 		if n < 0 {
-			br.off += int64(n)
+			// No candidate remains in this buffer. Consume it so the next
+			// iteration refills and the SFX scan limit keeps advancing.
+			br.off += int64(br.n - br.i)
+			br.i = br.n
 			continue
 		}
 		br.i += n
